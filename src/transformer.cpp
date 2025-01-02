@@ -11,7 +11,9 @@
 #include <omp.h>
 #include <stdexcept>
 
+#ifdef USE_CUDA
 extern cublasHandle_t cublas_handle;
+#endif
 
 // TransformerConfig implementation
 TransformerConfig::TransformerConfig(size_t vocab_size, size_t max_seq_length,
@@ -182,10 +184,12 @@ Transformer::Transformer(const TransformerConfig &config) : config(config) {
   std::cout << "- Use CUDA: " << config.use_cuda << std::endl;
 
   if (config.use_cuda) {
+    #ifdef USE_CUDA
     std::cout << "\nInitializing CUDA..." << std::endl;
     initialize_cuda();
     cuda_initialized = true;
     std::cout << "CUDA initialization complete" << std::endl;
+    #endif
   }
 
   // Initialize token embedding with memory pooling
@@ -212,6 +216,11 @@ Transformer::Transformer(const TransformerConfig &config) : config(config) {
   std::cout << "\nInitializing final layer normalization..." << std::endl;
   final_ln = std::make_unique<LayerNorm>(config.hidden_size);
   std::cout << "Final layer normalization initialized" << std::endl;
+
+  // Initialize language model head
+  std::cout << "\nInitializing language model head..." << std::endl;
+  lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+  std::cout << "Language model head initialized" << std::endl;
 
   // Enable half-precision training if configured
   if (config.use_fp16) {
@@ -298,32 +307,15 @@ Matrix Transformer::forward(const std::vector<int> &input_tokens, bool use_cache
     std::cout << "\nApplying final layer normalization..." << std::endl;
     hidden_states = final_ln->forward(hidden_states);
     std::cout << "Final normalization complete" << std::endl;
+    std::cout << "Hidden states dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
 
-    // Project to logits
-    std::cout << "\nComputing logits..." << std::endl;
-    Matrix logits(hidden_states.rows(), config.vocab_size);
-    std::cout << "Logits matrix allocated: " << logits.rows() << "x" << logits.cols() << std::endl;
-
-    // Get embedding weights for logits computation
-    Matrix logits_weights = token_embedding->get_embedding_table();
-    if (logits_weights.empty()) {
-        throw std::runtime_error("Embedding table is empty when computing logits");
+    // Project to logits using language model head
+    std::cout << "\nComputing logits using language model head..." << std::endl;
+    if (!lm_head) {
+        throw std::runtime_error("Language model head not initialized");
     }
-
-    // CPU matrix multiplication
-    std::cout << "Computing logits on CPU using OpenMP..." << std::endl;
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < logits.rows(); i++) {
-        for (size_t j = 0; j < config.vocab_size; j++) {
-            float sum = 0.0f;
-            #pragma omp simd reduction(+:sum)
-            for (size_t k = 0; k < config.hidden_size; k++) {
-                sum += hidden_states(i, k) * logits_weights(j, k);
-            }
-            logits(i, j) = sum;
-        }
-    }
-    std::cout << "Logits computation complete" << std::endl;
+    Matrix logits = lm_head->forward(hidden_states);
+    std::cout << "Logits computed with dimensions: " << logits.rows() << "x" << logits.cols() << std::endl;
 
     // Make a copy and cleanup
     std::cout << "\nCleaning up..." << std::endl;
@@ -871,33 +863,16 @@ Matrix Transformer::forward_cuda(const std::vector<int> &input_tokens, bool use_
         std::cout << "\nApplying final layer normalization..." << std::endl;
         hidden_states = final_ln->forward(hidden_states);
         std::cout << "Final normalization complete" << std::endl;
+        std::cout << "Hidden states dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
 
-        // Project to logits
-        std::cout << "\nComputing logits..." << std::endl;
-        Matrix logits(hidden_states.rows(), config.vocab_size);
-        std::cout << "Logits matrix allocated: " << logits.rows() << "x" << logits.cols() << std::endl;
-
-        // Get embedding weights for logits computation
-        Matrix logits_weights = token_embedding->get_embedding_table();
-        if (logits_weights.empty()) {
-            throw std::runtime_error("Embedding table is empty when computing logits");
+        // Project to logits using language model head
+        std::cout << "\nComputing logits using language model head..." << std::endl;
+        if (!lm_head) {
+            throw std::runtime_error("Language model head not initialized");
         }
+        Matrix logits = lm_head->forward(hidden_states);
+        std::cout << "Logits computed with dimensions: " << logits.rows() << "x" << logits.cols() << std::endl;
 
-        // CPU matrix multiplication
-        std::cout << "Computing logits on CPU using OpenMP..." << std::endl;
-        #pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < logits.rows(); i++) {
-            for (size_t j = 0; j < config.vocab_size; j++) {
-                float sum = 0.0f;
-                #pragma omp simd reduction(+:sum)
-                for (size_t k = 0; k < config.hidden_size; k++) {
-                    sum += hidden_states(i, k) * logits_weights(j, k);
-                }
-                logits(i, j) = sum;
-            }
-        }
-        std::cout << "Logits computation complete" << std::endl;
-        
         // Make a copy and cleanup
         std::cout << "\nCleaning up..." << std::endl;
         Matrix result = logits;
@@ -922,18 +897,19 @@ Matrix TransformerLayer::backward_cuda(const Matrix &grad,
 #ifdef USE_CUDA
   throw std::runtime_error("CUDA implementation not available");
 #else
-  return backward(grad, input);
+  throw std::runtime_error("CUDA not enabled");
 #endif
 }
 
 Transformer::~Transformer() {
   // Disable logging before CUDA cleanup
   Logger::getInstance().disableLogging();
-
+  #ifdef USE_CUDA 
   if (cuda_initialized) {
     cleanup_cuda();
     cuda_initialized = false;
   }
+  #endif
 }
 
 Transformer::Transformer(const Transformer &other) : config(other.config) {
