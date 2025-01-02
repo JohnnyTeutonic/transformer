@@ -374,7 +374,7 @@ int main(int argc, char *argv[]) {
     config.hidden_size = 360;
     config.num_heads = 12;
     config.num_layers = 6;
-    config.use_cuda = false;
+    config.use_cuda = true;
     config.use_flash_attention = true;
     config.use_rope = true;
     config.use_sliding_window = true;
