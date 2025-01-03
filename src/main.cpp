@@ -82,7 +82,7 @@ int main(int argc, char *argv[]) {
         config.window_size = 256;
         config.use_fp16 = true;
         config.head_dim = config.hidden_size / config.num_heads;  // Add explicit head_dim calculation
-        config.batch_size = 2;
+        config.batch_size = 8;
         config.num_epochs = 30;
         config.log_level = LogLevel::DEBUG;  // Set desired log level
 
@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
 
         // Training loop
         const size_t NUM_EPOCHS = 100;
-        const size_t BATCH_SIZE = 32;
+        const size_t BATCH_SIZE = 5;
         const size_t VALIDATION_INTERVAL = 100;  // Validate every 100 batches
         size_t global_step = 0;
         
@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
                 }
                 
                 batch_loss /= input_tokens.size();
-                
+                std::cout << "batch loss: " << batch_loss << std::endl;
                 // Update learning rate
                 float loss_ratio = batch_loss / (prev_loss + 1e-10f);
                 learning_rate = adjust_learning_rate(learning_rate, loss_ratio, global_step);
@@ -189,6 +189,7 @@ int main(int argc, char *argv[]) {
                 // Update epoch statistics
                 epoch_loss += batch_loss;
                 num_batches++;
+                std::cout << "global step: " << global_step << std::endl;
                 global_step++;
                 
                 // Print progress
@@ -199,7 +200,8 @@ int main(int argc, char *argv[]) {
                 }
                 
                 // Validation step
-                if (global_step % VALIDATION_INTERVAL == 0) {
+                if (global_step % 5 == 0) {
+                    std::cout << "validation step" << std::endl;
                     float val_loss = 0.0f;
                     float val_accuracy = 0.0f;
                     size_t val_batches = 0;
@@ -207,6 +209,7 @@ int main(int argc, char *argv[]) {
                     
                     // Validation loop
                     while (val_batches < MAX_VAL_BATCHES) {
+                        std::cout << "validation batch: " << val_batches << std::endl;
                         auto val_batch = get_batch(val_dataset, BATCH_SIZE);
                         
                         // Process validation batch
@@ -240,6 +243,7 @@ int main(int argc, char *argv[]) {
                             
                             batch_val_loss += compute_batch_loss(val_logits, val_target_slice);
                             val_accuracy += calculate_accuracy(val_logits, val_target_slice);
+                            std::cout << "val accuracy: " << val_accuracy << std::endl;
                         }
                         
                         batch_val_loss /= val_input_tokens.size();
