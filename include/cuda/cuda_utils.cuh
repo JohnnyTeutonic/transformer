@@ -8,18 +8,14 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #else
-#include "/usr/local/cuda/include/cuda.h"
-#include "/usr/local/cuda/include/cuda_runtime.h"
-#include "/usr/local/cuda/include/cublas_v2.h"
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
 #endif
 
 // Global cuBLAS handle
 extern cublasHandle_t cublas_handle;
 
-// CUDA initialization and cleanup functions
-void initialize_cuda();
-void cleanup_cuda();
-
+// CUDA error checking macro
 #define CUDA_CHECK(call) \
   do { \
     cudaError_t err = call; \
@@ -30,6 +26,7 @@ void cleanup_cuda();
     } \
   } while(0)
 
+// cuBLAS error checking macro
 #define CUBLAS_CHECK(call) \
   do { \
     cublasStatus_t status = call; \
@@ -39,3 +36,7 @@ void cleanup_cuda();
       exit(EXIT_FAILURE); \
     } \
   } while(0)
+
+// CUDA initialization and cleanup functions
+void initialize_cuda();
+void cleanup_cuda();

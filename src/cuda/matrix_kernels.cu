@@ -1,110 +1,81 @@
 #include "../../include/cuda/cuda_utils.cuh"
 #include "../../include/cuda/matrix_kernels.cuh"
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
-__global__ void matrix_add_kernel(const float* a, const float* b, float* result,
-                                int rows, int cols) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total_elements = rows * cols;
-    
-    if (idx < total_elements) {
-        result[idx] = a[idx] + b[idx];
-    }
-}
-
-__global__ void matrix_sub_kernel(const float* a, const float* b, float* result,
-                                int rows, int cols) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total_elements = rows * cols;
-    
-    if (idx < total_elements) {
-        result[idx] = a[idx] - b[idx];
-    }
-}
-
-__global__ void matrix_scalar_mul_kernel(const float* a, float scalar, float* result,
-                                       int total_elements) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx < total_elements) {
-        result[idx] = a[idx] * scalar;
-    }
-}
-
-__global__ void matrix_mul_kernel(const float* a, const float* b, float* result,
-                                int m, int n, int k) {
-    const int row = blockIdx.y * blockDim.y + threadIdx.y;
-    const int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (row < m && col < k) {
-        float sum = 0.0f;
-        for (int i = 0; i < n; ++i) {
-            sum += a[row * n + i] * b[i * k + col];
-        }
-        result[row * k + col] = sum;
-    }
-}
-
-__global__ void matrix_transpose_kernel(const float* a, float* result,
-                                      int rows, int cols) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int idy = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (idx < cols && idy < rows) {
-        result[idx * rows + idy] = a[idy * cols + idx];
-    }
-}
+// External cuBLAS handle declaration
+extern cublasHandle_t cublas_handle;
 
 void launch_matrix_add(const float* a, const float* b, float* result,
                       int rows, int cols) {
     const int total_elements = rows * cols;
-    const int threads_per_block = 256;
-    const int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     
-    matrix_add_kernel<<<blocks, threads_per_block>>>(a, b, result, rows, cols);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Copy a to result first
+    CUDA_CHECK(cudaMemcpy(result, a, total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // Use cublasSaxpy: result = a + b
+    float alpha = 1.0f;
+    CUBLAS_CHECK(cublasSaxpy(cublas_handle, total_elements,
+                            &alpha, b, 1, result, 1));
 }
 
 void launch_matrix_sub(const float* a, const float* b, float* result,
                       int rows, int cols) {
     const int total_elements = rows * cols;
-    const int threads_per_block = 256;
-    const int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     
-    matrix_sub_kernel<<<blocks, threads_per_block>>>(a, b, result, rows, cols);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Copy a to result first
+    CUDA_CHECK(cudaMemcpy(result, a, total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // Use cublasSaxpy with negative alpha: result = a - b
+    float alpha = -1.0f;
+    CUBLAS_CHECK(cublasSaxpy(cublas_handle, total_elements,
+                            &alpha, b, 1, result, 1));
 }
 
 void launch_matrix_scalar_mul(const float* a, float scalar, float* result,
                             int total_elements) {
-    const int threads_per_block = 256;
-    const int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
+    // Copy a to result first
+    CUDA_CHECK(cudaMemcpy(result, a, total_elements * sizeof(float), cudaMemcpyDeviceToDevice));
     
-    matrix_scalar_mul_kernel<<<blocks, threads_per_block>>>(a, scalar, result, total_elements);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Use cublasSscal: result = scalar * a
+    CUBLAS_CHECK(cublasSscal(cublas_handle, total_elements,
+                            &scalar, result, 1));
 }
 
 void launch_matrix_mul(const float* a, const float* b, float* result,
                       int m, int n, int k) {
-    dim3 block_size(16, 16);
-    dim3 num_blocks((k + block_size.x - 1) / block_size.x,
-                   (m + block_size.y - 1) / block_size.y);
+    // cuBLAS uses column-major order, so we need to transpose the operation
+    // C = A * B becomes C^T = B^T * A^T in column-major order
+    float alpha = 1.0f;
+    float beta = 0.0f;
     
-    matrix_mul_kernel<<<num_blocks, block_size>>>(a, b, result, m, n, k);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Perform C = A * B using cuBLAS
+    // Note: cuBLAS expects matrices in column-major order, but our matrices are in row-major order
+    // So we compute: C^T = B^T * A^T which is equivalent to C = A * B in row-major order
+    CUBLAS_CHECK(cublasSgemm(cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            n,    // Number of rows of C
+                            m,    // Number of columns of C
+                            k,    // Number of columns of A
+                            &alpha,
+                            b, n,    // Leading dimension of B
+                            a, k,    // Leading dimension of A
+                            &beta,
+                            result, n));  // Leading dimension of C
 }
 
 void launch_matrix_transpose(const float* a, float* result,
                            int rows, int cols) {
-    dim3 block_size(16, 16);
-    dim3 num_blocks((cols + block_size.x - 1) / block_size.x,
-                   (rows + block_size.y - 1) / block_size.y);
+    // Use cublasSgeam for matrix transpose
+    float alpha = 1.0f;
+    float beta = 0.0f;
     
-    matrix_transpose_kernel<<<num_blocks, block_size>>>(a, result, rows, cols);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUBLAS_CHECK(cublasSgeam(cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            rows, cols,
+                            &alpha,
+                            a, cols,    // Input matrix
+                            &beta,
+                            nullptr, rows,    // No second input matrix
+                            result, rows));   // Output matrix
 } 
