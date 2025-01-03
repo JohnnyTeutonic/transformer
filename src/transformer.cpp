@@ -775,7 +775,18 @@ Matrix TransformerLayer::backward(const Matrix& grad_output,
         Matrix d_ffn;
         if (config.use_cuda) {
             std::cout << "Feed forward backward using cuda" << std::endl;
-            d_ffn = feed_forward->backward_cuda(grad_output, ffn_normalized);
+            // Ensure gradient matches hidden_size dimension
+            if (grad_output.cols() != config.hidden_size) {
+                Matrix reshaped_grad(grad_output.rows(), config.hidden_size);
+                for (size_t i = 0; i < grad_output.rows(); ++i) {
+                    for (size_t j = 0; j < config.hidden_size; ++j) {
+                        reshaped_grad(i, j) = grad_output(i, j);
+                    }
+                }
+                d_ffn = feed_forward->backward_cuda(reshaped_grad, ffn_normalized);
+            } else {
+                d_ffn = feed_forward->backward_cuda(grad_output, ffn_normalized);
+            }
         } else {
             std::cout << "Feed forward backward using cpu" << std::endl;
             d_ffn = feed_forward->backward(grad_output, ffn_normalized);

@@ -201,8 +201,16 @@ Matrix FeedForward::backward_cuda(const Matrix& grad_output, const Matrix& input
 
     // If dimensions don't match, we need to transpose the gradient
     Matrix grad_output_reshaped = grad_output;
-    if (grad_output.cols() != hidden_size) {
+    if (grad_output.cols() != hidden_size && grad_output.rows() == hidden_size) {
         grad_output_reshaped = grad_output.transpose();
+    } else if (grad_output.cols() == hidden_size) {
+        // Already in correct orientation
+        grad_output_reshaped = grad_output;
+    } else {
+        throw std::runtime_error("Neither dimension of grad_output matches hidden_size. " 
+                                "grad_output: " + std::to_string(grad_output.rows()) + "x" + 
+                                std::to_string(grad_output.cols()) + ", hidden_size: " + 
+                                std::to_string(hidden_size));
     }
 
     // Validate dimensions again after potential transpose
