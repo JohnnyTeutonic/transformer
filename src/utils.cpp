@@ -7,6 +7,8 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
+#include <random>
 
 void clip_gradients(std::vector<Matrix>& gradients, float threshold) {
     float total_norm = 0.0f;
@@ -84,7 +86,7 @@ bool validate_input_sequence(const std::vector<int>& tokens, size_t vocab_size, 
 float compute_batch_loss(const Matrix& logits, const Matrix& targets) {
     float loss = 0.0f;
     const float epsilon = 1e-10f;
-    const float temperature = 0.8f;
+    const float temperature = 1.2f;;
     
     for (size_t i = 0; i < logits.rows(); i++) {
         float max_logit = logits(i, 0);
@@ -254,4 +256,113 @@ void analyze_token_mappings(const std::vector<std::pair<std::string, std::string
     }
     
     std::cout << "\n=== End Token Mapping Analysis ===\n\n";
+}
+
+std::vector<std::pair<std::string, std::string>> load_data_pairs(const std::string& file_path) {
+    std::vector<std::pair<std::string, std::string>> data_pairs;
+    std::ifstream file(file_path);
+    
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + file_path);
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t delimiter_pos = line.find('|');
+        if (delimiter_pos != std::string::npos) {
+            std::string input = line.substr(0, delimiter_pos);
+            std::string output = line.substr(delimiter_pos + 1);
+            // Trim any whitespace
+            input.erase(0, input.find_first_not_of(" \t\r\n"));
+            input.erase(input.find_last_not_of(" \t\r\n") + 1);
+            output.erase(0, output.find_first_not_of(" \t\r\n"));
+            output.erase(output.find_last_not_of(" \t\r\n") + 1);
+            data_pairs.emplace_back(input, output);
+        }
+    }
+
+    return data_pairs;
+}
+
+DataSet create_dataset(const std::string& mode) {
+    DataSet dataset;
+    std::filesystem::path file_path;
+    
+    // Get the current working directory and go up one level
+    std::filesystem::path current_path = std::filesystem::current_path();
+    std::filesystem::path parent_path = current_path.parent_path();
+    
+    if (mode == "train") {
+        file_path = parent_path / "data" / "training_pairs.txt";
+    } else if (mode == "validation") {
+        file_path = parent_path / "data" / "validation_pairs.txt";
+    } else {
+        throw std::invalid_argument("Invalid mode. Use 'train' or 'validation'");
+    }
+    
+    // Check if file exists
+    if (!std::filesystem::exists(file_path)) {
+        throw std::runtime_error("File not found: " + file_path.string() + 
+                               "\nCurrent directory: " + current_path.string() +
+                               "\nParent directory: " + parent_path.string());
+    }
+    
+    std::cout << "Loading dataset from: " << file_path << std::endl;
+    dataset.pairs = load_data_pairs(file_path.string());
+    dataset.size = dataset.pairs.size();
+    dataset.current_index = 0;
+    
+    return dataset;
+}
+
+std::vector<std::pair<std::string, std::string>> get_batch(DataSet& dataset, size_t batch_size) {
+    std::vector<std::pair<std::string, std::string>> batch;
+    batch.reserve(batch_size);
+    
+    for (size_t i = 0; i < batch_size && dataset.current_index < dataset.size; ++i) {
+        batch.push_back(dataset.pairs[dataset.current_index++]);
+        
+        // Reset index if we've reached the end
+        if (dataset.current_index >= dataset.size) {
+            dataset.current_index = 0;
+            // Shuffle the dataset using modern C++ random facilities
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            std::shuffle(dataset.pairs.begin(), dataset.pairs.end(), gen);
+        }
+    }
+    
+    return batch;
+}
+
+float calculate_accuracy(const Matrix& logits, const Matrix& targets) {
+    size_t correct = 0;
+    size_t total = logits.rows();
+    
+    for (size_t i = 0; i < total; ++i) {
+        size_t predicted = 0;
+        float max_val = logits(i, 0);
+        
+        for (size_t j = 1; j < logits.cols(); ++j) {
+            if (logits(i, j) > max_val) {
+                max_val = logits(i, j);
+                predicted = j;
+            }
+        }
+        
+        size_t actual = 0;
+        max_val = targets(i, 0);
+        for (size_t j = 1; j < targets.cols(); ++j) {
+            if (targets(i, j) > max_val) {
+                max_val = targets(i, j);
+                actual = j;
+            }
+        }
+        
+        if (predicted == actual) {
+            correct++;
+        }
+    }
+    
+    return static_cast<float>(correct) / total;
 } 
