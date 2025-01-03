@@ -3,6 +3,8 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include "../include/cuda/cuda_utils.cuh"
+#include "../include/cuda/matrix_kernels.cuh"
 // Constructor implementations
 Matrix::Matrix() : rows_(0), cols_(0), shape_(std::make_tuple(0, 0)) {}
 
@@ -203,12 +205,23 @@ void Matrix::set_row(size_t row, const Vector &vec) {
 // Matrix operations
 Matrix Matrix::transpose() const {
   Matrix result(cols_, rows_);
-  #pragma omp parallel for collapse(2)
-  for (size_t i = 0; i < rows_; ++i) {
-    for (size_t j = 0; j < cols_; ++j) {
-      result(j, i) = (*this)(i, j);
-    }
-  }
+  
+  float *d_a, *d_result;
+  const size_t size_a = data_.size() * sizeof(float);
+  const size_t size_result = result.data_.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size_a));
+  CUDA_CHECK(cudaMalloc(&d_result, size_result));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, data_.data(), size_a, cudaMemcpyHostToDevice));
+  
+  launch_matrix_transpose(d_a, d_result, rows_, cols_);
+  
+  CUDA_CHECK(cudaMemcpy(result.data_.data(), d_result, size_result, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return result;
 }
 
@@ -299,10 +312,25 @@ Matrix &Matrix::operator+=(const Matrix &other) {
   if (rows_ != other.rows_ || cols_ != other.cols_) {
     throw std::invalid_argument("Matrix dimensions must match for addition");
   }
-  #pragma omp parallel for simd
-  for (size_t i = 0; i < data_.size(); ++i) {
-    data_[i] += other.data_[i];
-  }
+  
+  float *d_a, *d_b, *d_result;
+  const size_t size = data_.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size));
+  CUDA_CHECK(cudaMalloc(&d_b, size));
+  CUDA_CHECK(cudaMalloc(&d_result, size));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, data_.data(), size, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, other.data_.data(), size, cudaMemcpyHostToDevice));
+  
+  launch_matrix_add(d_a, d_b, d_result, rows_, cols_);
+  
+  CUDA_CHECK(cudaMemcpy(data_.data(), d_result, size, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return *this;
 }
 
@@ -310,18 +338,44 @@ Matrix &Matrix::operator-=(const Matrix &other) {
   if (rows_ != other.rows_ || cols_ != other.cols_) {
     throw std::invalid_argument("Matrix dimensions must match for subtraction");
   }
-  #pragma omp parallel for simd
-  for (size_t i = 0; i < data_.size(); ++i) {
-    data_[i] -= other.data_[i];
-  }
+  
+  float *d_a, *d_b, *d_result;
+  const size_t size = data_.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size));
+  CUDA_CHECK(cudaMalloc(&d_b, size));
+  CUDA_CHECK(cudaMalloc(&d_result, size));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, data_.data(), size, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, other.data_.data(), size, cudaMemcpyHostToDevice));
+  
+  launch_matrix_sub(d_a, d_b, d_result, rows_, cols_);
+  
+  CUDA_CHECK(cudaMemcpy(data_.data(), d_result, size, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return *this;
 }
 
 Matrix &Matrix::operator*=(float scalar) {
-  #pragma omp parallel for simd
-  for (size_t i = 0; i < data_.size(); i++) {
-    data_[i] *= scalar;
-  }
+  float *d_a, *d_result;
+  const size_t size = data_.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size));
+  CUDA_CHECK(cudaMalloc(&d_result, size));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, data_.data(), size, cudaMemcpyHostToDevice));
+  
+  launch_matrix_scalar_mul(d_a, scalar, d_result, data_.size());
+  
+  CUDA_CHECK(cudaMemcpy(data_.data(), d_result, size, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return *this;
 }
 
@@ -329,31 +383,37 @@ Matrix &Matrix::operator/=(float scalar) {
   if (scalar == 0.0f) {
     throw std::invalid_argument("Division by zero");
   }
-  #pragma omp parallel for simd
-  for (size_t i = 0; i < data_.size(); i++) {
-    data_[i] /= scalar;
-  }
-  return *this;
+  return *this *= (1.0f / scalar);
 }
 
 Matrix &Matrix::operator*=(const Matrix &other) {
   if (cols_ != other.rows_) {
     throw std::invalid_argument("Invalid matrix dimensions for multiplication");
   }
-  Matrix result(rows_, other.cols_);
   
-  #pragma omp parallel for collapse(2)
-  for (size_t i = 0; i < rows_; ++i) {
-    for (size_t j = 0; j < other.cols_; ++j) {
-      float sum = 0.0f;
-      #pragma omp simd reduction(+:sum)
-      for (size_t k = 0; k < cols_; ++k) {
-        sum += (*this)(i, k) * other(k, j);
-      }
-      result(i, j) = sum;
-    }
-  }
-  *this = std::move(result);
+  float *d_a, *d_b, *d_result;
+  const size_t size_a = data_.size() * sizeof(float);
+  const size_t size_b = other.data_.size() * sizeof(float);
+  const size_t size_result = rows_ * other.cols_ * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size_a));
+  CUDA_CHECK(cudaMalloc(&d_b, size_b));
+  CUDA_CHECK(cudaMalloc(&d_result, size_result));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, data_.data(), size_a, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, other.data_.data(), size_b, cudaMemcpyHostToDevice));
+  
+  launch_matrix_mul(d_a, d_b, d_result, rows_, other.cols_, cols_);
+  
+  data_.resize(rows_ * other.cols_);
+  cols_ = other.cols_;
+  
+  CUDA_CHECK(cudaMemcpy(data_.data(), d_result, size_result, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return *this;
 }
 
@@ -429,27 +489,33 @@ Matrix operator*(const Matrix &a, const Matrix &b) {
 }
 
 Matrix matmul(const Matrix &a, const Matrix &b) {
-  /*std::cout << "Matrix multiplication dimensions:" << std::endl;
-  std::cout << "A: " << a.rows() << "x" << a.cols() << std::endl;
-  std::cout << "B: " << b.rows() << "x" << b.cols() << std::endl;*/
-
   if (a.cols() != b.rows()) {
     throw std::runtime_error("Invalid matrix dimensions for multiplication: " +
-                             std::to_string(a.cols()) +
-                             " != " + std::to_string(b.rows()));
+                           std::to_string(a.cols()) +
+                           " != " + std::to_string(b.rows()));
   }
 
   Matrix result(a.rows(), b.cols());
-
-  for (size_t i = 0; i < a.rows(); i++) {
-    for (size_t j = 0; j < b.cols(); j++) {
-      float sum = 0.0f;
-      for (size_t k = 0; k < a.cols(); k++) {
-        sum += a(i, k) * b(k, j);
-      }
-      result(i, j) = sum;
-    }
-  }
-
+  
+  float *d_a, *d_b, *d_result;
+  const size_t size_a = a.size() * sizeof(float);
+  const size_t size_b = b.size() * sizeof(float);
+  const size_t size_result = result.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size_a));
+  CUDA_CHECK(cudaMalloc(&d_b, size_b));
+  CUDA_CHECK(cudaMalloc(&d_result, size_result));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, a.data(), size_a, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, b.data(), size_b, cudaMemcpyHostToDevice));
+  
+  launch_matrix_mul(d_a, d_b, d_result, a.rows(), b.cols(), a.cols());
+  
+  CUDA_CHECK(cudaMemcpy(result.data(), d_result, size_result, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return result;
 }

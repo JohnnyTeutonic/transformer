@@ -1,4 +1,5 @@
 #include "../include/transformer.hpp"
+#include "../include/cuda/cuda_utils.cuh"
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #include <cublas_v2.h>

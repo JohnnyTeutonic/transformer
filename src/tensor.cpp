@@ -1,7 +1,31 @@
 #include "../include/tensor.hpp"
+#include "../include/cuda/cuda_utils.cuh"
+#ifdef USE_CUDA
+#include "../include/cuda/tensor_kernels.cuh"
+#endif
 #include <stdexcept>
 #include <numeric>
 #include <omp.h>
+
+void tensormul(const float* a, const float* b, float* result,
+               int d1, int d2, int d3, int d4, int b_d4) {
+#ifdef USE_CUDA
+    launch_tensor_mul(a, b, result, d1, d2, d3, d4, b_d4);
+#else
+    // CPU fallback implementation
+    for (int i1 = 0; i1 < d1; ++i1) {
+        for (int i2 = 0; i2 < d2; ++i2) {
+            for (int i3 = 0; i3 < d3; ++i3) {
+                for (int i4 = 0; i4 < d4; ++i4) {
+                    const int a_idx = i1 * (d2 * d3 * d4) + i2 * (d3 * d4) + i3 * d4 + i4;
+                    const int b_idx = i1 * (d2 * d3 * b_d4) + i2 * (d3 * b_d4) + i3 * b_d4 + i4;
+                    result[a_idx] = a[a_idx] * b[b_idx];
+                }
+            }
+        }
+    }
+#endif
+}
 
 Tensor::Tensor(unsigned long d1, unsigned long d2, unsigned long d3, unsigned long d4) 
     : dims_{d1, d2, d3, d4} {
@@ -20,7 +44,8 @@ Tensor::Tensor(const Matrix& mat, const std::vector<unsigned long>& shape) {
     }
     
     dims_ = shape;
-    data_ = std::vector<float>(mat.data(), mat.data() + mat.size());
+    data_.resize(total_size);
+    std::copy(mat.data(), mat.data() + total_size, data_.begin());
 }
 
 float& Tensor::at(unsigned long i, unsigned long j, unsigned long k, unsigned long l) {
@@ -111,21 +136,27 @@ Tensor Tensor::tensormul(const Tensor& other) const {
     
     Tensor result(dims_[0], dims_[1], dims_[2], other.dims_[3]);
     
-    #pragma omp parallel for collapse(4)
-    for (size_t i = 0; i < dims_[0]; ++i) {
-        for (size_t j = 0; j < dims_[1]; ++j) {
-            for (size_t k = 0; k < dims_[2]; ++k) {
-                for (size_t l = 0; l < other.dims_[3]; ++l) {
-                    float sum = 0.0f;
-                    #pragma omp simd reduction(+:sum)
-                    for (size_t m = 0; m < dims_[3]; ++m) {
-                        sum += at(i, j, k, m) * other.at(i, j, m, l);
-                    }
-                    result.at(i, j, k, l) = sum;
-                }
-            }
-        }
-    }
+    float *d_a, *d_b, *d_result;
+    const size_t size_a = data_.size() * sizeof(float);
+    const size_t size_b = other.data_.size() * sizeof(float);
+    const size_t size_result = result.data_.size() * sizeof(float);
+    
+    CUDA_CHECK(cudaMalloc(&d_a, size_a));
+    CUDA_CHECK(cudaMalloc(&d_b, size_b));
+    CUDA_CHECK(cudaMalloc(&d_result, size_result));
+    
+    CUDA_CHECK(cudaMemcpy(d_a, data_.data(), size_a, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b, other.data_.data(), size_b, cudaMemcpyHostToDevice));
+    
+    launch_tensor_mul(d_a, d_b, d_result,
+                     dims_[0], dims_[1], dims_[2], dims_[3],
+                     other.dims_[3]);
+    
+    CUDA_CHECK(cudaMemcpy(result.data_.data(), d_result, size_result, cudaMemcpyDeviceToHost));
+    
+    CUDA_CHECK(cudaFree(d_a));
+    CUDA_CHECK(cudaFree(d_b));
+    CUDA_CHECK(cudaFree(d_result));
     
     return result;
 }
