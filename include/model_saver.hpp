@@ -1,5 +1,4 @@
-#ifndef MODEL_SAVER_HPP
-#define MODEL_SAVER_HPP
+#pragma once
 
 #include "logger.hpp"
 #include "transformer.hpp"
@@ -43,5 +42,3 @@ private:
   bool readMetadata(const std::string &directory, const std::string &model_name,
                     TransformerConfig &config) const;
 };
-
-#endif // MODEL_SAVER_HPP

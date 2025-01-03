@@ -2,8 +2,36 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <chrono>
 #include "matrix.hpp"
 #include "tokenizer.hpp"
+
+using vector_pair = std::vector<std::pair<std::string, std::string>>;
+// Performance timing structures and functions
+struct TimingStats {
+    double forward_pass_time = 0.0;
+    double backward_pass_time = 0.0;
+    double validation_time = 0.0;
+    double checkpoint_time = 0.0;
+    size_t forward_pass_count = 0;
+    size_t backward_pass_count = 0;
+    size_t validation_count = 0;
+    size_t checkpoint_count = 0;
+};
+
+// Timer class for measuring performance
+class Timer {
+public:
+    Timer();
+    void start();
+    double stop(); // Returns elapsed time in milliseconds
+private:
+    std::chrono::high_resolution_clock::time_point start_time;
+    bool is_running;
+};
+
+// Function to print timing statistics
+void print_timing_stats(const TimingStats& stats);
 
 // Dataset structure to handle both training and validation data
 struct DataSet {
@@ -13,13 +41,13 @@ struct DataSet {
 };
 
 // Helper function to load data pairs from file
-std::vector<std::pair<std::string, std::string>> load_data_pairs(const std::string& file_path);
+vector_pair load_data_pairs(const std::string& file_path);
 
 // Helper function to create dataset (training or validation)
 DataSet create_dataset(const std::string& mode);
 
 // Helper function to get next batch from dataset
-std::vector<std::pair<std::string, std::string>> get_batch(DataSet& dataset, size_t batch_size);
+vector_pair get_batch(DataSet& dataset, size_t batch_size);
 
 // Helper function to calculate accuracy
 float calculate_accuracy(const Matrix& logits, const Matrix& targets);
@@ -46,8 +74,8 @@ void print_matrix(const Matrix& m, const std::string& name, size_t max_rows = 5,
 void print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, size_t k = 5);
 
 // Helper function to create training data
-std::vector<std::pair<std::string, std::string>> create_training_data();
+vector_pair create_training_data();
 
 // Helper function to analyze token mappings
-void analyze_token_mappings(const std::vector<std::pair<std::string, std::string>>& training_data, 
+void analyze_token_mappings(const vector_pair& training_data, 
                           const Tokenizer& tokenizer); 
