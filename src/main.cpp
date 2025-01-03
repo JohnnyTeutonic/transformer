@@ -1,30 +1,4 @@
-#include "../include/attention.hpp"
-#ifdef CUDA_AVAILABLE
-#include "../include/cuda/cuda_init.cuh"
-#endif
-#include "../include/lm_head.hpp"
-#include "../include/logger.hpp"
-#include "../include/model_saver.hpp"
-#include "../include/optimizer/sam.hpp"
-#include "../include/quantization.hpp"
-#include "../include/tokenizer.hpp"
-#include "../include/transformer.hpp"
-#include "../include/utils/tensor_cache.hpp"
-#include "../include/vocabulary.hpp"
-#include "../include/matrix.hpp"
-#include "../include/preprocessing.hpp"
-#include "../include/utils.hpp"
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <random>
-#include <vector>
-#include <cmath>
-#include <limits>
-#include <unordered_map>
-#include <sstream>
+#include "../include/main.hpp"
 
 // Add necessary forward declarations and structures
 class Tokenizer;
