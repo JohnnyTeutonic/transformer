@@ -2,8 +2,35 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <chrono>
 #include "matrix.hpp"
 #include "tokenizer.hpp"
+
+// Performance timing structures and functions
+struct TimingStats {
+    double forward_pass_time = 0.0;
+    double backward_pass_time = 0.0;
+    double validation_time = 0.0;
+    double checkpoint_time = 0.0;
+    size_t forward_pass_count = 0;
+    size_t backward_pass_count = 0;
+    size_t validation_count = 0;
+    size_t checkpoint_count = 0;
+};
+
+// Timer class for measuring performance
+class Timer {
+public:
+    Timer();
+    void start();
+    double stop(); // Returns elapsed time in milliseconds
+private:
+    std::chrono::high_resolution_clock::time_point start_time;
+    bool is_running;
+};
+
+// Function to print timing statistics
+void print_timing_stats(const TimingStats& stats);
 
 // Dataset structure to handle both training and validation data
 struct DataSet {

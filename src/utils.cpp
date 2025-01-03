@@ -10,6 +10,77 @@
 #include <sstream>
 #include <random>
 
+Timer::Timer() : is_running(false) {}
+
+void Timer::start() {
+    start_time = std::chrono::high_resolution_clock::now();
+    is_running = true;
+}
+
+double Timer::stop() {
+    if (!is_running) {
+        return 0.0;
+    }
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    is_running = false;
+    
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+    return duration.count() / 1000.0; // Convert to milliseconds
+}
+
+void print_timing_stats(const TimingStats& stats) {
+    std::cout << "\n=== Performance Timing Statistics ===\n";
+    
+    // Forward pass statistics
+    if (stats.forward_pass_count > 0) {
+        double avg_forward = stats.forward_pass_time / stats.forward_pass_count;
+        std::cout << "Forward Pass:\n"
+                  << "  Total time: " << stats.forward_pass_time << " ms\n"
+                  << "  Count: " << stats.forward_pass_count << "\n"
+                  << "  Average: " << avg_forward << " ms/pass\n";
+    }
+    
+    // Backward pass statistics
+    if (stats.backward_pass_count > 0) {
+        double avg_backward = stats.backward_pass_time / stats.backward_pass_count;
+        std::cout << "Backward Pass:\n"
+                  << "  Total time: " << stats.backward_pass_time << " ms\n"
+                  << "  Count: " << stats.backward_pass_count << "\n"
+                  << "  Average: " << avg_backward << " ms/pass\n";
+    }
+    
+    // Validation statistics
+    if (stats.validation_count > 0) {
+        double avg_validation = stats.validation_time / stats.validation_count;
+        std::cout << "Validation:\n"
+                  << "  Total time: " << stats.validation_time << " ms\n"
+                  << "  Count: " << stats.validation_count << "\n"
+                  << "  Average: " << avg_validation << " ms/validation\n";
+    }
+    
+    // Checkpoint statistics
+    if (stats.checkpoint_count > 0) {
+        double avg_checkpoint = stats.checkpoint_time / stats.checkpoint_count;
+        std::cout << "Checkpointing:\n"
+                  << "  Total time: " << stats.checkpoint_time << " ms\n"
+                  << "  Count: " << stats.checkpoint_count << "\n"
+                  << "  Average: " << avg_checkpoint << " ms/checkpoint\n";
+    }
+    
+    // Total statistics
+    double total_time = stats.forward_pass_time + stats.backward_pass_time + 
+                       stats.validation_time + stats.checkpoint_time;
+    std::cout << "\nTotal Statistics:\n"
+              << "  Total time: " << total_time << " ms\n"
+              << "  Forward pass: " << (stats.forward_pass_time / total_time * 100) << "%\n"
+              << "  Backward pass: " << (stats.backward_pass_time / total_time * 100) << "%\n"
+              << "  Validation: " << (stats.validation_time / total_time * 100) << "%\n"
+              << "  Checkpointing: " << (stats.checkpoint_time / total_time * 100) << "%\n";
+    
+    std::cout << "===================================\n";
+}
+
 void clip_gradients(std::vector<Matrix>& gradients, float threshold) {
     float total_norm = 0.0f;
     

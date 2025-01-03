@@ -125,7 +125,12 @@ int main(int argc, char *argv[]) {
         const size_t PRINT_INTERVAL = 50;       // Print progress every 50 steps
         size_t global_step = 0;
         
+        // Initialize timing statistics
+        TimingStats timing_stats;
+        Timer timer;
+        
         for (size_t epoch = 0; epoch < config.num_epochs; ++epoch) {
+            std::cout << "EPOCH: " << epoch << std::endl;
             float epoch_loss = 0.0f;
             size_t num_batches = 0;
             
@@ -152,8 +157,12 @@ int main(int argc, char *argv[]) {
                 Matrix logits;
                 
                 for (size_t i = 0; i < input_tokens.size(); ++i) {
+                    // Time forward pass
+                    timer.start();
                     hidden_states = transformer.forward(input_tokens[i]);
                     logits = lm_head->project_to_vocab(hidden_states);
+                    timing_stats.forward_pass_time += timer.stop();
+                    timing_stats.forward_pass_count++;
                     
                     Matrix target_slice(logits.rows(), logits.cols(), 0.0f);
                     for (size_t r = 0; r < logits.rows(); r++) {
@@ -164,7 +173,12 @@ int main(int argc, char *argv[]) {
                     
                     batch_loss += compute_batch_loss(logits, target_slice);
                     Matrix grad_output = logits - target_slice;
+                    
+                    // Time backward pass
+                    timer.start();
                     transformer.backward(grad_output, input_tokens[i], learning_rate);
+                    timing_stats.backward_pass_time += timer.stop();
+                    timing_stats.backward_pass_count++;
                 }
                 
                 batch_loss /= input_tokens.size();
@@ -189,6 +203,7 @@ int main(int argc, char *argv[]) {
                 
                 // Validation step (less frequent)
                 if (global_step % VALIDATION_INTERVAL == 0) {
+                    timer.start();  // Start timing validation
                     float val_loss = 0.0f;
                     float val_accuracy = 0.0f;
                     size_t val_batches = 0;
@@ -230,6 +245,9 @@ int main(int argc, char *argv[]) {
                     
                     val_loss /= val_batches;
                     val_accuracy /= val_batches;
+                    timing_stats.validation_time += timer.stop();  // Stop timing validation
+                    timing_stats.validation_count++;
+                    
                     std::cout << "\nValidation Step " << global_step 
                               << " - Loss: " << val_loss 
                               << " - Accuracy: " << val_accuracy << std::endl;
@@ -270,6 +288,7 @@ int main(int argc, char *argv[]) {
             // Save checkpoint if needed
             const size_t checkpoint_frequency = 2;  // Save every 2 epochs
             if ((epoch + 1) % checkpoint_frequency == 0) {
+                timer.start();  // Start timing checkpoint
                 std::string save_directory = "models";
                 std::string model_name = "transformer_model";
                 std::filesystem::create_directories(save_directory);
@@ -281,6 +300,9 @@ int main(int argc, char *argv[]) {
                     logger.log("Failed to save checkpoint", LogLevel::ERROR);
                     return 1;
                 }
+                timing_stats.checkpoint_time += timer.stop();  // Stop timing checkpoint
+                timing_stats.checkpoint_count++;
+                
                 logger.log("Successfully saved checkpoint for epoch " + 
                           std::to_string(epoch + 1), LogLevel::INFO);
             }
@@ -293,7 +315,8 @@ int main(int argc, char *argv[]) {
                 GradientCheckpoint::get_activation(std::to_string(epoch - 1));  // This removes the activation from cache
             }
             
-            // Continue with next epoch...
+            // Print timing statistics at the end of each epoch
+            print_timing_stats(timing_stats);
         }
 
         // Save the final model
@@ -301,14 +324,22 @@ int main(int argc, char *argv[]) {
         std::string model_name = "transformer_model_final";
         std::filesystem::create_directories(save_directory);
         
+        timer.start();  // Time final model saving
         std::cout << "\nSaving final model to " << save_directory << "/" << model_name << "...\n";
         ModelSaver model_saver;
         if (!model_saver.saveModel(transformer, save_directory, model_name)) {
             logger.log("Failed to save final model", LogLevel::ERROR);
             return 1;
         }
+        timing_stats.checkpoint_time += timer.stop();
+        timing_stats.checkpoint_count++;
+        
         logger.log("Successfully saved final model", LogLevel::INFO);
         std::cout << "Model saved successfully!\n";
+        
+        // Print final timing statistics
+        std::cout << "\n=== Final Training Statistics ===\n";
+        print_timing_stats(timing_stats);
         
         return 0;
     } catch (const std::exception& e) {
