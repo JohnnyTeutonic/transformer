@@ -353,7 +353,7 @@ int main(int argc, char *argv[]) {
   std::cout << "entering main" << std::endl;
   // Initialize logger
   Logger &logger = Logger::getInstance();
-  logger.startLogging();
+  logger.enableLogging();
 
   try {
 #ifdef CUDA_AVAILABLE
@@ -368,7 +368,6 @@ int main(int argc, char *argv[]) {
     
     std::cout << "Actual vocabulary size: " << actual_vocab_size << std::endl;
 
-    // Configure the transformer with actual vocab size
     TransformerConfig config;
     config.vocab_size = actual_vocab_size;
     config.hidden_size = 360;
@@ -381,8 +380,9 @@ int main(int argc, char *argv[]) {
     config.window_size = 256;
     config.use_fp16 = true;
     config.head_dim = config.hidden_size / config.num_heads;  // Add explicit head_dim calculation
-    config.batch_size = 8;  // Set the batch size
-    config.num_epochs = 10;  // Set the number of epochs
+    config.batch_size = 8;
+    config.num_epochs = 10;
+    config.log_level = LogLevel::DEBUG;  // Set desired log level
 
     std::cout << "Initializing transformer with configuration:\n"
               << "- Hidden size: " << config.hidden_size << "\n"
@@ -559,7 +559,7 @@ int main(int argc, char *argv[]) {
         if ((epoch + 1) % checkpoint_frequency == 0) {
             if (!model_saver.saveCheckpoint(transformer, save_directory, model_name,
                                             epoch + 1, epoch_loss)) {
-                logger.log("Failed to save checkpoint", true);
+                logger.log("Failed to save checkpoint", LogLevel::ERROR);
                 return 1;
             }
         }
@@ -607,11 +607,11 @@ int main(int argc, char *argv[]) {
         model_saver.saveModel(transformer, save_directory, model_name);
     if (save_success) {
         logger.log("Successfully saved model to " + save_directory + "/" +
-                   model_name);
+                   model_name, LogLevel::INFO);
         std::cout << "Model saved successfully!\n";
     } else {
         logger.log("Failed to save model to " + save_directory + "/" + model_name,
-                   true);
+                   LogLevel::ERROR);
         return 1;
     }
 
@@ -631,7 +631,7 @@ int main(int argc, char *argv[]) {
 #ifdef CUDA_AVAILABLE
   cleanup_cuda(); // Cleanup at program end
 #endif
-  logger.stopLogging();
+  logger.disableLogging();
   std::cout << "exiting main" << std::endl;
   return 0;
 }

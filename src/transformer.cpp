@@ -19,14 +19,16 @@ extern cublasHandle_t cublas_handle;
 TransformerConfig::TransformerConfig(size_t vocab_size, size_t max_seq_length,
                                      size_t hidden_size, size_t num_layers,
                                      size_t num_heads, size_t batch_size,
-                                     size_t num_epochs)
+                                     size_t num_epochs,
+                                     LogLevel log_level)
     : vocab_size(vocab_size), max_seq_length(max_seq_length),
       hidden_size(hidden_size), num_layers(num_layers), num_heads(num_heads),
       head_dim(hidden_size / num_heads), intermediate_size(4 * hidden_size),
       dropout_prob(0.1f), use_flash_attention(true), use_rope(true),
       use_sliding_window(false), window_size(512), use_gqa(false),
       num_kv_heads(num_heads), use_cuda(true), batch_size(batch_size),
-      num_epochs(num_epochs) {
+      num_epochs(num_epochs), log_level(log_level) {
+  Logger::getInstance().setLogLevel(log_level);
   std::cout << "entering TransformerConfig constructor" << std::endl;
   if (hidden_size % num_heads != 0) {
     throw std::invalid_argument(

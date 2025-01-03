@@ -1,4 +1,5 @@
 #include "../include/model_saver.hpp"
+#include "../include/logger.hpp"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -17,18 +18,18 @@ bool ModelSaver::saveModel(const Transformer &transformer,
     std::string dir_path = createDirectory(directory);
     std::string model_path = dir_path + "/" + model_name;
 
-    logger.log("Saving model to: " + model_path);
+    logger.log("Saving model to: " + model_path, LogLevel::INFO);
 
     // Save model configuration
     if (!writeMetadata(directory, model_name, transformer.getConfig())) {
-      logger.log("Failed to save model metadata", true);
+      logger.log("Failed to save model metadata", LogLevel::ERROR);
       return false;
     }
 
     // Save model weights
     std::ofstream model_file(model_path + ".bin", std::ios::binary);
     if (!model_file) {
-      logger.log("Failed to open model file for writing", true);
+      logger.log("Failed to open model file for writing", LogLevel::ERROR);
       return false;
     }
 
@@ -38,10 +39,10 @@ bool ModelSaver::saveModel(const Transformer &transformer,
       layer->save(model_file);
     }
 
-    logger.log("Model saved successfully");
+    logger.log("Model saved successfully", LogLevel::INFO);
     return true;
   } catch (const std::exception &e) {
-    logger.log("Error saving model: " + std::string(e.what()), true);
+    logger.log("Error saving model: " + std::string(e.what()), LogLevel::ERROR);
     return false;
   }
 }
@@ -51,25 +52,25 @@ bool ModelSaver::loadModel(Transformer &transformer,
                            const std::string &model_name) {
   try {
     std::string model_path = directory + "/" + model_name;
-    logger.log("Loading model from: " + model_path);
+    logger.log("Loading model from: " + model_path, LogLevel::INFO);
 
     // Load and verify configuration
     TransformerConfig config;
     if (!readMetadata(directory, model_name, config)) {
-      logger.log("Failed to read model metadata", true);
+      logger.log("Failed to read model metadata", LogLevel::ERROR);
       return false;
     }
 
     // Verify configuration matches
     if (config != transformer.getConfig()) {
-      logger.log("Model configuration mismatch", true);
+      logger.log("Model configuration mismatch", LogLevel::ERROR);
       return false;
     }
 
     // Load model weights
     std::ifstream model_file(model_path + ".bin", std::ios::binary);
     if (!model_file) {
-      logger.log("Failed to open model file for reading", true);
+      logger.log("Failed to open model file for reading", LogLevel::ERROR);
       return false;
     }
 
@@ -79,10 +80,10 @@ bool ModelSaver::loadModel(Transformer &transformer,
       layer->load(model_file);
     }
 
-    logger.log("Model loaded successfully");
+    logger.log("Model loaded successfully", LogLevel::INFO);
     return true;
   } catch (const std::exception &e) {
-    logger.log("Error loading model: " + std::string(e.what()), true);
+    logger.log("Error loading model: " + std::string(e.what()), LogLevel::ERROR);
     return false;
   }
 }
@@ -94,7 +95,7 @@ bool ModelSaver::saveCheckpoint(const Transformer &transformer,
   try {
     std::string checkpoint_file =
         getCheckpointFilename(directory, model_name, epoch);
-    logger.log("Saving checkpoint to: " + checkpoint_file);
+    logger.log("Saving checkpoint to: " + checkpoint_file, LogLevel::INFO);
 
     // Save model state
     if (!saveModel(transformer, directory,
@@ -112,10 +113,10 @@ bool ModelSaver::saveCheckpoint(const Transformer &transformer,
     std::ofstream meta_file(checkpoint_file + ".meta.json");
     meta_file << std::setw(4) << checkpoint_meta << std::endl;
 
-    logger.log("Checkpoint saved successfully");
+    logger.log("Checkpoint saved successfully", LogLevel::INFO);
     return true;
   } catch (const std::exception &e) {
-    logger.log("Error saving checkpoint: " + std::string(e.what()), true);
+    logger.log("Error saving checkpoint: " + std::string(e.what()), LogLevel::ERROR);
     return false;
   }
 }
@@ -139,7 +140,7 @@ bool ModelSaver::loadLatestCheckpoint(Transformer &transformer,
     }
 
     if (latest_epoch == -1) {
-      logger.log("No checkpoints found", true);
+      logger.log("No checkpoints found", LogLevel::WARNING);
       return false;
     }
 
@@ -158,7 +159,7 @@ bool ModelSaver::loadLatestCheckpoint(Transformer &transformer,
                      model_name + "_checkpoint_" +
                          std::to_string(latest_epoch));
   } catch (const std::exception &e) {
-    logger.log("Error loading checkpoint: " + std::string(e.what()), true);
+    logger.log("Error loading checkpoint: " + std::string(e.what()), LogLevel::ERROR);
     return false;
   }
 }
