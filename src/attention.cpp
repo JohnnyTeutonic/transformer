@@ -475,7 +475,7 @@ Matrix MultiHeadAttention::standard_attention(const Matrix &Q, const Matrix &K,
 
 Matrix MultiHeadAttention::backward(const Matrix& grad_output,
                                   const Matrix& input,
-                                  const Matrix& target_distribution) {
+                                  const Matrix& target_distribution) const {
     std::cout << "\n=== MultiHeadAttention::backward START ===" << std::endl;
     
     try {

@@ -19,13 +19,13 @@ private:
 
 public:
   LanguageModelHead(size_t hidden_size, size_t vocab_size, float dropout = 0.1)
-      : projection(Matrix(hidden_size, vocab_size)), bias(Vector(vocab_size)),
+      : projection(Matrix(vocab_size, hidden_size)), bias(Vector(vocab_size)),
         dropout_prob(dropout), vocab_size_(vocab_size),
         hidden_size_(hidden_size) {
     float scale = std::sqrt(1.0f / hidden_size);
     std::cout << "LM Head initialization:" << std::endl;
-    std::cout << "Creating projection matrix: [" << hidden_size << " × "
-              << vocab_size << "]" << std::endl;
+    std::cout << "Creating projection matrix: [" << vocab_size << " × "
+              << hidden_size << "]" << std::endl;
     projection.randomize(-scale, scale);
     bias.randomize(-scale, scale);
   }

@@ -207,7 +207,6 @@ if(CUDAToolkit_FOUND)
         src/cuda/feed_forward_kernels.cu
         src/cuda/half_precision_kernels.cu
         src/cuda/cuda_utils.cu
-        src/cuda/cuda_init.cu
         src/cuda/token_embedding_cuda.cu
         src/cuda/layernorm_cuda.cu
     )
@@ -241,3 +240,6 @@ endif()
 target_sources(transformer_lib PRIVATE
     src/tensor.cpp
 )
+
+find_package(CUDA REQUIRED)
+include_directories(${CUDA_INCLUDE_DIRS})

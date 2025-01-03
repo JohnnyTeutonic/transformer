@@ -374,12 +374,12 @@ int main(int argc, char *argv[]) {
     config.hidden_size = 360;
     config.num_heads = 12;
     config.num_layers = 6;
-    config.use_cuda = false;
+    config.use_cuda = true;
     config.use_flash_attention = true;
     config.use_rope = true;
     config.use_sliding_window = true;
     config.window_size = 256;
-    config.use_fp16 = false;
+    config.use_fp16 = true;
     config.head_dim = config.hidden_size / config.num_heads;  // Add explicit head_dim calculation
     config.batch_size = 8;  // Set the batch size
     config.num_epochs = 10;  // Set the number of epochs

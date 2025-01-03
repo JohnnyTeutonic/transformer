@@ -216,8 +216,11 @@ public:
                  const std::optional<KVCache> &kv_cache = std::nullopt);
   Matrix backward(const Matrix& grad_output,
                  const Matrix& input,
-                 const Matrix& target_distribution);
-  Matrix backward_cuda(const Matrix &grad, const Matrix &input) const;
+                 const Matrix& target_distribution) const;
+  Matrix backward_cuda(const Matrix& grad_output, const Matrix& grad_hidden) const {
+      // Temporarily fall back to CPU implementation until CUDA version is ready
+      return backward(grad_output, grad_hidden, Matrix());
+  }
   void save(std::ostream &os) const;
   static std::unique_ptr<MultiHeadAttention> load(std::istream &is);
   friend class Transformer;
