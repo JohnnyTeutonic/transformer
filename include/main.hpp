@@ -26,6 +26,7 @@
 #include "vocabulary.hpp"
 #include "matrix.hpp"
 #include "preprocessing.hpp"
+#include "stemmer.hpp"
 #include "utils.hpp"
 
 #ifdef CUDA_AVAILABLE

@@ -33,6 +33,61 @@ int main(int argc, char *argv[]) {
 
         auto training_data = std::move(TextPreprocessor::preprocess_training_data(train_dataset.pairs)); // convert to lowercase
         auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_dataset.pairs)); // convert to lowercase
+
+        // Apply stemming to all data
+        for (auto& [input_str, target_str] : training_data) {
+            std::istringstream iss_input(input_str);
+            std::istringstream iss_target(target_str);
+            std::string word;
+            std::string stemmed_input, stemmed_target;
+            
+            // Stem input string
+            while (iss_input >> word) {
+                stemmed_input += Stemmer::stem(word) + " ";
+            }
+            if (!stemmed_input.empty()) {
+                stemmed_input.pop_back(); // Remove trailing space
+            }
+            
+            // Stem target string
+            while (iss_target >> word) {
+                stemmed_target += Stemmer::stem(word) + " ";
+            }
+            if (!stemmed_target.empty()) {
+                stemmed_target.pop_back(); // Remove trailing space
+            }
+            
+            input_str = stemmed_input;
+            target_str = stemmed_target;
+        }
+
+        // Apply stemming to validation data
+        for (auto& [input_str, target_str] : validation_data) {
+            std::istringstream iss_input(input_str);
+            std::istringstream iss_target(target_str);
+            std::string word;
+            std::string stemmed_input, stemmed_target;
+            
+            // Stem input string
+            while (iss_input >> word) {
+                stemmed_input += Stemmer::stem(word) + " ";
+            }
+            if (!stemmed_input.empty()) {
+                stemmed_input.pop_back(); // Remove trailing space
+            }
+            
+            // Stem target string
+            while (iss_target >> word) {
+                stemmed_target += Stemmer::stem(word) + " ";
+            }
+            if (!stemmed_target.empty()) {
+                stemmed_target.pop_back(); // Remove trailing space
+            }
+            
+            input_str = stemmed_input;
+            target_str = stemmed_target;
+        }
+
 #ifdef CUDA_AVAILABLE
         initialize_cuda();
 #endif
@@ -244,10 +299,21 @@ int main(int argc, char *argv[]) {
             };
 
             Matrix final_hidden_states;  // Store the last hidden states
-            for (const auto& test_input : test_inputs) {
+            for (auto& test_input : test_inputs) {
                 std::cout << "\nTesting: '" << test_input << "'\n";
-                // Encode input
-                std::vector<int> test_tokens = tokenizer->encode(test_input);
+                // Stem the test input
+                std::istringstream iss(test_input);
+                std::string word;
+                std::string stemmed_input;
+                while (iss >> word) {
+                    stemmed_input += Stemmer::stem(word) + " ";
+                }
+                if (!stemmed_input.empty()) {
+                    stemmed_input.pop_back(); // Remove trailing space
+                }
+                
+                // Encode stemmed input
+                std::vector<int> test_tokens = tokenizer->encode(stemmed_input);
                 
                 // Forward pass
                 Matrix test_hidden = transformer.forward(test_tokens);

@@ -2,6 +2,174 @@
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <cctype>
+#include <regex>
+
+class Stemmer {
+public:
+    static std::string stem(std::string word) {
+        // Convert to lowercase
+        std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+        
+        // Remove possessives
+        if (word.length() > 2 && word.substr(word.length()-2) == "'s") {
+            word = word.substr(0, word.length()-2);
+        }
+
+        // Handle plurals and common endings
+        if (word.length() > 3) {
+            // Handle -tion/-sion (e.g., operation -> operate, supervision -> supervise)
+            if (word.length() > 5) {
+                if (word.substr(word.length()-4) == "tion" || 
+                    word.substr(word.length()-4) == "sion") {
+                    return word.substr(0, word.length()-3) + "e";
+                }
+            }
+
+            // Handle -ment (e.g., development -> develop)
+            if (word.length() > 4 && word.substr(word.length()-4) == "ment") {
+                return word.substr(0, word.length()-4);
+            }
+
+            // Handle -ity (e.g., facility -> facile)
+            if (word.length() > 4 && word.substr(word.length()-3) == "ity") {
+                if (word.substr(word.length()-5) == "ility") {
+                    return word.substr(0, word.length()-5) + "le";
+                }
+                return word.substr(0, word.length()-3);
+            }
+
+            // Handle -ness (e.g., happiness -> happy)
+            if (word.length() > 4 && word.substr(word.length()-4) == "ness") {
+                std::string stem = word.substr(0, word.length()-4);
+                if (stem.back() == 'i') {
+                    stem.back() = 'y';
+                }
+                return stem;
+            }
+
+            // Handle -ization (e.g., organization -> organize)
+            if (word.length() > 7 && word.substr(word.length()-7) == "ization") {
+                return word.substr(0, word.length()-7) + "ize";
+            }
+
+            // Handle -ology (e.g., technology -> tech)
+            if (word.length() > 5 && word.substr(word.length()-5) == "ology") {
+                return word.substr(0, word.length()-5);
+            }
+
+            // Handle -ly (e.g., quickly -> quick)
+            if (word.length() > 3 && word.substr(word.length()-2) == "ly") {
+                return word.substr(0, word.length()-2);
+            }
+
+            // Handle -ful (e.g., helpful -> help)
+            if (word.length() > 3 && word.substr(word.length()-3) == "ful") {
+                return word.substr(0, word.length()-3);
+            }
+
+            // Handle -able/-ible (e.g., readable -> read, possible -> poss)
+            if (word.length() > 5) {
+                if (word.substr(word.length()-4) == "able" || 
+                    word.substr(word.length()-4) == "ible") {
+                    return word.substr(0, word.length()-4);
+                }
+            }
+
+            // Handle -er/-or (e.g., teacher -> teach, operator -> operate)
+            if (word.length() > 3) {
+                if (word.substr(word.length()-2) == "er" || 
+                    word.substr(word.length()-2) == "or") {
+                    std::string stem = word.substr(0, word.length()-2);
+                    if (stem.length() > 4 && stem.substr(stem.length()-2) == "at") {
+                        return stem + "e";  // operate
+                    }
+                    return stem;
+                }
+            }
+            
+            // Handle -ies (e.g., laboratories -> laboratory)
+            if (word.length() > 4 && word.substr(word.length()-3) == "ies") {
+                return word.substr(0, word.length()-3) + "y";
+            }
+            
+            // Handle -es (e.g., churches -> church)
+            if (word.length() > 3 && word.substr(word.length()-2) == "es") {
+                char beforeEs = word[word.length()-3];
+                if (beforeEs == 's' || beforeEs == 'x' || beforeEs == 'z' || 
+                    beforeEs == 'h' || beforeEs == 'c') {
+                    return word.substr(0, word.length()-2);
+                }
+            }
+            
+            // Handle -s (e.g., labs -> lab)
+            if (word.back() == 's' && word[word.length()-2] != 's') {
+                return word.substr(0, word.length()-1);
+            }
+            
+            // Handle -ing (e.g., working -> work)
+            if (word.length() > 4 && word.substr(word.length()-3) == "ing") {
+                std::string stem = word.substr(0, word.length()-3);
+                if (stem.length() > 1) {
+                    // Handle doubled consonant (e.g., running -> run)
+                    if (stem.length() > 2 && stem[stem.length()-1] == stem[stem.length()-2]) {
+                        return stem.substr(0, stem.length()-1);
+                    }
+                    // Add 'e' back for some cases (e.g., making -> make)
+                    if (needs_e_after_ing(stem)) {
+                        return stem + "e";
+                    }
+                    return stem;
+                }
+            }
+            
+            // Handle -ed (e.g., worked -> work)
+            if (word.length() > 3 && word.substr(word.length()-2) == "ed") {
+                std::string stem = word.substr(0, word.length()-2);
+                if (stem.length() > 1) {
+                    // Handle doubled consonant (e.g., stopped -> stop)
+                    if (stem.length() > 2 && stem[stem.length()-1] == stem[stem.length()-2]) {
+                        return stem.substr(0, stem.length()-1);
+                    }
+                    // Add 'e' back for some cases (e.g., saved -> save)
+                    if (needs_e_after_ed(stem)) {
+                        return stem + "e";
+                    }
+                    return stem;
+                }
+            }
+        }
+        
+        return word;
+    }
+
+private:
+    static bool needs_e_after_ing(const std::string& stem) {
+        // Check if we should add 'e' back after removing 'ing'
+        // Examples: make->making->make, write->writing->write
+        if (stem.empty()) return false;
+        
+        char last = stem.back();
+        char second_last = stem.length() > 1 ? stem[stem.length()-2] : '\0';
+        
+        // Common patterns where 'e' should be added back
+        bool ends_in_consonant = !is_vowel(last);
+        bool preceded_by_vowel = is_vowel(second_last);
+        
+        return (ends_in_consonant && preceded_by_vowel) ||
+               (last == 'v' || last == 'z') ||  // save, seize
+               (stem.length() > 2 && last == 'g' && !is_vowel(second_last));  // change
+    }
+
+    static bool needs_e_after_ed(const std::string& stem) {
+        // Similar logic to needs_e_after_ing
+        return needs_e_after_ing(stem);
+    }
+
+    static bool is_vowel(char c) {
+        return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u';
+    }
+};
 
 Vocabulary::Vocabulary() {
   // Initialize special tokens first (guaranteed IDs)
@@ -21,10 +189,13 @@ Vocabulary::Vocabulary() {
 }
 
 void Vocabulary::add_word(const std::string &word) {
-  if (token_to_id.find(word) == token_to_id.end()) {
+  // Stem the word before adding
+  std::string stemmed = Stemmer::stem(word);
+  
+  if (token_to_id.find(stemmed) == token_to_id.end()) {
     int id = id_to_token.size();
-    token_to_id[word] = id;
-    id_to_token.push_back(word);
+    token_to_id[stemmed] = id;
+    id_to_token.push_back(stemmed);
   }
 }
 
@@ -357,9 +528,237 @@ void Vocabulary::initialize_basic_vocabulary() {
       // Adding missing specialized terms
       "air", "flight", "data", "defense", "ground", "legal", "operating",
       "dressing", "chambers"
+
+      
   };
 
-  // Add all words to vocabulary
+  // Adding frequently occurring nouns from training data
+  std::vector<std::string> training_nouns = {
+      "laboratory", "office", "library", "classroom", "auditorium", 
+      "workshop", "facility", "center", "station", "hospital",
+      "precinct", "headquarters", "base", "workspace", "studio",
+      "gallery", "concert hall", "arena", "tournament", "club",
+      "comedy club", "operating room", "clinic", "ward", "pharmacy",
+      "dental office", "examination room", "therapy room", "consultation room",
+      "radiology department", "clean room", "prep room", "server room",
+      "data center", "control room", "dispatch center", "crime scene",
+      "morgue", "courtroom", "conference room", "law office", "chambers",
+      "meeting room", "anteroom", "filing room", "records room", "district office",
+      "observatory", "testing chamber", "field station", "sample room",
+      "computer lab", "wind tunnel", "briefing room", "simulator",
+      "cargo hold", "service bay", "hangar", "tower", "cockpit",
+      "galley", "tarmac", "terminal", "platform", "booth",
+      "stage", "dressing room", "set", "production office", "trailer",
+      "storage room", "catwalk", "pit", "basement", "garage",
+      "sanctuary", "temple", "mosque", "monastery", "seminary",
+      "shrine", "chapel", "church", "cathedral",
+      "bakery", "kitchen", "wine cellar", "meat shop", "restaurant",
+      "bar", "coffee shop", "patisserie", "dining room",
+      "greenhouse", "conservatory", "field", "apiary", "vineyard",
+      "ranch", "pasture", "woods", "site", "archive", "museum",
+      "repository", "reading room", "bookstore", "register",
+      "warehouse", "showroom", "mall", "building", "hallway",
+      "desk", "cubicle", "boardroom", "department", "agency",
+      "newsroom", "publishing house", "study", "home office",
+      "garden", "production office", "wardrobe", "storage room",
+      "booth", "music room", "practice room", "recital hall",
+      "garage", "big top", "cage", "arena", "enclosure",
+      "clinic", "salon", "stable", "barn", "smithy",
+      "workshop", "basement", "scaffold", "roof", "window",
+      "floor", "shop", "room", "runway", "spa", "studio",
+      "class", "center", "office", "house", "apartment",
+      "building", "basement", "control room", "call center",
+      "dispatch center", "pole", "scene", "car", "crime scene",
+      "range", "lab", "server room", "data center", "clean room",
+      "fab", "facility", "factory", "line", "plant", "site",
+      "workplace", "center", "building", "field", "plant",
+      "control room", "neighborhood", "house", "station",
+      "studio", "desk", "booth", "van", "suite", "dark room",
+      "animation studio", "room", "set", "trailer", "stage",
+      "storage room", "booth", "catwalk", "platform", "gym",
+      "workshop", "studio", "booth", "music room", "practice room",
+      "concert hall", "stage", "studio", "music room", "recital hall",
+      "basement", "pit", "chapel", "church", "tower", "sidewalk",
+      "subway", "stage", "circus", "tent", "carnival", "big top",
+      "air", "cage", "arena", "enclosure", "clinic", "facility",
+      "salon", "park", "house", "stable", "track", "barn",
+      "smithy", "workshop", "basement", "building", "scaffold",
+      "roof", "shop", "window", "floor", "shop", "studio",
+      "office", "room", "workshop", "studio", "shop", "atelier",
+      "studio", "runway", "salon", "shop", "nail salon", "spa",
+      "salon", "studio", "gym", "class", "office", "clinic",
+      "office", "center", "office", "agency", "house", "building",
+      "apartment", "building", "basement", "desk", "control room",
+      "call center", "dispatch center", "pole", "scene", "car",
+      "crime scene", "range", "lab", "laboratory", "morgue",
+      "lab", "scene", "lab", "room", "office", "server room",
+      "data center", "office", "studio", "office", "workspace",
+      "studio", "lab", "office", "desk", "office", "workspace",
+      "room", "office", "department", "lab", "office", "laboratory",
+      "workshop", "lab", "shop", "lab", "clean room", "facility",
+      "factory", "line", "plant", "workplace", "site", "building",
+      "roof", "tower", "plant", "control room", "center", "field",
+      "poles", "neighborhood", "house", "roof", "station", "studio",
+      "desk", "studio", "helicopter", "scene", "truck", "van",
+      "control room", "office", "booth", "studio", "booth", "suite",
+      "dark room", "facility", "studio", "office", "studio", "desk",
+      "studio", "room", "studio", "set", "office", "studio", "set",
+      "room", "office", "studio", "room", "setup", "station",
+      "facility", "venue", "office", "venue", "location", "center",
+      "gallery", "office", "space", "gallery", "auction house",
+      "office", "shop", "showroom", "studio", "facility", "field",
+      "wilderness", "habitat", "ocean", "ship", "bridge", "deck",
+      "boat", "waters", "port", "pier", "docks", "cab", "warehouse",
+      "office", "warehouse", "mailroom", "route", "street",
+      "sorting facility", "road", "highway", "street", "city",
+      "curb", "parking lot", "garage", "street", "sidewalk",
+      "street", "site", "cab", "site", "site", "road", "span",
+      "shaft", "mine", "field", "site", "office", "computer",
+      "office", "studio", "office", "field", "office", "field",
+      "lab", "station", "field", "lab", "field", "lab", "laboratory",
+      "facility", "plant", "facility", "office", "workplace",
+      "office", "site", "office", "department", "office", "office",
+      "desk", "office", "call center", "office", "bank", "counter",
+      "office", "trading floor", "desk", "office", "institution",
+      "office", "department", "secure room", "facility", "office",
+      "agency", "embassy", "consulate", "booth", "conference",
+      "classroom", "school", "clinic", "office", "clinic",
+      "surgery center", "office", "hospital", "center", "office",
+      "hospital", "operating room", "ER", "clinic", "office",
+      "clinic", "laboratory", "lab", "imaging room", "imaging center",
+      "exam room", "clinic", "facility", "office", "hospital",
+      "center", "drugstore", "shop", "office", "clinic", "office",
+      "surgical center", "office", "clinic", "office", "dental lab",
+      "laboratory"
+  };
+
+  // Add additional professional and role words
+  std::vector<std::string> additional_roles = {
+      "engineer", "manager", "operator", "worker", "designer", "driver",
+      "monitor", "officer", "broadcaster", "dentist", "director", "researcher",
+      "agent", "developer", "digger", "inspector", "instructor", "overseer",
+      "planner", "trainer", "arranger", "auditor", "checker", "coordinator",
+      "filmmaker", "installer", "leader", "maker", "master", "member",
+      "performer", "player", "producer", "reporter", "teacher", "actor",
+      "administrator", "animator", "announcer", "crafter", "curator", "dealer",
+      "deliverer", "doctor", "editor", "evaluator", "firefighter", "gamer",
+      "handler", "investigator", "medical", "organizer", "owner", "painter",
+      "pathologist", "producer", "ranger", "reviewer", "shooter", "sketcher",
+      "tester", "writer", "acrobat", "adjuster", "advertiser", "advisor",
+      "aesthetician", "ambassador", "anchor", "anesthesiologist", "anthropologist",
+      "appraiser", "archaeologist", "archivist", "assembler", "assessor",
+      "assistant", "astronomer", "auctioneer", "audiologist", "auditioner",
+      "baker", "banker", "barber", "bartender", "beekeeper", "believer",
+      "biller", "bookkeeper", "bookseller", "botanist", "bowler", "boxer",
+      "brainstormer", "breaker", "broker", "builder", "bus driver", "business analyst",
+      "busker", "butcher", "cabinetmaker", "calculator", "captain", "cardiologist",
+      "carpenter", "carrier", "cartographer", "cashier", "cataloger",
+      "ceramicist", "character animator", "chauffeur", "cinematographer",
+      "civil engineer", "claims processor", "climate scientist", "climber",
+      "clown", "collector", "commentator", "composer", "conductor",
+      "conservationist", "conservator", "consultant", "content creator",
+      "controller", "coordinator", "copywriter", "coroner", "counselor",
+      "creator", "cryptographer", "curator", "cutter", "cyber security",
+      "dancer", "database administrator", "decorator", "deliverer", "detective",
+      "devotee", "dialysis technician", "dietitian", "diplomat", "dispatcher",
+      "dna analyst", "documenter", "drummer", "economist", "electrician",
+      "electronics technician", "endodontist", "esl teacher", "event planner",
+      "examiner", "excavator", "executive", "fabricator", "facilitator",
+      "farmer", "farrier", "fashion designer", "fisherman", "fitness instructor",
+      "fixer", "flavor chemist", "florist", "forecaster", "forensic scientist",
+      "forester", "forklift operator", "furniture maker", "game developer",
+      "gardener", "gis specialist", "glassblower", "glazier", "golfer",
+      "graphics artist", "greeter", "grid operator", "groomer", "guitarist",
+      "hairdresser", "hardware engineer", "historian", "host", "hr manager",
+      "hydrologist", "hygienist", "illustrator", "industrial engineer",
+      "influencer", "interior designer", "interpreter", "interviewer",
+      "inventor", "inventory manager", "investigator", "investment banker",
+      "janitor", "jeweler", "jockey", "journalist", "juggler", "keeper",
+      "landlord", "landscaper", "lawyer", "learner", "librarian",
+      "lighting technician", "lineman", "loader", "loan officer",
+      "logistics manager", "longshoreman", "machine learning engineer",
+      "magician", "mail carrier", "maintenance worker", "makeup artist",
+      "manager", "manicurist", "marine biologist", "marketer",
+      "mason", "massage therapist", "mathematician", "media specialist",
+      "mediator", "meteorologist", "meter reader", "mobile developer",
+      "modeler", "model", "molder", "motion graphics artist", "mri technician",
+      "navigator", "network administrator", "neurologist", "novelist",
+      "nuclear engineer", "nurse", "nutritionist", "obstetrician",
+      "occupational therapist", "oceanographer", "oncologist", "ophthalmologist",
+      "optician", "optimizer", "optometrist", "oral surgeon", "orchestra member",
+      "organist", "orthodontist", "osha inspector", "paleontologist",
+      "party planner", "pastry chef", "pattern maker", "paver",
+      "payroll specialist", "pcb fabricator", "pediatrician", "periodontist",
+      "personal trainer", "pet groomer", "phlebotomist", "photographer",
+      "physical therapist", "physician", "pianist", "plumber", "podcaster",
+      "post-production supervisor"
+  };
+
+  // Add raw word list
+  std::vector<std::string> raw_words = {
+      "engineers", "managers", "operators", "workers", "designers", "drivers", "officers",
+      "dental", "directors", "manage", "researchers", "developers", "dig", "inspectors",
+      "instructors", "oversee", "planners", "trainers", "arrange", "auditors", "film",
+      "installers", "makers", "masters", "members", "performers", "players", "production",
+      "reporters", "teachers", "actors", "administrators", "animators", "announce", "crane",
+      "crime", "curators", "dealers", "doctors", "editors", "effects", "emergency",
+      "environmental", "financial", "firefighters", "gamers", "handlers", "imaging",
+      "insurance", "music", "organizers", "owners", "painters", "producers", "rangers",
+      "server", "sound", "speech", "testers", "writers", "3d", "911", "adjusters",
+      "advertisers", "advise", "advisors", "agricultural", "ai", "ambassadors", "anchors",
+      "animal", "antique", "appraisers", "assembly", "assist", "astronomers", "auction",
+      "auctioneers", "audio", "background", "bakers", "ballistics", "band", "bankers",
+      "barbers", "bartenders", "beekeepers", "believers", "benefits", "billing", "blood",
+      "bookkeepers", "booksellers", "bowlers", "boxers", "breakers", "brokers", "builders",
+      "bulldozer", "bus", "business", "buskers", "butchers", "cabinet", "cable", "career",
+      "carpenters", "carriers", "cartographers", "cashiers", "casting", "chain", "chambers",
+      "character", "children", "choir", "cinematographers", "circuit", "civil", "claims",
+      "climate", "climbers", "collections", "collectors", "commentators", "compliance",
+      "compose", "composers", "concept", "conductors", "congregations", "conservators",
+      "construction", "content", "controllers", "coordinators", "copywriters", "coroners",
+      "costume", "counselors", "creators", "credit", "cryptographers", "customers", "cut",
+      "cyber", "dam", "dancers", "dark", "darkroom", "database", "decide", "decorators",
+      "delivery", "dialysis", "dispatchers", "display", "dna", "dressing", "drummers",
+      "electronics", "elephant", "entrance", "esl", "esports", "estate", "event",
+      "evidence", "exam", "examiners", "exhibition", "fabricators", "farmers", "farriers",
+      "fashion", "fishermen", "fitness", "flavor", "forecasters", "forensic", "foresters",
+      "forklift", "furniture", "game", "gardeners", "gis", "glassblowers", "glaziers",
+      "golfers", "graders", "graphics", "grid", "groomers", "hairdressers", "hands",
+      "hardware", "headquarters", "hold", "horse", "hot", "hr", "hydroelectric",
+      "illustrators", "industrial", "influencers", "interior", "internet", "interns",
+      "interpreters", "inventors", "inventory", "investigators", "investment", "jam",
+      "janitors", "jewelers", "jugglers", "keepers", "landscapers", "lawyers", "learners",
+      "lighting", "linemen", "loan", "logistics", "longshoremen", "loom", "machine",
+      "mail", "maintenance", "makeup", "management", "marine", "marketers", "marketing",
+      "massage", "media", "mediators", "meter", "mobile", "modelers", "motion", "mri",
+      "muslims", "nail", "navigators", "network", "nuclear", "nurses", "occupational",
+      "oceanographers", "optimize", "oral", "orchestra", "osha", "party", "pastry",
+      "pattern", "paving", "payroll", "pcb", "personal", "pet", "photographers",
+      "physical", "pick", "plumbers", "post", "post-production", "postal", "pottery",
+      "practitioners", "preparers", "preservationists", "print", "printmakers", "process",
+      "processors", "product", "professional", "professors", "program", "programmers",
+      "project", "property", "props", "prosecutors", "prosthodontists", "protect",
+      "publicists", "publishing", "qa", "race", "ranchers", "readers", "receptionists",
+      "recital", "recruiters", "recycling", "regulators", "rescuers", "respiratory",
+      "restore", "restorers", "rideshare", "riggers", "ringers", "ringmasters",
+      "robotics", "roofers", "runners", "sailors", "salespeople", "sample", "satellite",
+      "scouts", "screenwriters", "scrum", "sculptors", "seamstresses", "search", "secure",
+      "sell", "semiconductor", "setters", "sew", "shape", "shepherds", "singers",
+      "sitters", "skaters", "slide", "social", "software", "soil", "solar", "sommeliers",
+      "sort", "sorting", "spectators", "sports", "statisticians", "stock", "stockers",
+      "stone", "storage", "storyboard", "streamers", "structural", "stunt", "stylists",
+      "superintendents", "supervise", "supervisors", "supply", "support", "surgery",
+      "surgical", "surveillance", "surveyors", "sustainability", "swimmers", "swing",
+      "system", "tailors", "tamers", "tax", "taxi", "technical", "telephone", "tellers",
+      "tend", "tennis", "texture", "tile", "top", "toxicologists", "trade", "trading",
+      "translators", "transport", "trapeze", "travel", "turbine", "tutors", "tv",
+      "ultrasound", "university", "upholsterers", "urban", "utility", "ux", "valets",
+      "video", "vintners", "violinists", "visual", "voice", "waiters", "walkers",
+      "waste", "waters", "weather", "weavers", "web", "wedding", "welders", "wilderness",
+      "wildlife", "witnesses", "worshippers", "x-ray", "yard", "yoga"
+  };
+
+  // Add all words to vocabulary with stemming
   std::vector<std::string> all_words;
   all_words.insert(all_words.end(), articles.begin(), articles.end());
   all_words.insert(all_words.end(), pronouns.begin(), pronouns.end());
@@ -368,20 +767,28 @@ void Vocabulary::initialize_basic_vocabulary() {
   all_words.insert(all_words.end(), connectors.begin(), connectors.end());
   all_words.insert(all_words.end(), adjectives.begin(), adjectives.end());
   all_words.insert(all_words.end(), nouns.begin(), nouns.end());
+  all_words.insert(all_words.end(), training_nouns.begin(), training_nouns.end());
+  all_words.insert(all_words.end(), additional_roles.begin(), additional_roles.end());
+  all_words.insert(all_words.end(), raw_words.begin(), raw_words.end());  // Add the new words
 
-  // Sort and remove duplicates
-  std::sort(all_words.begin(), all_words.end());
-  all_words.erase(std::unique(all_words.begin(), all_words.end()),
-                  all_words.end());
+  // Sort and remove duplicates (after stemming)
+  std::vector<std::pair<std::string, std::string>> stemmed_words;
+  for (const auto& word : all_words) {
+    stemmed_words.emplace_back(Stemmer::stem(word), word);
+  }
+  std::sort(stemmed_words.begin(), stemmed_words.end());
+  stemmed_words.erase(std::unique(stemmed_words.begin(), stemmed_words.end()), stemmed_words.end());
 
-  // Add each word
-  for (const auto &word : all_words) {
-    add_word(word);
+  // Add each stemmed word
+  for (const auto& [stemmed, original] : stemmed_words) {
+    add_word(stemmed);
   }
 }
 
 int Vocabulary::get_id(const std::string &token) const {
-  auto it = token_to_id.find(token);
+  // Stem the token before looking it up
+  std::string stemmed = Stemmer::stem(token);
+  auto it = token_to_id.find(stemmed);
   return it != token_to_id.end() ? it->second : unk_token_id;
 }
 
@@ -424,4 +831,13 @@ bool Vocabulary::verify_mappings() const {
     }
   }
   return valid;
+}
+
+// Add method to get original forms
+std::vector<std::string> Vocabulary::get_original_forms(const std::string& stemmed_word) const {
+    std::vector<std::string> originals;
+    // This would need to be populated during vocabulary building
+    // For now, just return the stemmed form
+    originals.push_back(stemmed_word);
+    return originals;
 }

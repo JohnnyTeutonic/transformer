@@ -30,4 +30,5 @@ public:
 
   void print_vocabulary_mappings() const;
   bool verify_mappings() const;
+  std::vector<std::string> get_original_forms(const std::string& stemmed_word) const;
 };
