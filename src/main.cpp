@@ -379,7 +379,7 @@ int main(int argc, char *argv[]) {
     config.use_rope = true;
     config.use_sliding_window = true;
     config.window_size = 256;
-    config.use_fp16 = false;
+    config.use_fp16 = true;
     config.head_dim = config.hidden_size / config.num_heads;  // Add explicit head_dim calculation
     config.batch_size = 8;  // Set the batch size
     config.num_epochs = 10;  // Set the number of epochs
