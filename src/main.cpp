@@ -120,12 +120,13 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
         }
 
         // Training loop
-        const size_t NUM_EPOCHS = 100;
+        const size_t NUM_EPOCHS = 30;
         const size_t BATCH_SIZE = 5;
         const size_t VALIDATION_INTERVAL = 100;  // Validate every 100 batches
         size_t global_step = 0;
         
         for (size_t epoch = 0; epoch < NUM_EPOCHS; ++epoch) {
+            std::cout << "epoch: " << epoch << std::endl;
             float epoch_loss = 0.0f;
             size_t num_batches = 0;
             
@@ -259,7 +260,75 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
             epoch_loss /= num_batches;
             std::cout << "Epoch " << epoch + 1 << "/" << NUM_EPOCHS 
                       << " - Loss: " << epoch_loss << std::endl;
+            
+            // Test predictions on sample inputs after each epoch
+            std::cout << "\n=== Testing Predictions After Epoch " << epoch + 1 << " ===\n";
+            std::vector<std::string> test_inputs = {
+                "Students research in the",  // Academic context
+                "Doctors work in the",       // Medical context
+                "Engineers build in the",    // Technical context
+                "Artists create in the",     // Creative context
+                "Chefs prepare in the"       // Culinary context
+            };
+
+            Matrix final_hidden_states;  // Store the last hidden states
+            for (const auto& test_input : test_inputs) {
+                std::cout << "\nTesting: '" << test_input << "'\n";
+                // Encode input
+                std::vector<int> test_tokens = tokenizer->encode(test_input);
+                
+                // Forward pass
+                Matrix test_hidden = transformer.forward(test_tokens);
+                Matrix test_logits = lm_head->project_to_vocab(test_hidden);
+                final_hidden_states = test_hidden;  // Save the last hidden states
+                std::cout << "TEST PREDICTIONS" << std::endl;
+                // Get top 5 predictions
+                print_top_predictions(test_logits, *tokenizer, 5);
+            }
+            std::cout << "\n=== End of Test Predictions ===\n";
+
+            // Save checkpoint if needed
+            const size_t checkpoint_frequency = 2;  // Save every 2 epochs
+            if ((epoch + 1) % checkpoint_frequency == 0) {
+                std::string save_directory = "models";
+                std::string model_name = "transformer_model";
+                std::filesystem::create_directories(save_directory);
+
+                // Save checkpoint using ModelSaver
+                ModelSaver model_saver;
+                if (!model_saver.saveCheckpoint(transformer, save_directory, model_name,
+                                              epoch + 1, epoch_loss)) {
+                    logger.log("Failed to save checkpoint", LogLevel::ERROR);
+                    return 1;
+                }
+                logger.log("Successfully saved checkpoint for epoch " + 
+                          std::to_string(epoch + 1), LogLevel::INFO);
+            }
+
+            // Store last hidden states for gradient checkpointing
+            GradientCheckpoint::cache_activation(std::to_string(epoch), final_hidden_states);
+
+            // Clear previous checkpoints to save memory
+            if (epoch > 0) {
+                GradientCheckpoint::get_activation(std::to_string(epoch - 1));  // This removes the activation from cache
+            }
+            
+            // Continue with next epoch...
         }
+
+        // Save the final model
+        std::string save_directory = "models";
+        std::string model_name = "transformer_model_final";
+        std::filesystem::create_directories(save_directory);
+        
+        std::cout << "\nSaving final model to " << save_directory << "/" << model_name << "...\n";
+        ModelSaver model_saver;
+        if (!model_saver.saveModel(transformer, save_directory, model_name)) {
+            logger.log("Failed to save final model", LogLevel::ERROR);
+            return 1;
+        }
+        logger.log("Successfully saved final model", LogLevel::INFO);
+        std::cout << "Model saved successfully!\n";
         
         return 0;
     } catch (const std::exception& e) {
