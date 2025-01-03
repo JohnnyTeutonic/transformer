@@ -57,8 +57,8 @@ int main(int argc, char *argv[]) {
         Logger &logger = Logger::getInstance();
         logger.enableLogging();
 
-auto training_data = std::move(TextPreprocessor::preprocess_training_data(train_dataset.pairs)); // convert to lowercase
-auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_dataset.pairs)); // convert to lowercase
+        auto training_data = std::move(TextPreprocessor::preprocess_training_data(train_dataset.pairs)); // convert to lowercase
+        auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_dataset.pairs)); // convert to lowercase
 #ifdef CUDA_AVAILABLE
         initialize_cuda();
 #endif
@@ -121,19 +121,17 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
         }
 
         // Training loop
-        const size_t NUM_EPOCHS = 30;
-        const size_t BATCH_SIZE = 5;
         const size_t VALIDATION_INTERVAL = 100;  // Validate every 100 batches
+        const size_t PRINT_INTERVAL = 50;       // Print progress every 50 steps
         size_t global_step = 0;
         
-        for (size_t epoch = 0; epoch < NUM_EPOCHS; ++epoch) {
-            std::cout << "epoch: " << epoch << std::endl;
+        for (size_t epoch = 0; epoch < config.num_epochs; ++epoch) {
             float epoch_loss = 0.0f;
             size_t num_batches = 0;
             
-            while (num_batches * BATCH_SIZE < train_dataset.size) {
+            while (num_batches * config.batch_size < train_dataset.size) {
                 // Get training batch
-                auto batch = get_batch(train_dataset, BATCH_SIZE);
+                auto batch = get_batch(train_dataset, config.batch_size);
                 
                 // Process batch
                 std::vector<std::vector<int>> input_tokens;
@@ -154,30 +152,23 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
                 Matrix logits;
                 
                 for (size_t i = 0; i < input_tokens.size(); ++i) {
-                    // Forward pass through transformer
                     hidden_states = transformer.forward(input_tokens[i]);
                     logits = lm_head->project_to_vocab(hidden_states);
                     
-                    // Create target slice with same dimensions as logits
                     Matrix target_slice(logits.rows(), logits.cols(), 0.0f);
-                    
-                    // Fill target slice from target distribution
                     for (size_t r = 0; r < logits.rows(); r++) {
                         for (size_t j = 0; j < logits.cols(); j++) {
                             target_slice(r, j) = target_distribution(i, j);
                         }
                     }
-                                        
-                    // Compute loss
-                    batch_loss += compute_batch_loss(logits, target_slice);
                     
-                    // Compute gradients and backward pass
-                    Matrix grad_output = logits - target_slice;  // Simple gradient for cross-entropy
+                    batch_loss += compute_batch_loss(logits, target_slice);
+                    Matrix grad_output = logits - target_slice;
                     transformer.backward(grad_output, input_tokens[i], learning_rate);
                 }
                 
                 batch_loss /= input_tokens.size();
-                std::cout << "batch loss: " << batch_loss << std::endl;
+                
                 // Update learning rate
                 float loss_ratio = batch_loss / (prev_loss + 1e-10f);
                 learning_rate = adjust_learning_rate(learning_rate, loss_ratio, global_step);
@@ -186,30 +177,26 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
                 // Update epoch statistics
                 epoch_loss += batch_loss;
                 num_batches++;
-                std::cout << "global step: " << global_step << std::endl;
                 global_step++;
                 
-                // Print progress
-                if (global_step % 10 == 0) {
-                    std::cout << "\rStep " << global_step 
+                // Print progress less frequently
+                if (global_step % PRINT_INTERVAL == 0) {
+                    std::cout << "\rEpoch " << epoch + 1 << "/" << config.num_epochs 
+                              << " - Step " << global_step 
                               << " - Loss: " << batch_loss 
-                              << " - LR: " << learning_rate << std::endl;
+                              << " - LR: " << learning_rate << std::flush;
                 }
                 
-                // Validation step
-                if (global_step % 5 == 0) {
-                    std::cout << "validation step" << std::endl;
+                // Validation step (less frequent)
+                if (global_step % VALIDATION_INTERVAL == 0) {
                     float val_loss = 0.0f;
                     float val_accuracy = 0.0f;
                     size_t val_batches = 0;
-                    const size_t MAX_VAL_BATCHES = 5;  // Limit validation batches for efficiency
+                    const size_t MAX_VAL_BATCHES = 5;
                     
-                    // Validation loop
                     while (val_batches < MAX_VAL_BATCHES) {
-                        std::cout << "validation batch: " << val_batches << std::endl;
-                        auto val_batch = get_batch(val_dataset, BATCH_SIZE);
+                        auto val_batch = get_batch(val_dataset, config.batch_size);
                         
-                        // Process validation batch
                         std::vector<std::vector<int>> val_input_tokens;
                         std::vector<std::vector<int>> val_target_tokens;
                         
@@ -219,19 +206,13 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
                         }
                         
                         Matrix val_target_distribution = create_batch_target_distribution(val_target_tokens, config.vocab_size);
-                        
                         float batch_val_loss = 0.0f;
-                        Matrix val_hidden_states;
-                        Matrix val_logits;
                         
                         for (size_t i = 0; i < val_input_tokens.size(); ++i) {
-                            val_hidden_states = transformer.forward(val_input_tokens[i]);
-                            val_logits = lm_head->project_to_vocab(val_hidden_states);
+                            Matrix val_hidden_states = transformer.forward(val_input_tokens[i]);
+                            Matrix val_logits = lm_head->project_to_vocab(val_hidden_states);
                             
-                            // Create validation target slice with same dimensions as logits
                             Matrix val_target_slice(val_logits.rows(), val_logits.cols(), 0.0f);
-                            
-                            // Fill validation target slice
                             for (size_t r = 0; r < val_logits.rows(); r++) {
                                 for (size_t j = 0; j < val_logits.cols(); j++) {
                                     val_target_slice(r, j) = val_target_distribution(i, j);
@@ -240,7 +221,6 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
                             
                             batch_val_loss += compute_batch_loss(val_logits, val_target_slice);
                             val_accuracy += calculate_accuracy(val_logits, val_target_slice);
-                            std::cout << "val accuracy: " << val_accuracy << std::endl;
                         }
                         
                         batch_val_loss /= val_input_tokens.size();
@@ -248,7 +228,6 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
                         val_batches++;
                     }
                     
-                    // Report validation metrics
                     val_loss /= val_batches;
                     val_accuracy /= val_batches;
                     std::cout << "\nValidation Step " << global_step 
@@ -259,7 +238,7 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
             
             // Report epoch metrics
             epoch_loss /= num_batches;
-            std::cout << "Epoch " << epoch + 1 << "/" << NUM_EPOCHS 
+            std::cout << "Epoch " << epoch + 1 << "/" << config.num_epochs 
                       << " - Loss: " << epoch_loss << std::endl;
             
             // Test predictions on sample inputs after each epoch
