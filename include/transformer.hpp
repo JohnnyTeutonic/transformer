@@ -198,7 +198,7 @@ private:
 public:
   Transformer() = default;
   explicit Transformer(const TransformerConfig &config);
-  Matrix forward(const std::vector<int> &input_tokens, bool use_cache = false);
+  Matrix forward(const std::vector<int> &input_tokens, std::vector<Matrix>* activations = nullptr);
   Matrix forward_cuda(const std::vector<int> &input_tokens,
                       bool use_cache = false);
   void train(const std::vector<std::vector<int>> &input_tokens,
