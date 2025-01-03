@@ -5,6 +5,25 @@
 #include "matrix.hpp"
 #include "tokenizer.hpp"
 
+// Dataset structure to handle both training and validation data
+struct DataSet {
+    std::vector<std::pair<std::string, std::string>> pairs;
+    size_t size;
+    size_t current_index;
+};
+
+// Helper function to load data pairs from file
+std::vector<std::pair<std::string, std::string>> load_data_pairs(const std::string& file_path);
+
+// Helper function to create dataset (training or validation)
+DataSet create_dataset(const std::string& mode);
+
+// Helper function to get next batch from dataset
+std::vector<std::pair<std::string, std::string>> get_batch(DataSet& dataset, size_t batch_size);
+
+// Helper function to calculate accuracy
+float calculate_accuracy(const Matrix& logits, const Matrix& targets);
+
 // Helper function to clip gradients
 void clip_gradients(std::vector<Matrix>& gradients, float threshold);
 
