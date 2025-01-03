@@ -373,8 +373,8 @@ void Transformer::train(const std::vector<std::vector<int>> &input_tokens,
   const size_t batch_size = config.batch_size;  // Use batch_size from config
 
   for (size_t epoch = 0; epoch < num_epochs; ++epoch) {
-// Process batches
-#pragma omp parallel for
+    // Process batches
+    #pragma omp parallel for
     for (size_t i = 0; i < input_tokens.size(); i += batch_size) {
       size_t batch_end = std::min(i + batch_size, input_tokens.size());
 
@@ -384,18 +384,42 @@ void Transformer::train(const std::vector<std::vector<int>> &input_tokens,
       std::vector<std::vector<int>> target_batch(
           target_tokens.begin() + i, target_tokens.begin() + batch_end);
 
-      // Forward pass
-      std::vector<Matrix> activations;
-      Matrix logits = forward(input_batch[0], &activations);
+      // For each sequence in the batch
+      for (size_t seq_idx = 0; seq_idx < input_batch.size(); ++seq_idx) {
+        const auto& input_seq = input_batch[seq_idx];
+        const auto& target_seq = target_batch[seq_idx];
+        
+        if (input_seq.empty() || target_seq.empty()) continue;
 
-      // Compute loss and gradients
-      Matrix loss_grad = compute_loss_gradients(logits, target_batch[0]);
+        // Create input sequence (all tokens except last)
+        std::vector<int> input_prefix(input_seq.begin(), input_seq.end() - 1);
+        
+        // Target is the last token
+        int target = input_seq.back();
 
-      // Backward pass
-      backward_pass(activations, loss_grad);
-      std::cout << "backward pass done" << std::endl;
-      // IMPORTANT TO UPDATE PARAMETERS USING OPTIMIZER
-      update_parameters(learning_rate);
+        // Forward pass with causal attention mask
+        std::vector<Matrix> activations;
+        Matrix logits = forward(input_prefix, &activations);
+        
+        // We only care about the prediction for the last position
+        Matrix final_logits(1, logits.cols());
+        for (size_t j = 0; j < logits.cols(); ++j) {
+          final_logits(0, j) = logits(logits.rows() - 1, j);
+        }
+
+        // Create target vector with just the final token
+        std::vector<int> target_vec = {target};
+
+        // Compute loss and gradients for the final prediction
+        Matrix loss_grad = compute_loss_gradients(final_logits, target_vec);
+
+        // Backward pass
+        backward_pass(activations, loss_grad);
+        std::cout << "backward pass done" << std::endl;
+        
+        // Update parameters
+        update_parameters(learning_rate);
+      }
     }
   }
   std::cout << "exiting Transformer::train" << std::endl;
@@ -410,35 +434,42 @@ Matrix Transformer::compute_loss_gradients(const Matrix &logits,
 
   // For each sequence position
   for (size_t i = 0; i < batch_size; ++i) {
-    // Compute softmax probabilities
+    // Compute softmax probabilities with numerical stability
     std::vector<float> probs(vocab_size);
-    float max_logit = logits(i, 0);  // Initialize with first value
-    std::cout << "logit value: " << logits(i, 0) << std::endl;
-
-    // Find max logit for numerical stabilxity
-    for (size_t j = 0; j < vocab_size; ++j) {
+    float max_logit = logits(i, 0);
+    
+    // Find max logit for numerical stability
+    for (size_t j = 1; j < vocab_size; ++j) {
       max_logit = std::max(max_logit, logits(i, j));
     }
 
-    float sum = 0.0f;
-    // Add numerical stability to softmax computation
-    const float epsilon = 1e-10f;
+    // Compute softmax denominator
+    float sum_exp = 0.0f;
     for (size_t j = 0; j < vocab_size; ++j) {
-      // Clamp the exponent to prevent overflow
-      float exp_val = std::min(logits(i, j) - max_logit, 88.0f);
-      probs[j] = std::exp(exp_val);
-      sum += probs[j];
+      probs[j] = std::exp(logits(i, j) - max_logit);
+      sum_exp += probs[j];
     }
-    // Prevent division by zero
-    sum = std::max(sum, epsilon);
 
-    // Normalize and compute gradients
+    // Normalize probabilities and compute gradients
+    const float epsilon = 1e-10f;
+    sum_exp = std::max(sum_exp, epsilon);
+    
     for (size_t j = 0; j < vocab_size; ++j) {
-      probs[j] /= sum;
-      // Gradient is (probability - 1) for correct class, probability for others
+      probs[j] /= sum_exp;
+      // Cross entropy gradient: p_i - y_i where y_i is 1 for target class, 0 otherwise
       gradients(i, j) = probs[j];
     }
-    gradients(i, targets[i]) -= 1.0f; // Subtract 1 from target class
+    
+    // Only subtract 1.0 from target class if it's valid
+    if (targets[i] >= 0 && targets[i] < vocab_size) {
+      gradients(i, targets[i]) -= 1.0f;
+    }
+  }
+
+  // Apply gradient scaling to prevent vanishing gradients
+  const float scale = 10.0f;  // Increase scale to combat small gradients
+  for (size_t i = 0; i < gradients.size(); ++i) {
+    gradients.data()[i] *= scale;
   }
 
   std::cout << "exiting Transformer::compute_loss_gradients" << std::endl;
@@ -479,69 +510,72 @@ void Transformer::backward_pass(const std::vector<Matrix> &activations,
 }
 
 void Transformer::update_parameters(float learning_rate) {
-    std::cout << "\n=== Transformer::update_parameters START ===" << std::endl;
+    std::cout << "=== Transformer::update_parameters START ===\n" << std::endl;
     
-    // Get all trainable parameters and their gradients
-    auto& params = this->parameters();
-    auto& grads = this->parameter_gradients();
-    
-    if (params.size() != grads.size()) {
-        throw std::runtime_error("Parameter and gradient size mismatch: " + 
-                               std::to_string(params.size()) + " vs " + 
-                               std::to_string(grads.size()));
+    // Initialize Adam optimizer parameters if not done
+    if (momentum_buffers.empty()) {
+        auto& params = parameters();
+        momentum_buffers.reserve(params.size());
+        velocity_buffers.reserve(params.size());
+        for (const auto& param : params) {
+            momentum_buffers.emplace_back(param.rows(), param.cols(), 0.0f);
+            velocity_buffers.emplace_back(param.rows(), param.cols(), 0.0f);
+        }
     }
     
-    std::cout << "Updating " << params.size() << " parameter matrices" << std::endl;
-    
-    // Implement Adam optimizer
+    // Adam hyperparameters
     const float beta1 = 0.9f;
     const float beta2 = 0.999f;
     const float epsilon = 1e-8f;
     
-    // Initialize momentum and velocity if not already done
-    if (momentum_buffers.empty()) {
-        momentum_buffers.resize(params.size());
-        velocity_buffers.resize(params.size());
-        for (size_t i = 0; i < params.size(); i++) {
-            momentum_buffers[i] = Matrix(params[i].rows(), params[i].cols(), 0.0f);
-            velocity_buffers[i] = Matrix(params[i].rows(), params[i].cols(), 0.0f);
-        }
-    }
+    // Get parameter gradients
+    auto& grads = parameter_gradients();
+    auto& params = parameters();
     
-    // Update each parameter matrix
-    for (size_t i = 0; i < params.size(); i++) {
+    // Update each parameter with Adam
+    for (size_t i = 0; i < params.size(); ++i) {
         Matrix& param = params[i];
-        const Matrix& grad = grads[i];
+        Matrix& grad = grads[i];
         Matrix& momentum = momentum_buffers[i];
         Matrix& velocity = velocity_buffers[i];
         
-        if (param.rows() != grad.rows() || param.cols() != grad.cols()) {
-            throw std::runtime_error("Parameter and gradient dimension mismatch at index " + 
-                                   std::to_string(i));
+        // Apply gradient clipping per parameter with larger threshold
+        float grad_norm = 0.0f;
+        for (size_t j = 0; j < grad.size(); ++j) {
+            grad_norm += grad.data()[j] * grad.data()[j];
+        }
+        grad_norm = std::sqrt(grad_norm);
+        
+        const float max_grad_norm = 10.0f;  // Increased from 1.0f
+        if (grad_norm > max_grad_norm) {
+            float scale = max_grad_norm / (grad_norm + epsilon);
+            for (size_t j = 0; j < grad.size(); ++j) {
+                grad.data()[j] *= scale;
+            }
         }
         
-        std::cout << "Updating parameter matrix " << i << " with shape: " 
-                  << param.rows() << "x" << param.cols() << std::endl;
-        
-        // Update rule with Adam optimizer
-        for (size_t j = 0; j < param.size(); j++) {
-            // Update momentum
-            momentum.data()[j] = beta1 * momentum.data()[j] + (1.0f - beta1) * grad.data()[j];
+        // Update momentum and velocity
+        for (size_t j = 0; j < param.size(); ++j) {
+            momentum.data()[j] = beta1 * momentum.data()[j] + 
+                                (1.0f - beta1) * grad.data()[j];
             
-            // Update velocity
             velocity.data()[j] = beta2 * velocity.data()[j] + 
-                               (1.0f - beta2) * grad.data()[j] * grad.data()[j];
+                                (1.0f - beta2) * grad.data()[j] * grad.data()[j];
             
             // Compute bias-corrected estimates
             float m_hat = momentum.data()[j] / (1.0f - std::pow(beta1, update_step + 1));
             float v_hat = velocity.data()[j] / (1.0f - std::pow(beta2, update_step + 1));
             
-            // Update parameter
-            param.data()[j] -= learning_rate * m_hat / (std::sqrt(v_hat) + epsilon);
+            // Update parameter with less restrictive bounds
+            const float update = learning_rate * m_hat / (std::sqrt(v_hat) + epsilon);
+            const float max_update = 1.0f;  // Increased from 0.1f
+            float clamped_update = std::max(-max_update, std::min(max_update, update));
+            param.data()[j] -= clamped_update;
             
-            // Add gradient clipping
-            if (param.data()[j] > 5.0f) param.data()[j] = 5.0f;
-            if (param.data()[j] < -5.0f) param.data()[j] = -5.0f;
+            // Less aggressive parameter clipping
+            const float param_clip = 5.0f;  // Increased from 1.0f
+            if (param.data()[j] > param_clip) param.data()[j] = param_clip;
+            if (param.data()[j] < -param_clip) param.data()[j] = -param_clip;
         }
     }
     
@@ -1078,39 +1112,24 @@ void Transformer::backward(const Matrix &grad_output, const std::vector<int> &in
     try {
         std::cout << "\n=== Transformer::backward START ===" << std::endl;
         
-        // Add gradient scaling factor
-        const float grad_scale = 16.0f;  // Start with larger scale to combat vanishing gradients
-        Matrix scaled_grad = grad_output;
+        Matrix current_grad = grad_output;
         
-        // Scale up gradients
-        for (size_t i = 0; i < scaled_grad.size(); ++i) {
-            scaled_grad.data()[i] *= grad_scale;
-        }
-        
-        // Gradient clipping and normalization
-        const float max_grad_norm = 1.0f;
-        Matrix clipped_grad = scaled_grad;
-        
-        // Calculate gradient norm
+        // Use a larger gradient clipping threshold
+        const float max_grad_norm = 5.0f;  // Increased from 0.5f
         float grad_norm = 0.0f;
-        for (size_t i = 0; i < clipped_grad.size(); ++i) {
-            grad_norm += clipped_grad.data()[i] * clipped_grad.data()[i];
+        for (size_t i = 0; i < current_grad.size(); ++i) {
+            grad_norm += current_grad.data()[i] * current_grad.data()[i];
         }
         grad_norm = std::sqrt(grad_norm);
         
-        // Add dynamic gradient scaling based on norm
-        float dynamic_scale = 1.0f;
-        if (grad_norm < 0.1f) {  // Gradients too small
-            dynamic_scale = 2.0f;
-        } else if (grad_norm > 10.0f) {  // Gradients too large
-            dynamic_scale = 0.5f;
+        // Only clip if norm is too large
+        if (grad_norm > max_grad_norm) {
+            float scale_factor = max_grad_norm / (grad_norm + 1e-6f);
+            for (size_t i = 0; i < current_grad.size(); ++i) {
+                current_grad.data()[i] *= scale_factor;
+            }
         }
         
-        // Apply dynamic scaling
-        for (size_t i = 0; i < clipped_grad.size(); ++i) {
-            clipped_grad.data()[i] *= dynamic_scale;
-        }
-
         // Get cached activations for each layer
         std::vector<Matrix> layer_activations;
         layer_activations.reserve(layers.size());
@@ -1122,7 +1141,7 @@ void Transformer::backward(const Matrix &grad_output, const std::vector<int> &in
         }
 
         // Backward through final layer norm
-        Matrix current_grad = final_ln->backward(clipped_grad, layer_activations.back());
+        current_grad = final_ln->backward(current_grad, layer_activations.back());
 
         // Backward through transformer layers in reverse order
         for (int i = layers.size() - 1; i >= 0; --i) {
@@ -1133,13 +1152,11 @@ void Transformer::backward(const Matrix &grad_output, const std::vector<int> &in
             
             // Create target distribution for attention mechanism
             Matrix target_distribution(layer_input.rows(), layer_input.cols(), 0.0f);
-            // Fill target distribution based on input tokens if needed
-            // This is used by attention mechanism for computing gradients
             
             // Backward through transformer layer
             current_grad = layers[i]->backward(current_grad, layer_input, target_distribution);
             
-            // Apply gradient clipping per layer if needed
+            // Apply per-layer gradient clipping with larger threshold
             float layer_grad_norm = 0.0f;
             for (size_t j = 0; j < current_grad.size(); ++j) {
                 layer_grad_norm += current_grad.data()[j] * current_grad.data()[j];
@@ -1157,6 +1174,7 @@ void Transformer::backward(const Matrix &grad_output, const std::vector<int> &in
         // Backward through embeddings
         token_embedding->backward(current_grad, input_tokens);
 
+        // Use the original learning rate without scaling down
         update_parameters(learning_rate);
 
         std::cout << "=== Transformer::backward END ===\n" << std::endl;
