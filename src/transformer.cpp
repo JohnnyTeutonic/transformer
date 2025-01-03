@@ -19,14 +19,16 @@ extern cublasHandle_t cublas_handle;
 TransformerConfig::TransformerConfig(size_t vocab_size, size_t max_seq_length,
                                      size_t hidden_size, size_t num_layers,
                                      size_t num_heads, size_t batch_size,
-                                     size_t num_epochs)
+                                     size_t num_epochs,
+                                     LogLevel log_level)
     : vocab_size(vocab_size), max_seq_length(max_seq_length),
       hidden_size(hidden_size), num_layers(num_layers), num_heads(num_heads),
       head_dim(hidden_size / num_heads), intermediate_size(4 * hidden_size),
       dropout_prob(0.1f), use_flash_attention(true), use_rope(true),
       use_sliding_window(false), window_size(512), use_gqa(false),
       num_kv_heads(num_heads), use_cuda(true), batch_size(batch_size),
-      num_epochs(num_epochs) {
+      num_epochs(num_epochs), log_level(log_level) {
+  Logger::getInstance().setLogLevel(log_level);
   std::cout << "entering TransformerConfig constructor" << std::endl;
   if (hidden_size % num_heads != 0) {
     throw std::invalid_argument(
@@ -74,7 +76,17 @@ Matrix TransformerLayer::forward(const Matrix &input, const AttentionMask &mask,
     
     // Self attention
     std::cout << "Applying self attention..." << std::endl;
-    Matrix attention_output = self_attention->forward(normalized, mask, kv_cache);
+    Matrix attention_output;
+    if (config.use_flash_attention) {
+        std::cout << "=== Using FLASH attention for forward pass ===" << std::endl;
+        Matrix Q = matmul(normalized, self_attention->query_proj);
+        Matrix K = matmul(normalized, self_attention->key_proj);
+        Matrix V = matmul(normalized, self_attention->value_proj);
+        attention_output = self_attention->flash_attention(Q, K, V, mask);
+    } else {
+        std::cout << "=== Using STANDARD attention for forward pass ===" << std::endl;
+        attention_output = self_attention->forward(normalized, mask, kv_cache);
+    }
     std::cout << "Attention output shape: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
     
     // Validate dimensions before adding residual
@@ -175,7 +187,9 @@ Transformer::Transformer(const TransformerConfig &config) : config(config) {
   std::cout << "- Head dimension: " << config.head_dim << std::endl;
   std::cout << "- Intermediate size: " << config.intermediate_size << std::endl;
   std::cout << "- Dropout probability: " << config.dropout_prob << std::endl;
-  std::cout << "- Use flash attention: " << std::boolalpha << config.use_flash_attention << std::endl;
+  std::cout << "=== ATTENTION CONFIGURATION ===" << std::endl;
+  std::cout << "- Flash attention enabled: " << std::boolalpha << config.use_flash_attention << std::endl;
+  std::cout << "- Flash attention setting from config: " << std::boolalpha << this->config.use_flash_attention << std::endl;
   std::cout << "- Use RoPE: " << config.use_rope << std::endl;
   std::cout << "- Use sliding window: " << config.use_sliding_window << std::endl;
   std::cout << "- Window size: " << config.window_size << std::endl;
@@ -295,8 +309,26 @@ Matrix Transformer::forward(const std::vector<int> &input_tokens, bool use_cache
         // Save activation for gradient checkpointing
         GradientCheckpoint::save_activation(hidden_states, i);
         
+        std::cout << "\nLayer " << i << " configuration:" << std::endl;
+        std::cout << "- Flash attention enabled: " << std::boolalpha << config.use_flash_attention << std::endl;
+        
         // Forward through layer
-        hidden_states = layers[i]->forward(hidden_states, mask);
+        if (config.use_flash_attention) {
+            std::cout << "=== Using FLASH attention for layer " << i << " ===" << std::endl;
+            Matrix Q = matmul(hidden_states, layers[i]->self_attention->query_proj);
+            std::cout << "Q matrix shape: " << Q.rows() << "x" << Q.cols() << std::endl;
+            Matrix K = matmul(hidden_states, layers[i]->self_attention->key_proj);
+            std::cout << "K matrix shape: " << K.rows() << "x" << K.cols() << std::endl;
+            Matrix V = matmul(hidden_states, layers[i]->self_attention->value_proj);
+            std::cout << "V matrix shape: " << V.rows() << "x" << V.cols() << std::endl;
+            
+            // Use flash attention algorithm
+            hidden_states = layers[i]->self_attention->flash_attention(Q, K, V, mask);
+            std::cout << "Flash attention output shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+        } else {
+            std::cout << "=== Using STANDARD attention for layer " << i << " ===" << std::endl;
+            hidden_states = layers[i]->forward(hidden_states, mask);
+        }
         
         if (config.use_fp16) {
             HalfPrecisionTraining::convert_to_fp16(hidden_states);
@@ -804,7 +836,22 @@ Matrix TransformerLayer::backward(const Matrix& grad_output,
         Matrix attn_normalized = GradientCheckpoint::get_activation(attn_key);
         
         Matrix d_residual1 = d_ln2;
-        Matrix d_attn = self_attention->backward(d_residual1, attn_normalized, target_distribution);
+        Matrix d_attn;
+        if (config.use_flash_attention) {
+            // Use flash attention backward pass
+            std::cout << "Using flash attention for backward pass" << std::endl;
+            Matrix Q = matmul(attn_normalized, self_attention->query_proj);
+            Matrix K = matmul(attn_normalized, self_attention->key_proj);
+            Matrix V = matmul(attn_normalized, self_attention->value_proj);
+            
+            // Use flash attention algorithm
+            Matrix attention_output = self_attention->flash_attention(Q, K, V, AttentionMask());
+            d_attn = self_attention->backward(d_residual1, attn_normalized, attention_output);
+        } else {
+            // Use standard attention backward pass
+            std::cout << "Using standard attention for backward pass" << std::endl;
+            d_attn = self_attention->backward(d_residual1, attn_normalized, target_distribution);
+        }
         std::cout << "Attention backward" << std::endl;
 
         return d_attn;
@@ -909,7 +956,7 @@ Matrix Transformer::forward_cuda(const std::vector<int> &input_tokens, bool use_
 }
 
 Matrix TransformerLayer::backward_cuda(const Matrix &grad,
-                                       const Matrix &input) const {
+                                     const Matrix &input) const {
 #ifdef USE_CUDA
     std::cout << "entering TransformerLayer::backward_cuda" << std::endl;
     
@@ -932,8 +979,27 @@ Matrix TransformerLayer::backward_cuda(const Matrix &grad,
     Matrix attn_normalized = GradientCheckpoint::get_activation(attn_key);
     
     Matrix d_residual1 = d_ln2;
-    Matrix d_attn = self_attention->backward_cuda(d_residual1, attn_normalized);
+    Matrix d_attn;
+    // Create empty target distribution matrix
+    Matrix target_distribution(input.rows(), input.cols(), 0.0f);
     
+    if (config.use_flash_attention) {
+        // Use flash attention backward pass
+        std::cout << "Using flash attention for backward pass" << std::endl;
+        Matrix Q = matmul(attn_normalized, self_attention->query_proj);
+        Matrix K = matmul(attn_normalized, self_attention->key_proj);
+        Matrix V = matmul(attn_normalized, self_attention->value_proj);
+        
+        // Use flash attention algorithm
+        Matrix attention_output = self_attention->flash_attention(Q, K, V, AttentionMask());
+        d_attn = self_attention->backward(d_residual1, attn_normalized, attention_output);
+    } else {
+        // Use standard attention backward pass
+        std::cout << "Using standard attention for backward pass" << std::endl;
+        d_attn = self_attention->backward(d_residual1, attn_normalized, target_distribution);
+    }
+    std::cout << "Attention backward" << std::endl;
+
     return d_attn;
 #else
     throw std::runtime_error("CUDA support not enabled");

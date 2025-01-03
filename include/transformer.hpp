@@ -9,6 +9,7 @@
 #include "layernorm.hpp"
 #include "lm_head.hpp"
 #include "memory_pool.hpp"
+#include "logger.hpp"
 #include <functional>
 #include <memory>
 #include <vector>
@@ -40,11 +41,13 @@ public:
   size_t memory_pool_size;
   size_t batch_size;
   size_t num_epochs;
+  LogLevel log_level;
 
   TransformerConfig(size_t vocab_size = 50000, size_t max_seq_length = 2048,
                     size_t hidden_size = 768, size_t num_layers = 12,
                     size_t num_heads = 12, size_t batch_size = 1,
-                    size_t num_epochs = 10);
+                    size_t num_epochs = 10,
+                    LogLevel log_level = LogLevel::INFO);
 
   friend bool operator!=(const TransformerConfig &lhs,
                          const TransformerConfig &rhs) {

@@ -1,78 +1,105 @@
 #include "../include/logger.hpp"
+#include <iostream>
+#include <filesystem>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 
-std::unique_ptr<Logger> Logger::instance = nullptr;
+Logger* Logger::instance = nullptr;
+// Save the original cout buffer
+std::streambuf* Logger::cout_buffer = nullptr;
 
-Logger::Logger() {
-  // Don't open the file in constructor - wait for startLogging()
-  cout_buffer = nullptr;
-  cerr_buffer = nullptr;
+Logger::Logger() : logging_enabled(true), current_level(LogLevel::INFO) {
+    // Get current time
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    std::stringstream datetime;
+    datetime << std::put_time(std::localtime(&time_t_now), "%d%m%Y_%H%M%S");
+    
+    // Create logs directory if it doesn't exist
+    std::filesystem::create_directories("logs");
+    
+    // Create log filename with datetime
+    std::string log_filename = "logs/transformer_" + datetime.str() + ".log";
+    
+    log_file.open(log_filename, std::ios::out | std::ios::app);
+    if (!log_file.is_open()) {
+        std::cerr << "Failed to open log file: " << log_filename << std::endl;
+    }
+    else {
+        // Log the start time
+        log_file << "=== Log started at: " << std::put_time(std::localtime(&time_t_now), "%d-%m-%Y %H:%M:%S") << " ===" << std::endl;
+    }
+}
+
+Logger& Logger::getInstance() {
+    if (instance == nullptr) {
+        instance = new Logger();
+    }
+    return *instance;
+}
+
+void Logger::log(const std::string& message) {
+    log(message, LogLevel::INFO);
+}
+
+void Logger::log(const std::string& message, LogLevel level) {
+    if (!logging_enabled || level < current_level) return;
+    
+    const char* level_str;
+    switch(level) {
+        case LogLevel::INFO:    level_str = "INFO"; break;
+        case LogLevel::DEBUG:   level_str = "DEBUG"; break;
+        case LogLevel::WARNING: level_str = "WARNING"; break;
+        case LogLevel::ERROR:   level_str = "ERROR"; break;
+    }
+    
+    if (log_file.is_open()) {
+        log_file << "[" << level_str << "] " << message << std::endl;
+        log_file.flush();
+    } else {
+        // Temporary fallback to stderr if file isn't open
+        std::cerr << "Log file not open, writing to stderr: [" << level_str << "] " << message << std::endl;
+    }
+}
+
+void Logger::setLogLevel(LogLevel level) {
+    current_level = level;
+}
+
+LogLevel Logger::getLogLevel() const {
+    return current_level;
+}
+
+void Logger::enableLogging() {
+    logging_enabled = true;
+    if (log_file.is_open()) {
+        // Save cout's buffer before redirect
+        cout_buffer = std::cout.rdbuf();
+        // Redirect cout to log file
+        std::cout.rdbuf(log_file.rdbuf());
+    }
+}
+
+void Logger::disableLogging() {
+    logging_enabled = false;
+    // Restore cout's original buffer if we saved it
+    if (cout_buffer != nullptr) {
+        std::cout.rdbuf(cout_buffer);
+        cout_buffer = nullptr;
+    }
 }
 
 Logger::~Logger() {
-  if (log_file.is_open()) {
-    stopLogging();
-    log_file.close();
-  }
-}
-
-Logger &Logger::getInstance() {
-  if (!instance) {
-    instance = std::unique_ptr<Logger>(new Logger());
-  }
-  return *instance;
-}
-
-void Logger::startLogging() {
-  // Close the file if it's already open
-  if (log_file.is_open()) {
-    log_file.close();
-  }
-
-  // Delete the existing log file if it exists
-  std::remove("transformer.log");
-
-  // Open a new file, truncating any existing content
-  log_file.open("transformer.log", std::ios::out | std::ios::trunc);
-  if (!log_file.is_open()) {
-    std::cerr << "Failed to open log file" << std::endl;
-    return;
-  }
-
-  // Start capturing cout
-  auto old_cout_buf = std::cout.rdbuf();
-  std::cout.rdbuf(log_file.rdbuf());
-
-  // Log start time
-  auto now = std::chrono::system_clock::now();
-  auto time = std::chrono::system_clock::to_time_t(now);
-  log_file << "=== Logging started at " << std::ctime(&time)
-           << "===" << std::endl;
-}
-
-void Logger::stopLogging() {
-  // Restore the original buffers
-  if (cout_buffer) {
-    std::cout.rdbuf(cout_buffer);
-    cout_buffer = nullptr;
-  }
-  if (cerr_buffer) {
-    std::cerr.rdbuf(cerr_buffer);
-    cerr_buffer = nullptr;
-  }
-
-  time_t now = time(nullptr);
-  log_file << "\n=== Logging stopped at " << ctime(&now) << "===\n";
-}
-
-void Logger::log(const std::string &message, bool is_error) {
-  if (!logging_enabled)
-    return;
-
-  time_t now = time(nullptr);
-  std::string timestamp(ctime(&now));
-  timestamp = timestamp.substr(0, timestamp.length() - 1);
-
-  log_file << "[" << timestamp << "] " << (is_error ? "ERROR: " : "INFO: ")
-           << message << std::endl;
+    // Restore cout's original buffer if we saved it
+    if (cout_buffer != nullptr) {
+        std::cout.rdbuf(cout_buffer);
+    }
+    if (log_file.is_open()) {
+        log_file.close();
+    }
+    if (instance) {
+        delete instance;
+        instance = nullptr;
+    }
 }
