@@ -53,7 +53,6 @@ int main(int argc, char *argv[]) {
         // Initialize training and validation datasets
         DataSet train_dataset = create_dataset("train");
         DataSet val_dataset = create_dataset("validation");
-        
         // Initialize logger
         Logger &logger = Logger::getInstance();
         logger.enableLogging();
@@ -66,7 +65,9 @@ auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_
         // Initialize tokenizer first to get vocab size
         auto tokenizer = std::make_unique<Tokenizer>();
         tokenizer->print_vocabulary_mappings(); // Print initial mappings
-        
+        // Analyze token mappings
+        analyze_token_mappings(training_data, *tokenizer);
+
         // Get vocabulary size from the tokenizer
         size_t actual_vocab_size = tokenizer->vocab_size();
         
