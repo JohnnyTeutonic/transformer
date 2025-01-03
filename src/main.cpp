@@ -58,6 +58,8 @@ int main(int argc, char *argv[]) {
         Logger &logger = Logger::getInstance();
         logger.enableLogging();
 
+auto training_data = std::move(TextPreprocessor::preprocess_training_data(train_dataset.pairs)); // convert to lowercase
+auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_dataset.pairs)); // convert to lowercase
 #ifdef CUDA_AVAILABLE
         initialize_cuda();
 #endif
@@ -189,7 +191,7 @@ int main(int argc, char *argv[]) {
                 if (global_step % 10 == 0) {
                     std::cout << "\rStep " << global_step 
                               << " - Loss: " << batch_loss 
-                              << " - LR: " << learning_rate << std::flush;
+                              << " - LR: " << learning_rate << std::endl;
                 }
                 
                 // Validation step
