@@ -21,7 +21,7 @@ public:
   FeedForward(size_t hidden_size, size_t intermediate_size, float dropout = 0.1f);  // Declaration only
   Matrix forward(const Matrix &x);
   Matrix backward(const Matrix &grad_output, const Matrix &input);
-  Matrix backward_cuda(const Matrix &grad, const Matrix &input) const;
+  Matrix backward_cuda(const Matrix& grad_output, const Matrix& grad_hidden);
   void save(std::ostream &os) const;
   static std::unique_ptr<FeedForward> load(std::istream &is);
   friend class Transformer;

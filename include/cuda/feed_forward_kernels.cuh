@@ -1,26 +1,43 @@
 #pragma once
 #include <cuda_runtime.h>
+#include "cuda_utils.cuh"
 
-#ifdef __CUDACC__
-#define CUDA_CALLABLE __host__ __device__
-#define KERNEL __global__
-#else
-#define CUDA_CALLABLE
-#define KERNEL
-#endif
+// Kernel declarations
+__global__ void feed_forward_backward_kernel_1(
+    const float* grad_output,
+    const float* w2,
+    float* d_intermediate,
+    size_t batch_size,
+    size_t hidden_size,
+    size_t intermediate_size
+);
 
-// Declare CUDA kernels
-KERNEL void feed_forward_backward_kernel_1(const float *grad, const float *w2,
-                                           float *d_intermediate,
-                                           const int batch_size,
-                                           const int hidden_size,
-                                           const int intermediate_size);
+__global__ void gelu_backward_kernel(
+    const float* d_intermediate,
+    float* d_input,
+    size_t size
+);
 
-KERNEL void gelu_backward_kernel(const float *d_intermediate, float *d_input,
-                                 const int num_elements);
+__global__ void feed_forward_backward_kernel_2(
+    const float* d_intermediate,
+    const float* w1,
+    float* dx,
+    size_t batch_size,
+    size_t hidden_size,
+    size_t intermediate_size
+);
 
-KERNEL void feed_forward_backward_kernel_2(const float *d_intermediate,
-                                           const float *w1, float *d_dx,
-                                           const int batch_size,
-                                           const int hidden_size,
-                                           const int intermediate_size);
+// Add launch wrapper functions
+namespace cuda {
+    void launch_feed_forward_backward(
+        const float* grad_output,
+        const float* w2,
+        float* d_intermediate,
+        float* d_w1,
+        float* d_output,
+        size_t batch_size,
+        size_t hidden_size,
+        size_t intermediate_size,
+        cudaStream_t stream = nullptr
+    );
+}

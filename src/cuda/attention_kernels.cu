@@ -1,4 +1,5 @@
 #include "../../include/cuda/cuda_utils.cuh"
+#include "../../include/attention.hpp"
 
 __global__ void flash_attention_kernel(const float *Q, const float *K,
                                        const float *V, float *output,
@@ -65,4 +66,13 @@ __global__ void flash_attention_kernel(const float *Q, const float *K,
   } else {
     output[global_idx] = 0.0f;
   }
+}
+
+Matrix MultiHeadAttention::backward_cuda(const Matrix &grad_output, const Matrix &input) const {
+#ifdef USE_CUDA
+    // For now, fall back to CPU implementation with empty target distribution
+    return backward(grad_output, input, Matrix());
+#else
+    throw std::runtime_error("CUDA support not enabled");
+#endif
 }

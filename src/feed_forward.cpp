@@ -140,9 +140,9 @@ std::unique_ptr<FeedForward> FeedForward::load(std::istream &is) {
 }
 
 Matrix FeedForward::backward(const Matrix &grad_output, const Matrix &input) {
-    if (intermediate_cache.empty()) {
-        throw std::runtime_error("No cached intermediate values found for backward pass");
-    }
+    std::cout << "FeedForward::backward dimensions:" << std::endl;
+    std::cout << "grad_output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
+    std::cout << "w2: " << w2.rows() << "x" << w2.cols() << std::endl;
     
     std::cout << "FeedForward::backward dimensions:" << std::endl;
     std::cout << "grad_output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
@@ -193,11 +193,70 @@ Matrix FeedForward::backward(const Matrix &grad_output, const Matrix &input) {
     return grad_input;
 }
 
-Matrix FeedForward::backward_cuda(const Matrix &grad,
-                                  const Matrix &input) const {
+Matrix FeedForward::backward_cuda(const Matrix& grad_output, const Matrix& input) {
 #ifdef USE_CUDA
-  return backward_cuda(grad, input);
+    const size_t batch_size = grad_output.rows();
+    const size_t hidden_size = w2.cols();  // Output dimension
+    const size_t intermediate_size = w2.rows();  // Intermediate dimension
+
+    // If dimensions don't match, we need to transpose the gradient
+    Matrix grad_output_reshaped = grad_output;
+    if (grad_output.cols() != hidden_size) {
+        grad_output_reshaped = grad_output.transpose();
+    }
+
+    // Validate dimensions again after potential transpose
+    if (grad_output_reshaped.cols() != hidden_size) {
+        throw std::runtime_error("Dimension mismatch in backward_cuda: grad_output.cols (" + 
+                                std::to_string(grad_output_reshaped.cols()) + 
+                                ") != hidden_size (" + std::to_string(hidden_size) + ")");
+    }
+
+    // Calculate grid and block dimensions
+    const int block_size = 256;
+    const int grid_size_1 = (batch_size * intermediate_size + block_size - 1) / block_size;
+    const int grid_size_2 = (batch_size * hidden_size + block_size - 1) / block_size;
+
+    // Allocate device memory
+    float *d_grad_output, *d_w2, *d_intermediate, *d_w1, *d_output;
+    CUDA_CHECK(cudaMalloc(&d_grad_output, batch_size * hidden_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_w2, intermediate_size * hidden_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_intermediate, batch_size * intermediate_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_w1, hidden_size * intermediate_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_output, batch_size * hidden_size * sizeof(float)));
+
+    // Copy data to device
+    CUDA_CHECK(cudaMemcpy(d_grad_output, grad_output_reshaped.data(), 
+                         batch_size * hidden_size * sizeof(float), 
+                         cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_w2, w2.data(), 
+                         intermediate_size * hidden_size * sizeof(float), 
+                         cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_w1, w1.data(), 
+                         hidden_size * intermediate_size * sizeof(float), 
+                         cudaMemcpyHostToDevice));
+
+    // Replace the three CUDA_LAUNCH calls with:
+    cuda::launch_feed_forward_backward(
+        d_grad_output, d_w2, d_intermediate, d_w1, d_output,
+        batch_size, hidden_size, intermediate_size
+    );
+
+    // Copy result back to host
+    Matrix output(batch_size, hidden_size);
+    CUDA_CHECK(cudaMemcpy(output.data(), d_output,
+                         batch_size * hidden_size * sizeof(float),
+                         cudaMemcpyDeviceToHost));
+
+    // Clean up
+    CUDA_CHECK(cudaFree(d_grad_output));
+    CUDA_CHECK(cudaFree(d_w2));
+    CUDA_CHECK(cudaFree(d_intermediate));
+    CUDA_CHECK(cudaFree(d_w1));
+    CUDA_CHECK(cudaFree(d_output));
+
+    return output;
 #else
-  throw std::runtime_error("CUDA support not enabled");
+    throw std::runtime_error("CUDA support not enabled");
 #endif
 }

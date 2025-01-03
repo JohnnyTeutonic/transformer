@@ -420,10 +420,8 @@ void Transformer::backward_pass(const std::vector<Matrix> &activations,
   if (config.use_fp16) {
     HalfPrecisionTraining::convert_to_fp16(current_grad);
   }
-  std::cout << "backward pass using cuda" << std::endl;
-  // Backward through final layer norm using cuBLAS
-  current_grad = final_ln->backward_cuda(current_grad, activations.back());
   std::cout << "backward pass using cuda done" << std::endl;
+
   std::cout << "iterating through layers in reverse order" << std::endl;
   // Backward through layers in reverse order
   for (int i = layers.size() - 1; i >= 0; --i) {
@@ -774,7 +772,14 @@ Matrix TransformerLayer::backward(const Matrix& grad_output,
         Matrix ffn_normalized = GradientCheckpoint::get_activation(ffn_key);
         
         // Feed forward backward
-        Matrix d_ffn = feed_forward->backward(grad_output, ffn_normalized);
+        Matrix d_ffn;
+        if (config.use_cuda) {
+            std::cout << "Feed forward backward using cuda" << std::endl;
+            d_ffn = feed_forward->backward_cuda(grad_output, ffn_normalized);
+        } else {
+            std::cout << "Feed forward backward using cpu" << std::endl;
+            d_ffn = feed_forward->backward(grad_output, ffn_normalized);
+        }
         std::cout << "Feed forward backward" << std::endl;
         Matrix d_ln2 = ffn_ln->backward(d_ffn, input);
         std::cout << "Feed forward layer norm backward" << std::endl;
@@ -895,9 +900,32 @@ Matrix Transformer::forward_cuda(const std::vector<int> &input_tokens, bool use_
 Matrix TransformerLayer::backward_cuda(const Matrix &grad,
                                        const Matrix &input) const {
 #ifdef USE_CUDA
-  throw std::runtime_error("CUDA implementation not available");
+    std::cout << "entering TransformerLayer::backward_cuda" << std::endl;
+    
+    // Get cached activations
+    std::string ffn_key = std::to_string(layer_idx) + "_ffn";
+    if (!GradientCheckpoint::has_activation(ffn_key)) {
+        throw std::runtime_error("Missing feed forward activation cache");
+    }
+    Matrix ffn_normalized = GradientCheckpoint::get_activation(ffn_key);
+    
+    // Feed forward backward using CUDA
+    Matrix d_ffn = feed_forward->backward_cuda(grad, ffn_normalized);
+    Matrix d_ln2 = ffn_ln->backward_cuda(d_ffn, input);
+    
+    // Attention backward using CUDA
+    std::string attn_key = std::to_string(layer_idx);
+    if (!GradientCheckpoint::has_activation(attn_key)) {
+        throw std::runtime_error("Missing attention activation cache");
+    }
+    Matrix attn_normalized = GradientCheckpoint::get_activation(attn_key);
+    
+    Matrix d_residual1 = d_ln2;
+    Matrix d_attn = self_attention->backward_cuda(d_residual1, attn_normalized);
+    
+    return d_attn;
 #else
-  throw std::runtime_error("CUDA not enabled");
+    throw std::runtime_error("CUDA support not enabled");
 #endif
 }
 

@@ -2,9 +2,13 @@
 #include "../include/cuda/cuda_check.cuh"
 #include "../include/cuda/cuda_launch.cuh"
 #include "../include/cuda/feed_forward_kernels.cuh"
+#include <cstdlib>
 
-Matrix FeedForward::backward_cuda(const Matrix &grad,
-                                  const Matrix &input) const {
+Matrix FeedForward::backward_cuda_impl(const Matrix &grad,
+                                  const Matrix &input,
+                                  const Matrix &w1,
+                                  const Matrix &w2,
+                                  const Matrix &intermediate_cache) const {
   const size_t batch_size = grad.rows();
   const size_t hidden_size = grad.cols();
   const size_t intermediate_size = w1.cols();
