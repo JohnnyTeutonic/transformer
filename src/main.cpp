@@ -163,14 +163,7 @@ int main(int argc, char *argv[]) {
                             target_slice(r, j) = target_distribution(i, j);
                         }
                     }
-                    
-                    // Debug dimensions
-                    std::cout << "\nDimensions:"
-                              << "\nlogits: " << logits.rows() << "x" << logits.cols()
-                              << "\ntarget_slice: " << target_slice.rows() << "x" << target_slice.cols()
-                              << "\ntarget_distribution: " << target_distribution.rows() << "x" << target_distribution.cols()
-                              << std::endl;
-                    
+                                        
                     // Compute loss
                     batch_loss += compute_batch_loss(logits, target_slice);
                     
