@@ -1,4 +1,6 @@
 #include "../include/components.hpp"
+#include "../include/cuda/cuda_utils.cuh"
+#include "../include/cuda/matrix_kernels.cuh"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -74,11 +76,22 @@ Matrix Matrix::transpose() const {
 
 Matrix operator*(const Matrix &m, float scalar) {
   Matrix result(m.rows(), m.cols());
-  for (size_t i = 0; i < m.rows(); ++i) {
-    for (size_t j = 0; j < m.cols(); ++j) {
-      result(i, j) = m(i, j) * scalar;
-    }
-  }
+  
+  float *d_a, *d_result;
+  const size_t size = m.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size));
+  CUDA_CHECK(cudaMalloc(&d_result, size));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, m.data(), size, cudaMemcpyHostToDevice));
+  
+  launch_matrix_scalar_mul(d_a, scalar, d_result, m.size());
+  
+  CUDA_CHECK(cudaMemcpy(result.data(), d_result, size, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return result;
 }
 
@@ -89,128 +102,83 @@ Matrix operator+(const Matrix &a, const Matrix &b) {
     throw std::runtime_error("Matrix dimensions don't match for addition");
   }
   Matrix result(a.rows(), a.cols());
-  for (size_t i = 0; i < a.rows(); ++i) {
-    for (size_t j = 0; j < a.cols(); ++j) {
-      result(i, j) = a(i, j) + b(i, j);
-    }
-  }
+  
+  float *d_a, *d_b, *d_result;
+  const size_t size = a.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size));
+  CUDA_CHECK(cudaMalloc(&d_b, size));
+  CUDA_CHECK(cudaMalloc(&d_result, size));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, a.data(), size, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, b.data(), size, cudaMemcpyHostToDevice));
+  
+  launch_matrix_add(d_a, d_b, d_result, a.rows(), a.cols());
+  
+  CUDA_CHECK(cudaMemcpy(result.data(), d_result, size, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
+  
   return result;
 }
 
-Matrix operator-(const Matrix &a, const Matrix &b) { return a + (b * -1.0f); }
+Matrix operator-(const Matrix &a, const Matrix &b) {
+  if (a.rows() != b.rows() || a.cols() != b.cols()) {
+    throw std::runtime_error("Matrix dimensions don't match for subtraction");
+  }
+  Matrix result(a.rows(), a.cols());
+  
+  float *d_a, *d_b, *d_result;
+  const size_t size = a.size() * sizeof(float);
+  
+  CUDA_CHECK(cudaMalloc(&d_a, size));
+  CUDA_CHECK(cudaMalloc(&d_b, size));
+  CUDA_CHECK(cudaMalloc(&d_result, size));
+  
+  CUDA_CHECK(cudaMemcpy(d_a, a.data(), size, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, b.data(), size, cudaMemcpyHostToDevice));
+  
+  launch_matrix_sub(d_a, d_b, d_result, a.rows(), a.cols());
+  
+  CUDA_CHECK(cudaMemcpy(result.data(), d_result, size, cudaMemcpyDeviceToHost));
+  
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
+  
+  return result;
+}
 
 Matrix operator/(const Matrix &m, float scalar) { return m * (1.0f / scalar); }
 
 Matrix matmul(const Matrix &a, const Matrix &b) {
-  // Validate input matrices
-  if (a.empty() || b.empty()) {
-    throw std::runtime_error("Cannot multiply empty matrices");
-  }
-  
   if (a.cols() != b.rows()) {
-    throw std::runtime_error(
-        "Matrix dimensions don't match for multiplication: a.cols=" + 
-        std::to_string(a.cols()) + ", b.rows=" + std::to_string(b.rows()));
+    throw std::runtime_error("Matrix dimensions don't match for multiplication");
   }
   
-  // Print input matrix stats and dimensions
-  std::cout << "Matrix A dimensions: " << a.rows() << "x" << a.cols() << std::endl;
-  std::cout << "Matrix B dimensions: " << b.rows() << "x" << b.cols() << std::endl;
-  std::cout << "Matrix A stats: min=" << a.min() << " max=" << a.max() << std::endl;
-  std::cout << "Matrix B stats: min=" << b.min() << " max=" << b.max() << std::endl;
+  Matrix result(a.rows(), b.cols());
   
-  // Check for invalid values in input matrices
-  bool has_invalid_values = false;
-  std::string error_message;
+  float *d_a, *d_b, *d_result;
+  const size_t size_a = a.size() * sizeof(float);
+  const size_t size_b = b.size() * sizeof(float);
+  const size_t size_result = result.size() * sizeof(float);
   
-  #pragma omp parallel for collapse(2) reduction(|:has_invalid_values)
-  for (size_t i = 0; i < a.rows(); ++i) {
-    for (size_t j = 0; j < a.cols(); ++j) {
-      if (std::isnan(a(i,j)) || std::isinf(a(i,j))) {
-        has_invalid_values = true;
-      }
-    }
-  }
+  CUDA_CHECK(cudaMalloc(&d_a, size_a));
+  CUDA_CHECK(cudaMalloc(&d_b, size_b));
+  CUDA_CHECK(cudaMalloc(&d_result, size_result));
   
-  if (has_invalid_values) {
-    throw std::runtime_error("Invalid values found in matrix A");
-  }
+  CUDA_CHECK(cudaMemcpy(d_a, a.data(), size_a, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, b.data(), size_b, cudaMemcpyHostToDevice));
   
-  has_invalid_values = false;
-  #pragma omp parallel for collapse(2) reduction(|:has_invalid_values)
-  for (size_t i = 0; i < b.rows(); ++i) {
-    for (size_t j = 0; j < b.cols(); ++j) {
-      if (std::isnan(b(i,j)) || std::isinf(b(i,j))) {
-        has_invalid_values = true;
-      }
-    }
-  }
+  launch_matrix_mul(d_a, d_b, d_result, a.rows(), b.cols(), a.cols());
   
-  if (has_invalid_values) {
-    throw std::runtime_error("Invalid values found in matrix B");
-  }
+  CUDA_CHECK(cudaMemcpy(result.data(), d_result, size_result, cudaMemcpyDeviceToHost));
   
-  float max_val = 0.0f;
-  Matrix result(a.rows(), b.cols(), 0.0f);
-  
-  // Numerical stability parameters
-  const float MAX_SAFE_VAL = 1e6f;
-  const float MIN_SAFE_VAL = -1e6f;
-  const float EPSILON = 1e-6f;
-  
-  // Main multiplication with OpenMP parallelization
-  #pragma omp parallel for collapse(2) reduction(max:max_val)
-  for (size_t i = 0; i < a.rows(); ++i) {
-    for (size_t j = 0; j < b.cols(); ++j) {
-      float sum = 0.0f;
-      #pragma omp simd reduction(+:sum)
-      for (size_t k = 0; k < a.cols(); ++k) {
-        // Clamp input values for numerical stability
-        float a_val = std::clamp(a(i, k), MIN_SAFE_VAL, MAX_SAFE_VAL);
-        float b_val = std::clamp(b(k, j), MIN_SAFE_VAL, MAX_SAFE_VAL);
-        float prod = a_val * b_val;
-        
-        // Handle invalid products without critical section
-        prod = (std::isnan(prod) || std::isinf(prod)) ? 0.0f : prod;
-        sum += prod;
-        
-        // Clamp running sum for stability
-        sum = std::clamp(sum, MIN_SAFE_VAL, MAX_SAFE_VAL);
-      }
-      
-      // Add small epsilon to avoid exact zero
-      if (std::abs(sum) < EPSILON) {
-        sum = (sum < 0) ? -EPSILON : EPSILON;
-      }
-      
-      result(i, j) = sum;
-      max_val = std::max(max_val, std::abs(sum));
-    }
-  }
-  
-  // Validate result
-  if (max_val == 0.0f) {
-    std::cerr << "Warning: Matrix multiplication resulted in all zeros\n";
-  }
-  
-  // Check final result for invalid values
-  bool has_invalid_result = false;
-  #pragma omp parallel for collapse(2) reduction(|:has_invalid_result)
-  for (size_t i = 0; i < result.rows(); ++i) {
-    for (size_t j = 0; j < result.cols(); ++j) {
-      if (std::isnan(result(i,j)) || std::isinf(result(i,j))) {
-        has_invalid_result = true;
-        result(i,j) = 0.0f;  // Reset invalid results to zero
-      }
-    }
-  }
-  
-  if (has_invalid_result) {
-    std::cerr << "Warning: Invalid values in result matrix were reset to zero\n";
-  }
-  
-  std::cout << "Matrix multiplication result dimensions: " << result.rows() << "x" << result.cols() << std::endl;
-  std::cout << "Matrix multiplication result stats: min=" << result.min() << " max=" << result.max() << std::endl;
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_result));
   
   return result;
 }

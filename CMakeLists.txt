@@ -209,12 +209,22 @@ if(CUDAToolkit_FOUND)
         src/cuda/cuda_utils.cu
         src/cuda/token_embedding_cuda.cu
         src/cuda/layernorm_cuda.cu
+        src/cuda/tensor_kernels.cu
+        src/cuda/matrix_kernels.cu
     )
 
     # Set CUDA properties for the kernels library
     set_target_properties(cuda_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         POSITION_INDEPENDENT_CODE ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # Add include directories for cuda_kernels
+    target_include_directories(cuda_kernels
+        PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
     )
 
     # Link CUDA libraries to cuda_kernels
@@ -228,11 +238,6 @@ if(CUDAToolkit_FOUND)
     target_link_libraries(transformer_lib
         PUBLIC
         cuda_kernels
-    )
-
-    target_link_libraries(transformer_lib
-        PUBLIC ${CUDA_LIBRARIES} ${CUBLAS_LIBRARIES}
-        PRIVATE ${CUDA_LIBRARIES} ${CUBLAS_LIBRARIES}
     )
 endif()
 
