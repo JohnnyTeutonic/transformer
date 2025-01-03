@@ -154,24 +154,49 @@ int main(int argc, char *argv[]) {
                     hidden_states = transformer.forward(input_tokens[i]);
                     logits = lm_head->project_to_vocab(hidden_states);
                     
-                    // Extract corresponding row from target distribution
-                    Matrix target_slice(logits.rows(), target_distribution.cols());
-                    for (size_t j = 0; j < target_distribution.cols(); j++) {
-                        for (size_t r = 0; r < logits.rows(); r++) {
+                    // Create target slice with same dimensions as logits
+                    Matrix target_slice(logits.rows(), logits.cols(), 0.0f);
+                    
+                    // Fill target slice from target distribution
+                    for (size_t r = 0; r < logits.rows(); r++) {
+                        for (size_t j = 0; j < logits.cols(); j++) {
                             target_slice(r, j) = target_distribution(i, j);
                         }
                     }
                     
+                    // Debug dimensions
+                    std::cout << "\nDimensions:"
+                              << "\nlogits: " << logits.rows() << "x" << logits.cols()
+                              << "\ntarget_slice: " << target_slice.rows() << "x" << target_slice.cols()
+                              << "\ntarget_distribution: " << target_distribution.rows() << "x" << target_distribution.cols()
+                              << std::endl;
+                    
                     // Compute loss
                     batch_loss += compute_batch_loss(logits, target_slice);
+                    
+                    // Compute gradients and backward pass
+                    Matrix grad_output = logits - target_slice;  // Simple gradient for cross-entropy
+                    transformer.backward(grad_output, input_tokens[i], learning_rate);
                 }
                 
                 batch_loss /= input_tokens.size();
+                
+                // Update learning rate
+                float loss_ratio = batch_loss / (prev_loss + 1e-10f);
+                learning_rate = adjust_learning_rate(learning_rate, loss_ratio, global_step);
+                prev_loss = batch_loss;
                 
                 // Update epoch statistics
                 epoch_loss += batch_loss;
                 num_batches++;
                 global_step++;
+                
+                // Print progress
+                if (global_step % 10 == 0) {
+                    std::cout << "\rStep " << global_step 
+                              << " - Loss: " << batch_loss 
+                              << " - LR: " << learning_rate << std::flush;
+                }
                 
                 // Validation step
                 if (global_step % VALIDATION_INTERVAL == 0) {
@@ -203,9 +228,12 @@ int main(int argc, char *argv[]) {
                             val_hidden_states = transformer.forward(val_input_tokens[i]);
                             val_logits = lm_head->project_to_vocab(val_hidden_states);
                             
-                            Matrix val_target_slice(val_logits.rows(), val_target_distribution.cols());
-                            for (size_t j = 0; j < val_target_distribution.cols(); j++) {
-                                for (size_t r = 0; r < val_logits.rows(); r++) {
+                            // Create validation target slice with same dimensions as logits
+                            Matrix val_target_slice(val_logits.rows(), val_logits.cols(), 0.0f);
+                            
+                            // Fill validation target slice
+                            for (size_t r = 0; r < val_logits.rows(); r++) {
+                                for (size_t j = 0; j < val_logits.cols(); j++) {
                                     val_target_slice(r, j) = val_target_distribution(i, j);
                                 }
                             }
