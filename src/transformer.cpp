@@ -74,7 +74,17 @@ Matrix TransformerLayer::forward(const Matrix &input, const AttentionMask &mask,
     
     // Self attention
     std::cout << "Applying self attention..." << std::endl;
-    Matrix attention_output = self_attention->forward(normalized, mask, kv_cache);
+    Matrix attention_output;
+    if (config.use_flash_attention) {
+        std::cout << "=== Using FLASH attention for forward pass ===" << std::endl;
+        Matrix Q = matmul(normalized, self_attention->query_proj);
+        Matrix K = matmul(normalized, self_attention->key_proj);
+        Matrix V = matmul(normalized, self_attention->value_proj);
+        attention_output = self_attention->flash_attention(Q, K, V, mask);
+    } else {
+        std::cout << "=== Using STANDARD attention for forward pass ===" << std::endl;
+        attention_output = self_attention->forward(normalized, mask, kv_cache);
+    }
     std::cout << "Attention output shape: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
     
     // Validate dimensions before adding residual
@@ -175,7 +185,9 @@ Transformer::Transformer(const TransformerConfig &config) : config(config) {
   std::cout << "- Head dimension: " << config.head_dim << std::endl;
   std::cout << "- Intermediate size: " << config.intermediate_size << std::endl;
   std::cout << "- Dropout probability: " << config.dropout_prob << std::endl;
-  std::cout << "- Use flash attention: " << std::boolalpha << config.use_flash_attention << std::endl;
+  std::cout << "=== ATTENTION CONFIGURATION ===" << std::endl;
+  std::cout << "- Flash attention enabled: " << std::boolalpha << config.use_flash_attention << std::endl;
+  std::cout << "- Flash attention setting from config: " << std::boolalpha << this->config.use_flash_attention << std::endl;
   std::cout << "- Use RoPE: " << config.use_rope << std::endl;
   std::cout << "- Use sliding window: " << config.use_sliding_window << std::endl;
   std::cout << "- Window size: " << config.window_size << std::endl;
@@ -295,18 +307,24 @@ Matrix Transformer::forward(const std::vector<int> &input_tokens, bool use_cache
         // Save activation for gradient checkpointing
         GradientCheckpoint::save_activation(hidden_states, i);
         
+        std::cout << "\nLayer " << i << " configuration:" << std::endl;
+        std::cout << "- Flash attention enabled: " << std::boolalpha << config.use_flash_attention << std::endl;
+        
         // Forward through layer
         if (config.use_flash_attention) {
-            // Use flash attention for forward pass
-            std::cout << "Using flash attention for layer " << i << std::endl;
+            std::cout << "=== Using FLASH attention for layer " << i << " ===" << std::endl;
             Matrix Q = matmul(hidden_states, layers[i]->self_attention->query_proj);
+            std::cout << "Q matrix shape: " << Q.rows() << "x" << Q.cols() << std::endl;
             Matrix K = matmul(hidden_states, layers[i]->self_attention->key_proj);
+            std::cout << "K matrix shape: " << K.rows() << "x" << K.cols() << std::endl;
             Matrix V = matmul(hidden_states, layers[i]->self_attention->value_proj);
+            std::cout << "V matrix shape: " << V.rows() << "x" << V.cols() << std::endl;
             
             // Use flash attention algorithm
             hidden_states = layers[i]->self_attention->flash_attention(Q, K, V, mask);
+            std::cout << "Flash attention output shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
         } else {
-            // Use standard attention
+            std::cout << "=== Using STANDARD attention for layer " << i << " ===" << std::endl;
             hidden_states = layers[i]->forward(hidden_states, mask);
         }
         
