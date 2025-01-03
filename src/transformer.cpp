@@ -324,13 +324,16 @@ void Transformer::train(const std::vector<std::vector<int>> &input_tokens,
                         const std::vector<std::vector<int>> &target_tokens,
                         size_t num_epochs, float learning_rate) {
   std::cout << "entering Transformer::train" << std::endl;
-  const size_t batch_size = config.batch_size;  // Use batch_size from config
+  const size_t batch_size = config.batch_size;
 
   for (size_t epoch = 0; epoch < num_epochs; ++epoch) {
+    float epoch_loss = 0.0f;
+    size_t num_batches = 0;
+
     // Process batches
-    #pragma omp parallel for
     for (size_t i = 0; i < input_tokens.size(); i += batch_size) {
       size_t batch_end = std::min(i + batch_size, input_tokens.size());
+      float batch_loss = 0.0f;
 
       // Create batch
       std::vector<std::vector<int>> input_batch(
@@ -345,88 +348,75 @@ void Transformer::train(const std::vector<std::vector<int>> &input_tokens,
         
         if (input_seq.empty() || target_seq.empty()) continue;
 
-        // Create input sequence (all tokens except last)
-        std::vector<int> input_prefix(input_seq.begin(), input_seq.end() - 1);
-        
-        // Target is the last token
-        int target = input_seq.back();
-
-        // Forward pass with causal attention mask
+        // Forward pass
         std::vector<Matrix> activations;
-        Matrix logits = forward(input_prefix, &activations);
+        Matrix logits = forward(input_seq, &activations);
         
-        // We only care about the prediction for the last position
-        Matrix final_logits(1, logits.cols());
-        for (size_t j = 0; j < logits.cols(); ++j) {
-          final_logits(0, j) = logits(logits.rows() - 1, j);
+        // Compute loss and gradients
+        Matrix loss_grad = compute_loss_gradients(logits, target_seq);
+        
+        // Compute sequence loss for logging
+        float seq_loss = 0.0f;
+        for (size_t pos = 0; pos < target_seq.size(); pos++) {
+          int target = target_seq[pos];
+          float target_logit = logits(pos, target);
+          seq_loss -= target_logit;  // Cross entropy loss
         }
-
-        // Create target vector with just the final token
-        std::vector<int> target_vec = {target};
-
-        // Compute loss and gradients for the final prediction
-        Matrix loss_grad = compute_loss_gradients(final_logits, target_vec);
+        batch_loss += seq_loss / target_seq.size();
 
         // Backward pass
         backward_pass(activations, loss_grad);
-        std::cout << "backward pass done" << std::endl;
         
         // Update parameters
         update_parameters(learning_rate);
       }
+
+      batch_loss /= (batch_end - i);  // Average loss for this batch
+      epoch_loss += batch_loss;
+      num_batches++;
+      
+      std::cout << "Batch " << i/batch_size << " loss: " << batch_loss << std::endl;
     }
+
+    epoch_loss /= num_batches;  // Average loss for this epoch
+    std::cout << "Epoch " << epoch << " loss: " << epoch_loss << std::endl;
   }
   std::cout << "exiting Transformer::train" << std::endl;
 }
 
 Matrix Transformer::compute_loss_gradients(const Matrix &logits,
                                            const std::vector<int> &targets) {
-  std::cout << "entering Transformer::compute_loss_gradients" << std::endl;
-  const size_t batch_size = logits.rows();
+  const size_t seq_len = logits.rows();
   const size_t vocab_size = logits.cols();
-  Matrix gradients(batch_size, vocab_size);
+  Matrix gradients(seq_len, vocab_size);
 
-  // For each sequence position
-  for (size_t i = 0; i < batch_size; ++i) {
+  // For each position in the sequence
+  for (size_t pos = 0; pos < seq_len; ++pos) {
     // Compute softmax probabilities with numerical stability
-    std::vector<float> probs(vocab_size);
-    float max_logit = logits(i, 0);
-    
-    // Find max logit for numerical stability
+    float max_logit = logits(pos, 0);
     for (size_t j = 1; j < vocab_size; ++j) {
-      max_logit = std::max(max_logit, logits(i, j));
+      max_logit = std::max(max_logit, logits(pos, j));
     }
 
-    // Compute softmax denominator
     float sum_exp = 0.0f;
+    std::vector<float> exp_logits(vocab_size);
     for (size_t j = 0; j < vocab_size; ++j) {
-      probs[j] = std::exp(logits(i, j) - max_logit);
-      sum_exp += probs[j];
+      exp_logits[j] = std::exp(logits(pos, j) - max_logit);
+      sum_exp += exp_logits[j];
     }
 
-    // Normalize probabilities and compute gradients
-    const float epsilon = 1e-10f;
-    sum_exp = std::max(sum_exp, epsilon);
-    
+    // Compute gradients for this position
     for (size_t j = 0; j < vocab_size; ++j) {
-      probs[j] /= sum_exp;
-      // Cross entropy gradient: p_i - y_i where y_i is 1 for target class, 0 otherwise
-      gradients(i, j) = probs[j];
+      // Softmax gradient: p_j - 1(j == target)
+      gradients(pos, j) = exp_logits[j] / sum_exp;
     }
     
-    // Only subtract 1.0 from target class if it's valid
-    if (targets[i] >= 0 && targets[i] < vocab_size) {
-      gradients(i, targets[i]) -= 1.0f;
+    // Subtract 1.0 from the target token's gradient
+    if (pos < targets.size() && targets[pos] >= 0 && targets[pos] < vocab_size) {
+      gradients(pos, targets[pos]) -= 1.0f;
     }
   }
 
-  // Apply gradient scaling to prevent vanishing gradients
-  const float scale = 10.0f;  // Increase scale to combat small gradients
-  for (size_t i = 0; i < gradients.size(); ++i) {
-    gradients.data()[i] *= scale;
-  }
-
-  std::cout << "exiting Transformer::compute_loss_gradients" << std::endl;
   return gradients;
 }
 
