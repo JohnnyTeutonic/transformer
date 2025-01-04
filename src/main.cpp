@@ -349,6 +349,9 @@ int main(int argc, char *argv[]) {
                     perturbed_grads[0] = perturbed_gradients;
                 }
                 
+                // Propagate gradients through the transformer
+                transformer.backward(perturbed_gradients, batch_input_tokens, learning_rate);
+                
                 // Second step of SAM with perturbed gradients
                 sam_optimizer->second_step(param_ptrs, perturbed_grads);
                 
