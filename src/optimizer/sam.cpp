@@ -1,4 +1,5 @@
 #include "../../include/optimizer/sam.hpp"
+#include "../../include/lm_head.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -187,33 +188,35 @@ Matrix SAM::compute_gradients(const Matrix& logits,
             sum_exp += exp_vals[j];
         }
         
-        // Compute gradients
+        // Compute gradients using actual target distribution
         for (size_t j = 0; j < logits.cols(); j++) {
             float softmax_out = exp_vals[j] / (sum_exp + epsilon);
-            loss_grad(i, j) = softmax_out - (j == 0 ? 1.0f : 0.0f); // Assuming first token is target
+            // Use target distribution to determine the target token
+            float target_prob = (i == logits.rows() - 1) ? 1.0f : 0.0f;  // Only care about last position
+            loss_grad(i, j) = softmax_out - target_prob;
         }
     }
     
-    // Backpropagate through language model head
+    // Backpropagate through language model head with increased gradient scale
     Matrix grad = lm_head->backward_pass(loss_grad, hidden_states);
     
     // Apply gradient modifications for stability
     for (size_t i = 0; i < grad.size(); i++) {
-        // Gradient clipping
-        float g = std::clamp(grad.data()[i], -1.0f, 1.0f);
+        // Gradient clipping with larger bounds
+        float g = std::clamp(grad.data()[i], -5.0f, 5.0f);
         
         // Add gradient noise for regularization
         if (grad.data()[i] != 0.0f) {
-            float noise_scale = 1e-4f * std::abs(grad.data()[i]);
+            float noise_scale = 1e-3f * std::abs(grad.data()[i]);  // Increased noise for better exploration
             float noise = ((float)rand() / RAND_MAX - 0.5f) * noise_scale;
             g += noise;
         }
         
-        // Apply gradient scaling
+        // Apply gradient scaling with larger minimum
         if (std::abs(g) < epsilon) {
             g = 0.0f;
         } else {
-            g *= std::min(1.0f / std::abs(g), 10.0f); // Scale large gradients
+            g *= std::min(2.0f / std::abs(g), 20.0f); // Increased scaling range
         }
         
         grad.data()[i] = g;

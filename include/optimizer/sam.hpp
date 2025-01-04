@@ -1,13 +1,15 @@
 #pragma once
 #include "../types.hpp"
 #include "optimizer.hpp"
-#include "../lm_head.hpp"
 #include <memory>
+
+// Forward declaration
+class LanguageModelHead;
 
 class SAM {
 private:
   float rho;
-  std::unique_ptr<Optimizer> base_optimizer;
+  std::unique_ptr<SGD> base_optimizer;
   std::vector<Matrix> parameter_copies;
   std::vector<Matrix> previous_weights;
   std::vector<FloatVector> previous_biases;
@@ -18,13 +20,9 @@ private:
   void restore_parameters(std::vector<Matrix *> &params);
 
 public:
-  SAM(float rho_ = 0.05f, std::unique_ptr<Optimizer> optimizer = nullptr)
+  SAM(float rho_ = 0.05f, float learning_rate = 0.001f)
       : rho(rho_) {
-    if (!optimizer) {
-      base_optimizer = std::make_unique<SGD>();
-    } else {
-      base_optimizer = std::move(optimizer);
-    }
+    base_optimizer = std::make_unique<SGD>(learning_rate);
   }
 
   void compute_parameter_gradients(const Matrix& logits,

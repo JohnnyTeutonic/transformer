@@ -388,33 +388,45 @@ Matrix Transformer::compute_loss_gradients(const Matrix &logits,
                                            const std::vector<int> &targets) {
   const size_t seq_len = logits.rows();
   const size_t vocab_size = logits.cols();
-  Matrix gradients(seq_len, vocab_size);
+  Matrix gradients(seq_len, vocab_size, 0.0f);  // Initialize to zero
 
-  // For each position in the sequence
-  for (size_t pos = 0; pos < seq_len; ++pos) {
-    // Compute softmax probabilities with numerical stability
-    float max_logit = logits(pos, 0);
-    for (size_t j = 1; j < vocab_size; ++j) {
-      max_logit = std::max(max_logit, logits(pos, j));
-    }
+  // We only care about the last position for next-token prediction
+  size_t last_pos = seq_len - 1;
+  int target_token = targets.back();  // Get the last target token
+  
+  // Compute softmax probabilities for the last position with better numerical stability
+  float max_logit = logits(last_pos, 0);
+  for (size_t j = 1; j < vocab_size; ++j) {
+    max_logit = std::max(max_logit, logits(last_pos, j));
+  }
 
-    float sum_exp = 0.0f;
-    std::vector<float> exp_logits(vocab_size);
-    for (size_t j = 0; j < vocab_size; ++j) {
-      exp_logits[j] = std::exp(logits(pos, j) - max_logit);
-      sum_exp += exp_logits[j];
-    }
+  // Compute softmax denominator with scaling
+  float sum_exp = 0.0f;
+  std::vector<float> exp_values(vocab_size);
+  const float temperature = 0.8f;  // Temperature for sharper distributions
+  
+  for (size_t j = 0; j < vocab_size; ++j) {
+    exp_values[j] = std::exp((logits(last_pos, j) - max_logit) / temperature);
+    sum_exp += exp_values[j];
+  }
 
-    // Compute gradients for this position
-    for (size_t j = 0; j < vocab_size; ++j) {
-      // Softmax gradient: p_j - 1(j == target)
-      gradients(pos, j) = exp_logits[j] / sum_exp;
-    }
+  // Compute gradients for the last position with improved scaling
+  const float grad_scale = 2.0f;  // Increased gradient scale
+  for (size_t j = 0; j < vocab_size; ++j) {
+    float prob = exp_values[j] / (sum_exp + 1e-12f);
+    // Gradient is (probability - 1) for target token, just probability for others
+    float grad = (j == target_token) ? (prob - 1.0f) : prob;
     
-    // Subtract 1.0 from the target token's gradient
-    if (pos < targets.size() && targets[pos] >= 0 && targets[pos] < vocab_size) {
-      gradients(pos, targets[pos]) -= 1.0f;
-    }
+    // Apply label smoothing
+    const float smoothing = 0.1f;
+    grad = (1.0f - smoothing) * grad + smoothing / vocab_size;
+    
+    // Scale gradient and add noise for regularization
+    grad *= grad_scale;
+    float noise = ((float)rand() / RAND_MAX - 0.5f) * 1e-3f;
+    grad += noise;
+    
+    gradients(last_pos, j) = grad;
   }
 
   return gradients;

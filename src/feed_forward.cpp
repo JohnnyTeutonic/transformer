@@ -19,7 +19,12 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
       b1(intermediate_size),
       b2(hidden_size),
       dropout_prob(dropout),
-      intermediate_cache(1, intermediate_size) {
+      intermediate_cache(1, intermediate_size),
+      // Initialize gradient matrices with same shapes as weights
+      w1_grad(hidden_size, intermediate_size),
+      w2_grad(intermediate_size, hidden_size),
+      b1_grad(intermediate_size),
+      b2_grad(hidden_size) {
 
   std::cout << "FeedForward dimensions:" << std::endl;
   std::cout << "w1: " << w1.rows() << "x" << w1.cols() << std::endl;
@@ -53,6 +58,20 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
     b1[i] = 0.0f;
   for (size_t i = 0; i < b2.size(); ++i)
     b2[i] = 0.0f;
+
+  // Initialize gradients to zero
+  for (size_t i = 0; i < w1_grad.rows(); ++i) {
+    for (size_t j = 0; j < w1_grad.cols(); ++j) {
+      w1_grad(i, j) = 0.0f;
+    }
+  }
+  for (size_t i = 0; i < w2_grad.rows(); ++i) {
+    for (size_t j = 0; j < w2_grad.cols(); ++j) {
+      w2_grad(i, j) = 0.0f;
+    }
+  }
+  std::fill(b1_grad.begin(), b1_grad.end(), 0.0f);
+  std::fill(b2_grad.begin(), b2_grad.end(), 0.0f);
 }
 
 Matrix FeedForward::forward(const Matrix &x) {
@@ -66,6 +85,25 @@ Matrix FeedForward::forward(const Matrix &x) {
     intermediate.add_bias(b1);
     intermediate.apply_gelu();
     std::cout << "intermediate after gelu: " << intermediate.shape() << std::endl;
+    
+    // Apply dropout after activation
+    dropout_mask_cache = Matrix(intermediate.rows(), intermediate.cols(), 1.0f);  // Initialize with ones
+    if (dropout_prob > 0.0f) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+        
+        // Create dropout mask with proper scaling
+        const float scale = 1.0f / (1.0f - dropout_prob);
+        for (size_t i = 0; i < dropout_mask_cache.size(); ++i) {
+            dropout_mask_cache.data()[i] = dis(gen) > dropout_prob ? scale : 0.0f;
+        }
+        
+        // Apply dropout mask
+        for (size_t i = 0; i < intermediate.size(); ++i) {
+            intermediate.data()[i] *= dropout_mask_cache.data()[i];
+        }
+    }
     
     // Deep copy for cache
     std::cout << "deep copying intermediate for cache" << std::endl;
@@ -142,10 +180,6 @@ std::unique_ptr<FeedForward> FeedForward::load(std::istream &is) {
 Matrix FeedForward::backward(const Matrix &grad_output, const Matrix &input) {
     std::cout << "FeedForward::backward dimensions:" << std::endl;
     std::cout << "grad_output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-    std::cout << "w2: " << w2.rows() << "x" << w2.cols() << std::endl;
-    
-    std::cout << "FeedForward::backward dimensions:" << std::endl;
-    std::cout << "grad_output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
     std::cout << "input: " << input.rows() << "x" << input.cols() << std::endl;
     std::cout << "w2: " << w2.rows() << "x" << w2.cols() << std::endl;
     std::cout << "w1: " << w1.rows() << "x" << w1.cols() << std::endl;
@@ -166,9 +200,24 @@ Matrix FeedForward::backward(const Matrix &grad_output, const Matrix &input) {
     // Create local copy of cache to prevent it being moved/destroyed
     Matrix cache_copy = intermediate_cache;
     
-    std::cout << "Computing d_intermediate..." << std::endl;
+    // Compute gradients for second layer (w2 and b2)
     Matrix d_intermediate = matmul(grad_output, w2.transpose());
-    std::cout << "d_intermediate dims: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
+    w2_grad = matmul(intermediate_cache.transpose(), grad_output);
+    
+    // Compute bias gradients by summing across batch dimension
+    for (size_t j = 0; j < b2.size(); ++j) {
+        b2_grad[j] = 0.0f;  // Reset gradient
+        for (size_t i = 0; i < grad_output.rows(); ++i) {
+            b2_grad[j] += grad_output(i, j);
+        }
+    }
+    
+    // Apply dropout mask to gradients
+    if (dropout_prob > 0.0f) {
+        for (size_t i = 0; i < d_intermediate.size(); ++i) {
+            d_intermediate.data()[i] *= dropout_mask_cache.data()[i];
+        }
+    }
     
     // Ensure d_intermediate matches cache dimensions before GELU derivative
     if (d_intermediate.rows() != cache_copy.rows() || d_intermediate.cols() != cache_copy.cols()) {
@@ -183,13 +232,22 @@ Matrix FeedForward::backward(const Matrix &grad_output, const Matrix &input) {
         d_intermediate = std::move(reshaped_d_intermediate);
     }
     
-    std::cout << "Applying GELU derivative..." << std::endl;
+    // Apply GELU derivative
     d_intermediate.apply_gelu_derivative(cache_copy);
     
-    std::cout << "Computing grad_input..." << std::endl;
-    Matrix grad_input = matmul(d_intermediate, w1.transpose());
-    std::cout << "grad_input dims: " << grad_input.rows() << "x" << grad_input.cols() << std::endl;
+    // Compute gradients for first layer (w1 and b1)
+    w1_grad = matmul(input.transpose(), d_intermediate);
     
+    // Compute bias gradients by summing across batch dimension
+    for (size_t j = 0; j < b1.size(); ++j) {
+        b1_grad[j] = 0.0f;  // Reset gradient
+        for (size_t i = 0; i < d_intermediate.rows(); ++i) {
+            b1_grad[j] += d_intermediate(i, j);
+        }
+    }
+    
+    // Compute gradient with respect to input
+    Matrix grad_input = matmul(d_intermediate, w1.transpose());
     return grad_input;
 }
 

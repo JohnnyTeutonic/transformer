@@ -3,7 +3,7 @@
 
 TransformerTrainer::TransformerTrainer(Transformer &model_, float learning_rate)
     : model(model_) {
-  optimizer = std::make_unique<Optimizer>(learning_rate);
+  optimizer = std::make_unique<SGD>(learning_rate);
 
   // Add model parameters to optimizer
   for (auto &param : model.parameters()) {

@@ -14,6 +14,13 @@ private:
   Vector b2;
   float dropout_prob;
   Matrix intermediate_cache;
+  Matrix dropout_mask_cache;  // Cache for dropout mask
+  
+  // Gradient storage
+  Matrix w1_grad;
+  Matrix w2_grad;
+  Vector b1_grad;
+  Vector b2_grad;
 
 public:
   virtual ~FeedForward() = default;
@@ -25,6 +32,15 @@ public:
   void save(std::ostream &os) const;
   static std::unique_ptr<FeedForward> load(std::istream &is);
   friend class Transformer;
+
+  // Getter for gradients
+  std::vector<std::reference_wrapper<Matrix>> get_weight_gradients() {
+    return {std::ref(w1_grad), std::ref(w2_grad)};
+  }
+  
+  std::vector<std::reference_wrapper<Vector>> get_bias_gradients() {
+    return {std::ref(b1_grad), std::ref(b2_grad)};
+  }
 
   std::vector<std::reference_wrapper<Matrix>> get_weights() {
     return {std::ref(w1), std::ref(w2)};
@@ -38,7 +54,10 @@ public:
   FeedForward(const FeedForward &other)
       : w1(other.w1), w2(other.w2), b1(other.b1), b2(other.b2),
         dropout_prob(other.dropout_prob),
-        intermediate_cache(other.intermediate_cache) {}
+        intermediate_cache(other.intermediate_cache),
+        dropout_mask_cache(other.dropout_mask_cache),
+        w1_grad(other.w1_grad), w2_grad(other.w2_grad),
+        b1_grad(other.b1_grad), b2_grad(other.b2_grad) {}
 
   FeedForward &operator=(const FeedForward &other) {
     if (this != &other) {
@@ -48,6 +67,11 @@ public:
       b2 = other.b2;
       dropout_prob = other.dropout_prob;
       intermediate_cache = other.intermediate_cache;
+      dropout_mask_cache = other.dropout_mask_cache;
+      w1_grad = other.w1_grad;
+      w2_grad = other.w2_grad;
+      b1_grad = other.b1_grad;
+      b2_grad = other.b2_grad;
     }
     return *this;
   }

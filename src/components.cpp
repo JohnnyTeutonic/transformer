@@ -260,13 +260,12 @@ void Matrix::apply_gelu_derivative(const Matrix& x) {
         }
         
         float val = x.data_[i];
-        val = std::clamp(val, -10.0f, 10.0f);
+        val = std::clamp(val, -20.0f, 20.0f);
         
         float cdf = 0.5f * (1.0f + std::tanh(sqrt_2_over_pi * 
                                           (val + 0.044715f * val * val * val)));
         float pdf = sqrt_2_over_pi * (1.0f + 3.0f * 0.044715f * val * val);
         float derivative = cdf + val * pdf * (1.0f - std::tanh(val) * std::tanh(val));
-        derivative = std::clamp(derivative, -10.0f, 10.0f);
         data_[i] *= derivative;
     }
 }

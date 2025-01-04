@@ -173,11 +173,23 @@ int main(int argc, char *argv[]) {
                 
                 // Tokenize batch
                 for (const auto& [input_str, target_str] : batch) {
-                    input_tokens.push_back(tokenizer->encode(input_str));
-                    target_tokens.push_back(tokenizer->encode(target_str));
+                    // For next token prediction:
+                    // Input should be all tokens except the last one
+                    // Target should be just the last token
+                    std::vector<int> all_tokens = tokenizer->encode(input_str + " " + target_str);
+                    
+                    if (all_tokens.size() < 2) continue;  // Skip if too short
+                    
+                    // Input is everything except the last token
+                    std::vector<int> input_seq(all_tokens.begin(), all_tokens.end() - 1);
+                    // Target is just the last token
+                    std::vector<int> target_seq = {all_tokens.back()};
+                    
+                    input_tokens.push_back(input_seq);
+                    target_tokens.push_back(target_seq);
                 }
                 
-                // Create target distribution
+                // Create target distribution for just the last token
                 Matrix target_distribution = create_batch_target_distribution(target_tokens, config.vocab_size);
                 
                 // Forward pass
@@ -193,15 +205,20 @@ int main(int argc, char *argv[]) {
                     timing_stats.forward_pass_time += timer.stop();
                     timing_stats.forward_pass_count++;
                     
-                    Matrix target_slice(logits.rows(), logits.cols(), 0.0f);
-                    for (size_t r = 0; r < logits.rows(); r++) {
-                        for (size_t j = 0; j < logits.cols(); j++) {
-                            target_slice(r, j) = target_distribution(i, j);
-                        }
+                    // We only care about the prediction for the last position
+                    Matrix target_slice(1, logits.cols(), 0.0f);
+                    for (size_t j = 0; j < logits.cols(); j++) {
+                        target_slice(0, j) = target_distribution(i, j);
                     }
                     
-                    batch_loss += compute_batch_loss(logits, target_slice);
-                    Matrix grad_output = logits - target_slice;
+                    // Only compute loss for the last position
+                    Matrix last_position_logits(1, logits.cols());
+                    for (size_t j = 0; j < logits.cols(); j++) {
+                        last_position_logits(0, j) = logits(logits.rows() - 1, j);
+                    }
+                    
+                    batch_loss += compute_batch_loss(last_position_logits, target_slice);
+                    Matrix grad_output = last_position_logits - target_slice;
                     
                     // Time backward pass
                     timer.start();

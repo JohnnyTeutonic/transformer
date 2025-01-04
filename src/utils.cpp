@@ -190,6 +190,7 @@ Matrix create_batch_target_distribution(const std::vector<std::vector<int>>& tok
         throw std::runtime_error("Cannot create target distribution from empty batch");
     }
     
+    // Create distribution matrix - one row per sequence in batch
     Matrix distribution(token_sequences.size(), vocab_size, 0.0f);
     
     for (size_t batch_idx = 0; batch_idx < token_sequences.size(); batch_idx++) {
@@ -200,17 +201,26 @@ Matrix create_batch_target_distribution(const std::vector<std::vector<int>>& tok
                 std::to_string(batch_idx));
         }
         
-        for (int token : tokens) {
-            if (token < 0 || token >= static_cast<int>(vocab_size)) {
-                throw std::runtime_error("Token " + std::to_string(token) + 
-                    " is out of vocabulary range [0, " + std::to_string(vocab_size) + 
-                    ") at batch position " + std::to_string(batch_idx));
-            }
+        // Get the target token (should be the only token in the sequence)
+        int target_token = tokens[0];  // Changed from tokens.back() since we now expect single-token sequences
+        
+        if (target_token < 0 || target_token >= static_cast<int>(vocab_size)) {
+            throw std::runtime_error("Token " + std::to_string(target_token) + 
+                " is out of vocabulary range [0, " + std::to_string(vocab_size) + 
+                ") at batch position " + std::to_string(batch_idx));
         }
         
-        float weight = 1.0f / tokens.size();
-        for (int token : tokens) {
-            distribution(batch_idx, token) = weight;
+        // Set probability 1.0 for the target token
+        distribution(batch_idx, target_token) = 1.0f;
+        
+        // Apply label smoothing
+        const float smoothing = 0.1f;
+        for (size_t j = 0; j < vocab_size; j++) {
+            if (j != target_token) {
+                distribution(batch_idx, j) = smoothing / (vocab_size - 1);
+            } else {
+                distribution(batch_idx, j) = 1.0f - smoothing;
+            }
         }
     }
     
@@ -231,10 +241,28 @@ void print_matrix(const Matrix& m, const std::string& name, size_t max_rows, siz
 
 void print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, size_t k) {
     std::vector<std::pair<float, int>> scores;
+    const float temperature = 0.8f;  // Temperature for controlling prediction diversity
+    
+    // Get logits for the last position
+    size_t last_pos = logits.rows() - 1;
+    
+    // Find max logit for numerical stability
+    float max_logit = logits(last_pos, 0);
+    for (size_t i = 1; i < logits.cols(); ++i) {
+        max_logit = std::max(max_logit, logits(last_pos, i));
+    }
+    
+    // Compute softmax with temperature scaling
+    float sum_exp = 0.0f;
+    scores.reserve(logits.cols());
     for (size_t i = 0; i < logits.cols(); ++i) {
-        scores.push_back({logits(logits.rows() - 1, i), static_cast<int>(i)});
+        float scaled_logit = (logits(last_pos, i) - max_logit) / temperature;
+        float exp_val = std::exp(scaled_logit);
+        sum_exp += exp_val;
+        scores.push_back({scaled_logit, static_cast<int>(i)});
     }
 
+    // Sort by scaled logits
     std::partial_sort(
         scores.begin(), scores.begin() + k, scores.end(),
         [](const auto& a, const auto& b) { return a.first > b.first; });
@@ -242,8 +270,9 @@ void print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, siz
     std::cout << "\nTop " << k << " predictions:\n";
     for (size_t i = 0; i < k; ++i) {
         std::string token = tokenizer.decode({scores[i].second});
+        float probability = std::exp(scores[i].first) / sum_exp;
         std::cout << i + 1 << ". \"" << token << "\" (probability: " << std::fixed
-                 << std::setprecision(4) << std::exp(scores[i].first) << ")\n";
+                 << std::setprecision(4) << probability << ")\n";
     }
 }
 
