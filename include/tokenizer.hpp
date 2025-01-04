@@ -21,4 +21,8 @@ public:
 
   void print_vocabulary_mappings() const { vocab->print_vocabulary_mappings(); }
   bool verify_mappings() const { return vocab->verify_mappings(); }
+
+  int get_pad_token_id() const { return 0; }
+  int get_eos_token_id() const { return 1; }
+  int get_unk_token_id() const { return 2; }
 };

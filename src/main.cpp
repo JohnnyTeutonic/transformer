@@ -34,58 +34,60 @@ int main(int argc, char *argv[]) {
         auto training_data = std::move(TextPreprocessor::preprocess_training_data(train_dataset.pairs)); // convert to lowercase
         auto validation_data = std::move(TextPreprocessor::preprocess_training_data(val_dataset.pairs)); // convert to lowercase
 
-        // Apply stemming to all data
+        // Process training data
         for (auto& [input_str, target_str] : training_data) {
             std::istringstream iss_input(input_str);
             std::istringstream iss_target(target_str);
             std::string word;
-            std::string stemmed_input, stemmed_target;
             
-            // Stem input string
+            // Process input string
+            std::string processed_input;
             while (iss_input >> word) {
-                stemmed_input += Stemmer::stem(word) + " ";
+                processed_input += word + " ";
             }
-            if (!stemmed_input.empty()) {
-                stemmed_input.pop_back(); // Remove trailing space
+            if (!processed_input.empty()) {
+                processed_input.pop_back(); // Remove trailing space
             }
             
-            // Stem target string
+            // Process target string
+            std::string processed_target;
             while (iss_target >> word) {
-                stemmed_target += Stemmer::stem(word) + " ";
+                processed_target += word + " ";
             }
-            if (!stemmed_target.empty()) {
-                stemmed_target.pop_back(); // Remove trailing space
+            if (!processed_target.empty()) {
+                processed_target.pop_back(); // Remove trailing space
             }
             
-            input_str = stemmed_input;
-            target_str = stemmed_target;
+            input_str = processed_input;
+            target_str = processed_target;
         }
 
-        // Apply stemming to validation data
+        // Process validation data
         for (auto& [input_str, target_str] : validation_data) {
             std::istringstream iss_input(input_str);
             std::istringstream iss_target(target_str);
             std::string word;
-            std::string stemmed_input, stemmed_target;
             
-            // Stem input string
+            // Process input string
+            std::string processed_input;
             while (iss_input >> word) {
-                stemmed_input += Stemmer::stem(word) + " ";
+                processed_input += word + " ";
             }
-            if (!stemmed_input.empty()) {
-                stemmed_input.pop_back(); // Remove trailing space
+            if (!processed_input.empty()) {
+                processed_input.pop_back(); // Remove trailing space
             }
             
-            // Stem target string
+            // Process target string
+            std::string processed_target;
             while (iss_target >> word) {
-                stemmed_target += Stemmer::stem(word) + " ";
+                processed_target += word + " ";
             }
-            if (!stemmed_target.empty()) {
-                stemmed_target.pop_back(); // Remove trailing space
+            if (!processed_target.empty()) {
+                processed_target.pop_back(); // Remove trailing space
             }
             
-            input_str = stemmed_input;
-            target_str = stemmed_target;
+            input_str = processed_input;
+            target_str = processed_target;
         }
 
 #ifdef CUDA_AVAILABLE
@@ -196,43 +198,135 @@ int main(int argc, char *argv[]) {
                 float batch_loss = 0.0f;
                 Matrix hidden_states;
                 Matrix logits;
+                Matrix accumulated_gradients;
                 
+                // Process entire batch at once
+                std::vector<int> batch_input_tokens;
+                std::vector<int> batch_lengths;
+                size_t max_length = 0;
+                
+                // Find max length and prepare batch
+                for (const auto& tokens : input_tokens) {
+                    max_length = std::max(max_length, tokens.size());
+                    batch_lengths.push_back(tokens.size());
+                }
+                
+                // Pad sequences to max_length
                 for (size_t i = 0; i < input_tokens.size(); ++i) {
-                    // Time forward pass
-                    timer.start();
-                    hidden_states = transformer.forward(input_tokens[i]);
-                    logits = lm_head->project_to_vocab(hidden_states);
-                    timing_stats.forward_pass_time += timer.stop();
-                    timing_stats.forward_pass_count++;
+                    const auto& tokens = input_tokens[i];
+                    batch_input_tokens.insert(batch_input_tokens.end(), tokens.begin(), tokens.end());
+                    // Pad with PAD token
+                    batch_input_tokens.insert(batch_input_tokens.end(), 
+                                           max_length - tokens.size(),
+                                           tokenizer->get_pad_token_id());
+                }
+                
+                // Forward pass on entire batch
+                hidden_states = transformer.forward(batch_input_tokens);
+                logits = lm_head->project_to_vocab(hidden_states);
+                
+                // Compute loss and gradients for each sequence in batch
+                size_t offset = 0;
+                for (size_t i = 0; i < input_tokens.size(); ++i) {
+                    size_t seq_length = batch_lengths[i];
                     
-                    // We only care about the prediction for the last position
+                    // Create full sequence gradients initialized to zero with max_length
+                    Matrix sequence_gradients(max_length, logits.cols(), 0.0f);
+                    
+                    // Extract logits for this sequence's last position
+                    Matrix last_position_logits(1, logits.cols());
+                    for (size_t j = 0; j < logits.cols(); ++j) {
+                        last_position_logits(0, j) = logits(offset + seq_length - 1, j);
+                    }
+                    
+                    // Get target distribution for this sequence
                     Matrix target_slice(1, logits.cols(), 0.0f);
                     for (size_t j = 0; j < logits.cols(); j++) {
                         target_slice(0, j) = target_distribution(i, j);
                     }
                     
-                    // Only compute loss for the last position
-                    Matrix last_position_logits(1, logits.cols());
-                    for (size_t j = 0; j < logits.cols(); j++) {
-                        last_position_logits(0, j) = logits(logits.rows() - 1, j);
+                    // Compute loss for this sequence
+                    batch_loss += compute_batch_loss(last_position_logits, target_slice);
+                    
+                    // Compute gradients for the last position
+                    Matrix last_position_grads = compute_loss_gradients(last_position_logits, target_slice);
+                    
+                    // Place the gradients at the last position in the sequence
+                    for (size_t j = 0; j < logits.cols(); ++j) {
+                        sequence_gradients(seq_length - 1, j) = last_position_grads(0, j);
                     }
                     
-                    batch_loss += compute_batch_loss(last_position_logits, target_slice);
-                    Matrix grad_output = last_position_logits - target_slice;
+                    // Initialize accumulated_gradients with correct dimensions on first sequence
+                    if (i == 0) {
+                        accumulated_gradients = Matrix(max_length, logits.cols(), 0.0f);
+                    }
                     
-                    // Time backward pass
-                    timer.start();
-                    transformer.backward(grad_output, input_tokens[i], learning_rate);
-                    timing_stats.backward_pass_time += timer.stop();
-                    timing_stats.backward_pass_count++;
+                    // Add gradients
+                    accumulated_gradients += sequence_gradients;
+                    
+                    offset += max_length;
                 }
                 
+                // Average loss and gradients over batch
                 batch_loss /= input_tokens.size();
+                accumulated_gradients *= (1.0f / input_tokens.size());
                 
-                // Update learning rate
-                float loss_ratio = batch_loss / (prev_loss + 1e-10f);
+                // Get transformer parameters
+                std::vector<Matrix*> params = transformer.get_parameters();
+                std::vector<Matrix> grads = {accumulated_gradients};
+                
+                // First step of SAM
+                sam_optimizer->first_step(params, grads);
+                
+                // Recompute forward pass at the perturbed point
+                hidden_states = transformer.forward(batch_input_tokens);
+                logits = lm_head->project_to_vocab(hidden_states);
+                
+                // Recompute loss and gradients at the perturbed point
+                Matrix perturbed_gradients(max_length, logits.cols(), 0.0f);
+                float perturbed_loss = 0.0f;
+                
+                offset = 0;
+                for (size_t i = 0; i < input_tokens.size(); ++i) {
+                    size_t seq_length = batch_lengths[i];
+                    
+                    // Extract logits for this sequence's last position
+                    Matrix last_position_logits(1, logits.cols());
+                    for (size_t j = 0; j < logits.cols(); ++j) {
+                        last_position_logits(0, j) = logits(offset + seq_length - 1, j);
+                    }
+                    
+                    // Get target distribution for this sequence
+                    Matrix target_slice(1, logits.cols(), 0.0f);
+                    for (size_t j = 0; j < logits.cols(); j++) {
+                        target_slice(0, j) = target_distribution(i, j);
+                    }
+                    
+                    // Compute loss at perturbed point
+                    perturbed_loss += compute_batch_loss(last_position_logits, target_slice);
+                    
+                    // Compute gradients at perturbed point
+                    Matrix last_position_grads = compute_loss_gradients(last_position_logits, target_slice);
+                    
+                    // Place the gradients at the last position
+                    for (size_t j = 0; j < logits.cols(); ++j) {
+                        perturbed_gradients(seq_length - 1, j) = last_position_grads(0, j);
+                    }
+                    
+                    offset += max_length;
+                }
+                
+                perturbed_loss /= input_tokens.size();
+                perturbed_gradients *= (1.0f / input_tokens.size());
+                
+                // Second step of SAM with perturbed gradients
+                std::vector<Matrix> perturbed_grads = {perturbed_gradients};
+                sam_optimizer->second_step(params, perturbed_grads);
+                
+                // Update learning rate using perturbed loss
+                float loss_ratio = perturbed_loss / (prev_loss + 1e-10f);
                 learning_rate = adjust_learning_rate(learning_rate, loss_ratio, global_step);
-                prev_loss = batch_loss;
+                prev_loss = perturbed_loss;
                 
                 // Update epoch statistics
                 epoch_loss += batch_loss;
@@ -318,19 +412,20 @@ int main(int argc, char *argv[]) {
             Matrix final_hidden_states;  // Store the last hidden states
             for (auto& test_input : test_inputs) {
                 std::cout << "\nTesting: '" << test_input << "'\n";
-                // Stem the test input
+                // Process test input
                 std::istringstream iss(test_input);
                 std::string word;
-                std::string stemmed_input;
+                std::string processed_input;
+                
                 while (iss >> word) {
-                    stemmed_input += Stemmer::stem(word) + " ";
+                    processed_input += word + " ";
                 }
-                if (!stemmed_input.empty()) {
-                    stemmed_input.pop_back(); // Remove trailing space
+                if (!processed_input.empty()) {
+                    processed_input.pop_back(); // Remove trailing space
                 }
                 
-                // Encode stemmed input
-                std::vector<int> test_tokens = tokenizer->encode(stemmed_input);
+                // Encode processed input
+                std::vector<int> test_tokens = tokenizer->encode(processed_input);
                 
                 // Forward pass
                 Matrix test_hidden = transformer.forward(test_tokens);

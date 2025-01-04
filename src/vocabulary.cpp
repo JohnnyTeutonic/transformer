@@ -2,174 +2,6 @@
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
-#include <cctype>
-#include <regex>
-
-class Stemmer {
-public:
-    static std::string stem(std::string word) {
-        // Convert to lowercase
-        std::transform(word.begin(), word.end(), word.begin(), ::tolower);
-        
-        // Remove possessives
-        if (word.length() > 2 && word.substr(word.length()-2) == "'s") {
-            word = word.substr(0, word.length()-2);
-        }
-
-        // Handle plurals and common endings
-        if (word.length() > 3) {
-            // Handle -tion/-sion (e.g., operation -> operate, supervision -> supervise)
-            if (word.length() > 5) {
-                if (word.substr(word.length()-4) == "tion" || 
-                    word.substr(word.length()-4) == "sion") {
-                    return word.substr(0, word.length()-3) + "e";
-                }
-            }
-
-            // Handle -ment (e.g., development -> develop)
-            if (word.length() > 4 && word.substr(word.length()-4) == "ment") {
-                return word.substr(0, word.length()-4);
-            }
-
-            // Handle -ity (e.g., facility -> facile)
-            if (word.length() > 4 && word.substr(word.length()-3) == "ity") {
-                if (word.substr(word.length()-5) == "ility") {
-                    return word.substr(0, word.length()-5) + "le";
-                }
-                return word.substr(0, word.length()-3);
-            }
-
-            // Handle -ness (e.g., happiness -> happy)
-            if (word.length() > 4 && word.substr(word.length()-4) == "ness") {
-                std::string stem = word.substr(0, word.length()-4);
-                if (stem.back() == 'i') {
-                    stem.back() = 'y';
-                }
-                return stem;
-            }
-
-            // Handle -ization (e.g., organization -> organize)
-            if (word.length() > 7 && word.substr(word.length()-7) == "ization") {
-                return word.substr(0, word.length()-7) + "ize";
-            }
-
-            // Handle -ology (e.g., technology -> tech)
-            if (word.length() > 5 && word.substr(word.length()-5) == "ology") {
-                return word.substr(0, word.length()-5);
-            }
-
-            // Handle -ly (e.g., quickly -> quick)
-            if (word.length() > 3 && word.substr(word.length()-2) == "ly") {
-                return word.substr(0, word.length()-2);
-            }
-
-            // Handle -ful (e.g., helpful -> help)
-            if (word.length() > 3 && word.substr(word.length()-3) == "ful") {
-                return word.substr(0, word.length()-3);
-            }
-
-            // Handle -able/-ible (e.g., readable -> read, possible -> poss)
-            if (word.length() > 5) {
-                if (word.substr(word.length()-4) == "able" || 
-                    word.substr(word.length()-4) == "ible") {
-                    return word.substr(0, word.length()-4);
-                }
-            }
-
-            // Handle -er/-or (e.g., teacher -> teach, operator -> operate)
-            if (word.length() > 3) {
-                if (word.substr(word.length()-2) == "er" || 
-                    word.substr(word.length()-2) == "or") {
-                    std::string stem = word.substr(0, word.length()-2);
-                    if (stem.length() > 4 && stem.substr(stem.length()-2) == "at") {
-                        return stem + "e";  // operate
-                    }
-                    return stem;
-                }
-            }
-            
-            // Handle -ies (e.g., laboratories -> laboratory)
-            if (word.length() > 4 && word.substr(word.length()-3) == "ies") {
-                return word.substr(0, word.length()-3) + "y";
-            }
-            
-            // Handle -es (e.g., churches -> church)
-            if (word.length() > 3 && word.substr(word.length()-2) == "es") {
-                char beforeEs = word[word.length()-3];
-                if (beforeEs == 's' || beforeEs == 'x' || beforeEs == 'z' || 
-                    beforeEs == 'h' || beforeEs == 'c') {
-                    return word.substr(0, word.length()-2);
-                }
-            }
-            
-            // Handle -s (e.g., labs -> lab)
-            if (word.back() == 's' && word[word.length()-2] != 's') {
-                return word.substr(0, word.length()-1);
-            }
-            
-            // Handle -ing (e.g., working -> work)
-            if (word.length() > 4 && word.substr(word.length()-3) == "ing") {
-                std::string stem = word.substr(0, word.length()-3);
-                if (stem.length() > 1) {
-                    // Handle doubled consonant (e.g., running -> run)
-                    if (stem.length() > 2 && stem[stem.length()-1] == stem[stem.length()-2]) {
-                        return stem.substr(0, stem.length()-1);
-                    }
-                    // Add 'e' back for some cases (e.g., making -> make)
-                    if (needs_e_after_ing(stem)) {
-                        return stem + "e";
-                    }
-                    return stem;
-                }
-            }
-            
-            // Handle -ed (e.g., worked -> work)
-            if (word.length() > 3 && word.substr(word.length()-2) == "ed") {
-                std::string stem = word.substr(0, word.length()-2);
-                if (stem.length() > 1) {
-                    // Handle doubled consonant (e.g., stopped -> stop)
-                    if (stem.length() > 2 && stem[stem.length()-1] == stem[stem.length()-2]) {
-                        return stem.substr(0, stem.length()-1);
-                    }
-                    // Add 'e' back for some cases (e.g., saved -> save)
-                    if (needs_e_after_ed(stem)) {
-                        return stem + "e";
-                    }
-                    return stem;
-                }
-            }
-        }
-        
-        return word;
-    }
-
-private:
-    static bool needs_e_after_ing(const std::string& stem) {
-        // Check if we should add 'e' back after removing 'ing'
-        // Examples: make->making->make, write->writing->write
-        if (stem.empty()) return false;
-        
-        char last = stem.back();
-        char second_last = stem.length() > 1 ? stem[stem.length()-2] : '\0';
-        
-        // Common patterns where 'e' should be added back
-        bool ends_in_consonant = !is_vowel(last);
-        bool preceded_by_vowel = is_vowel(second_last);
-        
-        return (ends_in_consonant && preceded_by_vowel) ||
-               (last == 'v' || last == 'z') ||  // save, seize
-               (stem.length() > 2 && last == 'g' && !is_vowel(second_last));  // change
-    }
-
-    static bool needs_e_after_ed(const std::string& stem) {
-        // Similar logic to needs_e_after_ing
-        return needs_e_after_ing(stem);
-    }
-
-    static bool is_vowel(char c) {
-        return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u';
-    }
-};
 
 Vocabulary::Vocabulary() {
   // Initialize special tokens first (guaranteed IDs)
@@ -189,13 +21,10 @@ Vocabulary::Vocabulary() {
 }
 
 void Vocabulary::add_word(const std::string &word) {
-  // Stem the word before adding
-  std::string stemmed = Stemmer::stem(word);
-  
-  if (token_to_id.find(stemmed) == token_to_id.end()) {
+  if (token_to_id.find(word) == token_to_id.end()) {
     int id = id_to_token.size();
-    token_to_id[stemmed] = id;
-    id_to_token.push_back(stemmed);
+    token_to_id[word] = id;
+    id_to_token.push_back(word);
   }
 }
 
@@ -758,7 +587,7 @@ void Vocabulary::initialize_basic_vocabulary() {
       "wildlife", "witnesses", "worshippers", "x-ray", "yard", "yoga"
   };
 
-  // Add all words to vocabulary with stemming
+  // Add all words to vocabulary
   std::vector<std::string> all_words;
   all_words.insert(all_words.end(), articles.begin(), articles.end());
   all_words.insert(all_words.end(), pronouns.begin(), pronouns.end());
@@ -767,28 +596,20 @@ void Vocabulary::initialize_basic_vocabulary() {
   all_words.insert(all_words.end(), connectors.begin(), connectors.end());
   all_words.insert(all_words.end(), adjectives.begin(), adjectives.end());
   all_words.insert(all_words.end(), nouns.begin(), nouns.end());
-  all_words.insert(all_words.end(), training_nouns.begin(), training_nouns.end());
-  all_words.insert(all_words.end(), additional_roles.begin(), additional_roles.end());
-  all_words.insert(all_words.end(), raw_words.begin(), raw_words.end());  // Add the new words
 
-  // Sort and remove duplicates (after stemming)
-  std::vector<std::pair<std::string, std::string>> stemmed_words;
-  for (const auto& word : all_words) {
-    stemmed_words.emplace_back(Stemmer::stem(word), word);
-  }
-  std::sort(stemmed_words.begin(), stemmed_words.end());
-  stemmed_words.erase(std::unique(stemmed_words.begin(), stemmed_words.end()), stemmed_words.end());
+  // Sort and remove duplicates
+  std::sort(all_words.begin(), all_words.end());
+  all_words.erase(std::unique(all_words.begin(), all_words.end()),
+                  all_words.end());
 
-  // Add each stemmed word
-  for (const auto& [stemmed, original] : stemmed_words) {
-    add_word(stemmed);
+  // Add each word
+  for (const auto &word : all_words) {
+    add_word(word);
   }
 }
 
 int Vocabulary::get_id(const std::string &token) const {
-  // Stem the token before looking it up
-  std::string stemmed = Stemmer::stem(token);
-  auto it = token_to_id.find(stemmed);
+  auto it = token_to_id.find(token);
   return it != token_to_id.end() ? it->second : unk_token_id;
 }
 
@@ -831,13 +652,4 @@ bool Vocabulary::verify_mappings() const {
     }
   }
   return valid;
-}
-
-// Add method to get original forms
-std::vector<std::string> Vocabulary::get_original_forms(const std::string& stemmed_word) const {
-    std::vector<std::string> originals;
-    // This would need to be populated during vocabulary building
-    // For now, just return the stemmed form
-    originals.push_back(stemmed_word);
-    return originals;
 }

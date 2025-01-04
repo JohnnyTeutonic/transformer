@@ -79,3 +79,9 @@ vector_pair create_training_data();
 // Helper function to analyze token mappings
 void analyze_token_mappings(const vector_pair& training_data, 
                           const Tokenizer& tokenizer); 
+
+// Helper function to compute loss gradients
+Matrix compute_loss_gradients(const Matrix& logits, const Matrix& targets);
+
+// Helper function to compute loss with improved numerical stability
+float compute_batch_loss(const Matrix& logits, const Matrix& targets); 

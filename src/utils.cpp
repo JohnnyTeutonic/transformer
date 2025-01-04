@@ -465,4 +465,42 @@ float calculate_accuracy(const Matrix& logits, const Matrix& targets) {
     }
     
     return static_cast<float>(correct) / total;
+}
+
+Matrix compute_loss_gradients(const Matrix& logits, const Matrix& targets) {
+    Matrix gradients(logits.rows(), logits.cols(), 0.0f);
+    const float epsilon = 1e-10f;
+    const float temperature = 1.2f;
+    const float smoothing_factor = 0.1f;
+    
+    for (size_t i = 0; i < logits.rows(); i++) {
+        // Find max logit for numerical stability
+        float max_logit = logits(i, 0);
+        for (size_t j = 1; j < logits.cols(); j++) {
+            max_logit = std::max(max_logit, logits(i, j));
+        }
+        
+        // Compute softmax probabilities
+        std::vector<float> probs(logits.cols());
+        float sum_exp = 0.0f;
+        
+        for (size_t j = 0; j < logits.cols(); j++) {
+            probs[j] = std::exp((logits(i, j) - max_logit) / temperature);
+            sum_exp += probs[j];
+        }
+        
+        // Normalize probabilities
+        for (size_t j = 0; j < logits.cols(); j++) {
+            probs[j] /= (sum_exp + epsilon);
+        }
+        
+        // Compute gradients with label smoothing
+        for (size_t j = 0; j < logits.cols(); j++) {
+            float smooth_target = targets(i, j) * (1.0f - smoothing_factor) + 
+                                (smoothing_factor / logits.cols());
+            gradients(i, j) = (probs[j] - smooth_target) / temperature;
+        }
+    }
+    
+    return gradients;
 } 
