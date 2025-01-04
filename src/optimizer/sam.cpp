@@ -38,82 +38,126 @@ void SAM::restore_parameters(std::vector<Matrix *> &params) {
   }
 }
 
-void SAM::first_step(std::vector<Matrix *> &params,
-                     const std::vector<Matrix> &grads) {
-  if (params.size() != grads.size()) {
-    throw std::runtime_error("Parameter and gradient count mismatch");
-  }
-
-  // Save current parameters
-  save_parameter_copies(params);
-
-  // Compute gradient norm
-  float grad_norm = compute_grad_norm(grads);
-  const float min_norm = 1e-8f;
-  if (grad_norm < min_norm) {
-    std::cerr << "Warning: Very small gradient norm: " << grad_norm << std::endl;
-    return;
-  }
-
-  // Scale factor for gradient
-  // Clamp scale to prevent extreme values
-  float scale = std::min(rho / grad_norm, 10.0f);
-
-  // Update parameters with scaled gradients
-  for (size_t i = 0; i < params.size(); ++i) {
-    Matrix &param = *params[i];
-    const Matrix &grad = grads[i];
-
-    for (size_t j = 0; j < param.size(); ++j) {
-      // Prevent parameter updates from becoming too large
-      float update = scale * grad.data()[j];
-      update = std::clamp(update, -1.0f, 1.0f);
-      param.data()[j] += update;
+void SAM::first_step(const std::vector<Matrix*>& params, const std::vector<Matrix>& grads) {
+    // Save current parameters
+    saved_params.clear();
+    saved_params.reserve(params.size());
+    for (const auto& param : params) {
+        saved_params.push_back(*param);
     }
-  }
+    
+    // Compute gradient norm
+    float grad_norm = 0.0f;
+    for (const auto& grad : grads) {
+        for (size_t i = 0; i < grad.size(); i++) {
+            grad_norm += grad.data()[i] * grad.data()[i];
+        }
+    }
+    grad_norm = std::sqrt(grad_norm);
+    
+    // Scale rho based on gradient norm
+    float adaptive_rho = rho;
+    if (grad_norm > 1.0f) {
+        adaptive_rho /= grad_norm;
+    }
+    
+    // Perturb parameters
+    for (size_t i = 0; i < params.size(); i++) {
+        if (i < grads.size()) {
+            const Matrix& grad = grads[i];
+            Matrix& param = *params[i];
+            
+            // Compute parameter-wise perturbation
+            for (size_t j = 0; j < param.size(); j++) {
+                float grad_value = grad.data()[j];
+                // Clip gradient to prevent extreme perturbations
+                grad_value = std::clamp(grad_value, -10.0f, 10.0f);
+                param.data()[j] += adaptive_rho * grad_value;
+            }
+        }
+    }
 }
 
-void SAM::second_step(std::vector<Matrix *> &params,
-                      const std::vector<Matrix> &grads) {
-  // Restore original parameters
-  restore_parameters(params);
-
-  // Apply base optimizer update using step() instead of update()
-  base_optimizer->step(params, grads);
+void SAM::second_step(const std::vector<Matrix*>& params, const std::vector<Matrix>& grads) {
+    // Restore original parameters
+    for (size_t i = 0; i < params.size(); i++) {
+        *params[i] = saved_params[i];
+    }
+    
+    // Apply gradient update with momentum
+    const float beta1 = 0.9f;  // Momentum factor
+    const float eps = 1e-8f;   // Small constant for numerical stability
+    
+    // Initialize momentum buffers if needed
+    if (momentum_buffers.empty()) {
+        momentum_buffers.reserve(params.size());
+        for (const auto& param : params) {
+            momentum_buffers.emplace_back(param->rows(), param->cols(), 0.0f);
+        }
+    }
+    
+    // Update parameters with momentum
+    for (size_t i = 0; i < params.size(); i++) {
+        if (i < grads.size()) {
+            const Matrix& grad = grads[i];
+            Matrix& param = *params[i];
+            Matrix& momentum = momentum_buffers[i];
+            
+            // Update momentum
+            for (size_t j = 0; j < param.size(); j++) {
+                float grad_value = grad.data()[j];
+                // Clip gradient
+                grad_value = std::clamp(grad_value, -10.0f, 10.0f);
+                
+                // Update momentum
+                momentum.data()[j] = beta1 * momentum.data()[j] + (1.0f - beta1) * grad_value;
+                
+                // Update parameter
+                float update = learning_rate * momentum.data()[j];
+                // Clip update
+                update = std::clamp(update, -0.1f, 0.1f);
+                param.data()[j] -= update;
+            }
+        }
+    }
 }
 
-void SAM::update_bias(std::vector<std::reference_wrapper<FloatVector>> &biases,
-                      const std::vector<FloatVector> &bias_grads,
-                      float learning_rate) {
-  if (biases.size() != bias_grads.size()) {
-    throw std::runtime_error("Bias and gradient count mismatch");
-  }
-
-  // Save current biases
-  previous_biases.clear();
-  previous_biases.reserve(biases.size());
-  for (const auto &bias : biases) {
-    previous_biases.push_back(bias.get());
-  }
-
-  // Update biases
-  for (size_t i = 0; i < biases.size(); ++i) {
-    FloatVector &bias = biases[i].get();
-    const FloatVector &grad = bias_grads[i];
-
-    if (bias.size() != grad.size()) {
-      throw std::runtime_error("Bias and gradient size mismatch");
+void SAM::update_bias(const std::vector<std::reference_wrapper<FloatVector>>& bias_params,
+                     const std::vector<FloatVector>& bias_grads) {
+    // Initialize bias momentum if needed
+    if (bias_momentum.empty()) {
+        bias_momentum.reserve(bias_params.size());
+        for (const auto& bias : bias_params) {
+            bias_momentum.emplace_back(bias.get().size(), 0.0f);
+        }
     }
-
-    // Apply gradient update
-    for (size_t j = 0; j < bias.size(); ++j) {
-      // Clamp gradients and prevent extreme updates
-      float grad_value = std::clamp(grad[j], -10.0f, 10.0f);
-      float update = learning_rate * grad_value;
-      update = std::clamp(update, -0.1f, 0.1f);
-      bias[j] -= update;
+    
+    const float beta1 = 0.9f;  // Momentum factor
+    const float eps = 1e-8f;   // Small constant for numerical stability
+    
+    // Update each bias parameter
+    for (size_t i = 0; i < bias_params.size(); i++) {
+        if (i < bias_grads.size()) {
+            FloatVector& bias = bias_params[i].get();
+            const FloatVector& grad = bias_grads[i];
+            FloatVector& momentum = bias_momentum[i];
+            
+            for (size_t j = 0; j < bias.size(); j++) {
+                float grad_value = grad[j];
+                // Clip gradient
+                grad_value = std::clamp(grad_value, -10.0f, 10.0f);
+                
+                // Update momentum
+                momentum[j] = beta1 * momentum[j] + (1.0f - beta1) * grad_value;
+                
+                // Update bias
+                float update = learning_rate * momentum[j];
+                // Clip update
+                update = std::clamp(update, -0.1f, 0.1f);
+                bias[j] -= update;
+            }
+        }
     }
-  }
 }
 
 void SAM::compute_parameter_gradients(const Matrix& logits,

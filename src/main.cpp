@@ -140,7 +140,10 @@ int main(int argc, char *argv[]) {
         // Setup advanced components
         TensorCache<Matrix> activation_cache(1024, CacheReplacementPolicy::ARC);
         QuantizationAwareTraining qat(true);
-        auto sam_optimizer = std::make_unique<SAM>(0.05f);
+        static std::unique_ptr<SAM> sam_optimizer = std::make_unique<SAM>(
+            0.05f,  // rho (neighborhood size)
+            0.001f  // learning rate
+        );
 
         // Print and verify vocabulary mappings
         std::cout << "\nVerifying vocabulary mappings:\n";
@@ -271,12 +274,27 @@ int main(int argc, char *argv[]) {
                 batch_loss /= input_tokens.size();
                 accumulated_gradients *= (1.0f / input_tokens.size());
                 
-                // Get transformer parameters
-                std::vector<Matrix*> params = transformer.get_parameters();
-                std::vector<Matrix> grads = {accumulated_gradients};
+                // Get transformer parameters and convert to pointers
+                std::vector<Matrix*> param_ptrs;
+                auto& params = transformer.parameters();
+                for (auto& param : params) {
+                    param_ptrs.push_back(&param);
+                }
+                
+                // Create gradient vectors for each parameter
+                std::vector<Matrix> grads;
+                grads.reserve(params.size());
+                for (const auto& param : params) {
+                    grads.push_back(Matrix(param.rows(), param.cols(), 0.0f));
+                }
+                
+                // Copy accumulated gradients to first gradient matrix
+                if (!grads.empty()) {
+                    grads[0] = accumulated_gradients;
+                }
                 
                 // First step of SAM
-                sam_optimizer->first_step(params, grads);
+                sam_optimizer->first_step(param_ptrs, grads);
                 
                 // Recompute forward pass at the perturbed point
                 hidden_states = transformer.forward(batch_input_tokens);
@@ -319,9 +337,20 @@ int main(int argc, char *argv[]) {
                 perturbed_loss /= input_tokens.size();
                 perturbed_gradients *= (1.0f / input_tokens.size());
                 
+                // Create perturbed gradient vectors
+                std::vector<Matrix> perturbed_grads;
+                perturbed_grads.reserve(params.size());
+                for (const auto& param : params) {
+                    perturbed_grads.push_back(Matrix(param.rows(), param.cols(), 0.0f));
+                }
+                
+                // Copy perturbed gradients to first gradient matrix
+                if (!perturbed_grads.empty()) {
+                    perturbed_grads[0] = perturbed_gradients;
+                }
+                
                 // Second step of SAM with perturbed gradients
-                std::vector<Matrix> perturbed_grads = {perturbed_gradients};
-                sam_optimizer->second_step(params, perturbed_grads);
+                sam_optimizer->second_step(param_ptrs, perturbed_grads);
                 
                 // Update learning rate using perturbed loss
                 float loss_ratio = perturbed_loss / (prev_loss + 1e-10f);

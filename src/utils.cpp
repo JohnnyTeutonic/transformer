@@ -157,7 +157,7 @@ bool validate_input_sequence(const std::vector<int>& tokens, size_t vocab_size, 
 float compute_batch_loss(const Matrix& logits, const Matrix& targets) {
     float loss = 0.0f;
     const float epsilon = 1e-10f;
-    const float temperature = 1.2f;;
+    const float temperature = 0.8f;  // Lower temperature for sharper predictions
     
     for (size_t i = 0; i < logits.rows(); i++) {
         float max_logit = logits(i, 0);
@@ -173,7 +173,7 @@ float compute_batch_loss(const Matrix& logits, const Matrix& targets) {
             sum_exp += scaled_probs[j];
         }
         
-        const float smoothing_factor = 0.1f;
+        const float smoothing_factor = 0.05f;  // Reduced label smoothing
         for (size_t j = 0; j < logits.cols(); j++) {
             float prob = scaled_probs[j] / (sum_exp + epsilon);
             float smooth_target = targets(i, j) * (1.0f - smoothing_factor) + 
@@ -182,7 +182,7 @@ float compute_batch_loss(const Matrix& logits, const Matrix& targets) {
         }
     }
     
-    return loss / logits.rows();
+    return loss;
 }
 
 Matrix create_batch_target_distribution(const std::vector<std::vector<int>>& token_sequences, size_t vocab_size) {
@@ -470,8 +470,8 @@ float calculate_accuracy(const Matrix& logits, const Matrix& targets) {
 Matrix compute_loss_gradients(const Matrix& logits, const Matrix& targets) {
     Matrix gradients(logits.rows(), logits.cols(), 0.0f);
     const float epsilon = 1e-10f;
-    const float temperature = 1.2f;
-    const float smoothing_factor = 0.1f;
+    const float temperature = 0.8f;  // Lower temperature for sharper predictions
+    const float smoothing_factor = 0.05f;  // Reduced label smoothing
     
     for (size_t i = 0; i < logits.rows(); i++) {
         // Find max logit for numerical stability
@@ -499,6 +499,21 @@ Matrix compute_loss_gradients(const Matrix& logits, const Matrix& targets) {
             float smooth_target = targets(i, j) * (1.0f - smoothing_factor) + 
                                 (smoothing_factor / logits.cols());
             gradients(i, j) = (probs[j] - smooth_target) / temperature;
+        }
+    }
+    
+    // Add gradient scaling to prevent vanishing gradients
+    float grad_norm = 0.0f;
+    for (size_t i = 0; i < gradients.size(); i++) {
+        grad_norm += gradients.data()[i] * gradients.data()[i];
+    }
+    grad_norm = std::sqrt(grad_norm);
+    
+    const float MIN_GRAD_NORM = 1e-3f;
+    if (grad_norm < MIN_GRAD_NORM) {
+        float scale = MIN_GRAD_NORM / (grad_norm + epsilon);
+        for (size_t i = 0; i < gradients.size(); i++) {
+            gradients.data()[i] *= scale;
         }
     }
     
