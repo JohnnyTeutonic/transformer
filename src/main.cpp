@@ -424,7 +424,13 @@ int main(int argc, char* argv[]) {
                     std::cout << "\nBeam Search Completions:\n";
                     for (size_t i = 0; i < std::min(size_t(3), beam_results.size()); ++i) {
                         const auto& hypothesis = beam_results[i];
-                        std::string completion = tokenizer->decode(hypothesis.tokens);
+                        // For single token prediction, add quotes to make the token visible
+                        std::string completion;
+                        if (hypothesis.tokens.size() == 1) {
+                            completion = "\"" + tokenizer->decode(hypothesis.tokens) + "\"";
+                        } else {
+                            completion = tokenizer->decode(hypothesis.tokens);
+                        }
                         std::cout << i + 1 << ". " << completion << " (score: " << hypothesis.score
                                   << ")\n";
                     }

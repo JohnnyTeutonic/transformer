@@ -1,4 +1,5 @@
 #include "../include/utils.hpp"
+#include "../include/beam_search.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -278,37 +279,39 @@ void Utils::print_matrix(const Matrix& m, const std::string& name, size_t max_ro
 }
 
 void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, size_t k) {
-    std::vector<float> last_logits;
+    // Get logits from last position
+    std::vector<float> last_logits(logits.cols());
     for (size_t i = 0; i < logits.cols(); ++i) {
-        last_logits.push_back(logits(logits.rows() - 1, i));
+        last_logits[i] = logits(logits.rows() - 1, i);
     }
-
+    
+    // Convert to probabilities using softmax
     float max_logit = *std::max_element(last_logits.begin(), last_logits.end());
     std::vector<float> probs(last_logits.size());
     float sum_exp = 0.0f;
-
+    
     for (size_t i = 0; i < last_logits.size(); ++i) {
         probs[i] = std::exp(last_logits[i] - max_logit);
         sum_exp += probs[i];
     }
-
+    
+    // Normalize probabilities
     for (float& prob : probs) {
         prob /= sum_exp;
     }
-
+    
+    // Get top k predictions
     std::vector<std::pair<float, int>> scores;
     for (size_t i = 0; i < probs.size(); ++i) {
-        if (tokenizer.get_vocabulary().is_noun(tokenizer.decode({static_cast<int>(i)}))) {
-            scores.push_back({probs[i], static_cast<int>(i)});
-        }
+        scores.push_back({probs[i], static_cast<int>(i)});
     }
+    
+    std::partial_sort(scores.begin(), 
+                      scores.begin() + std::min(k, scores.size()), 
+                      scores.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    if (!scores.empty()) {
-        std::partial_sort(scores.begin(), scores.begin() + std::min(k, scores.size()), scores.end(),
-                          [](const auto& a, const auto& b) { return a.first > b.first; });
-    }
-
-    std::cout << "\nTop " << k << " noun predictions:\n";
+    std::cout << "\nTop " << k << " predictions:\n";
     for (size_t i = 0; i < std::min(k, scores.size()); ++i) {
         std::string token = tokenizer.decode({scores[i].second});
         std::cout << i + 1 << ". \"" << token << "\" (probability: " << std::fixed
@@ -360,6 +363,7 @@ float Utils::evaluate_validation(
         }
 
         try {
+            float max_logit;  // Declare at the start of the scope
             // Get model prediction
             std::cout << "Calling transformer.forward with " << input_tokens.size() << " tokens\n";
             Matrix output = transformer.forward(input_tokens);
@@ -384,7 +388,7 @@ float Utils::evaluate_validation(
             // Debug logits distribution
             float logits_mean = 0.0f, logits_std = 0.0f;
             float min_logit = std::numeric_limits<float>::max();
-            float max_logit = -std::numeric_limits<float>::max();
+            max_logit = -std::numeric_limits<float>::max();  // Reuse max_logit for both purposes
             for (size_t i = 0; i < logits.cols(); ++i) {
                 float val = logits(logits.rows() - 1, i);
                 logits_mean += val;
@@ -430,36 +434,33 @@ float Utils::evaluate_validation(
             float loss = compute_batch_loss(last_token_logits, target_distribution);
             total_loss += loss;
 
-            // Check if prediction matches target
+            // Use beam search with max_length=1 for single token prediction
+            BeamSearch beam_search(1);  // beam width of 1 for single token
+            auto hypotheses = beam_search.search(
+                std::vector<float>(logits.data() + (logits.rows() - 1) * logits.cols(), 
+                                  logits.data() + logits.rows() * logits.cols()),  // Only use last row
+                [](const std::vector<int>&) { return std::vector<float>(); },  // Empty next_token_fn
+                1,  // max_length = 1 for single token
+                -1  // eos_token_id not needed for single token
+            );
+            
+            if (hypotheses.empty() || hypotheses[0].tokens.empty()) {
+                throw std::runtime_error("No prediction returned from beam search");
+            }
+            
+            int predicted_token = hypotheses[0].tokens[0];
+
+            // Validate prediction
+            if (predicted_token < 0 || predicted_token >= static_cast<int>(tokenizer.vocab_size())) {
+                throw std::runtime_error("Invalid predicted token index");
+            }
+
             std::vector<std::string>& vocabulary = get_vocabulary(tokenizer);
             
             if (vocabulary.size() != tokenizer.vocab_size()) {
                 throw std::runtime_error("Vocabulary size mismatch: " + 
                     std::to_string(vocabulary.size()) + " vs tokenizer vocab " +
                     std::to_string(tokenizer.vocab_size()));
-            }
-
-            int predicted_token = -1;
-            max_logit = -std::numeric_limits<float>::infinity();
-            std::cout << "iterating through logits" << std::endl;
-            for (size_t i = 0; i < logits.cols(); ++i) {
-                float val = logits(logits.rows() - 1, i);
-                if (val > max_logit) {
-                    max_logit = val;
-                    predicted_token = i;
-                }
-            }
-            // Add debug output for logits
-            std::cout << "Top 5 logits:" << std::endl;
-            std::vector<std::pair<float, int>> logit_pairs;
-            for (size_t i = 0; i < logits.cols(); ++i) {
-                logit_pairs.push_back({logits(logits.rows() - 1, i), i});
-            }
-            std::partial_sort(logit_pairs.begin(), logit_pairs.begin() + 5, logit_pairs.end(),
-                [](const auto& a, const auto& b) { return a.first > b.first; });
-            for (int i = 0; i < 5; ++i) {
-                std::cout << vocabulary[logit_pairs[i].second] << ": " 
-                         << logit_pairs[i].first << std::endl;
             }
 
             if (predicted_token >= 0 && predicted_token < vocabulary.size()) {

@@ -114,5 +114,6 @@ class BeamSearch {
 
     std::vector<int> cpu_beam_search(
         const std::vector<float>& initial_logits,
-        size_t max_length);
+        size_t max_length,
+        const std::function<std::vector<float>(const std::vector<int>&)>& next_token_fn);
 };
