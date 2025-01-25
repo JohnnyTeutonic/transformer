@@ -62,4 +62,11 @@ struct KVCache {
      * @return Pair of matrices containing all cached keys and values
      */
     std::pair<Matrix, Matrix> get_cached_kv() const;
+
+    bool valid() const { return is_initialized; }
+    const Matrix& get_keys() const { return key_cache; }
+    const Matrix& get_values() const { return value_cache; }
+
+private:
+    bool is_initialized = false;
 };

@@ -11,6 +11,7 @@
 #include "layer_norm.hpp"
 #include "lm_head.hpp"
 #include "memory_pool.hpp"
+#include "performance_metrics.hpp"
 #include "../include/tokenizer.hpp"
 #include <functional>
 #include <memory>
@@ -233,6 +234,8 @@ class Transformer {
 
     bool training = true;
 
+    PerformanceMetrics metrics;  // Add metrics as a member
+
   public:
     Transformer() = default;
 
@@ -251,6 +254,42 @@ class Transformer {
      * @return Output logits for each position
      */
     Matrix forward(const std::vector<int>& input_tokens, const std::string& original_query, const Tokenizer& tokenizer, bool use_cache = false);
+
+    /**
+     * @brief Performs the forward pass through the transformer with matrix input.
+     * @param input Input matrix of shape [batch_size, hidden_size]
+     * @return Output logits
+     */
+    Matrix forward(const Matrix& input) {
+        // Store empty values for tokens and query since we're working directly with embeddings
+        last_input_tokens_.clear();
+        last_input_query_ = "";
+
+        // Skip token embedding since input is already embedded
+        hidden_states = input;
+        
+        if (training && dropout) {
+            hidden_states = dropout->forward(hidden_states, true);
+        }
+
+        // Create causal mask for the sequence length
+        AttentionMask mask = AttentionMask::create_causal_mask(input.rows());
+        
+        // Process through transformer layers
+        for (size_t i = 0; i < layers.size(); ++i) {
+            m_layer_activations.push_back(hidden_states);
+            hidden_states = layers[i]->forward(hidden_states, mask);
+        }
+
+        // Final layer norm
+        hidden_states = final_ln->forward(hidden_states);
+        
+        if (config.debug_mode) {
+            metrics.log_matrix_stats("Hidden States", hidden_states);
+        }
+        
+        return hidden_states;
+    }
 
     /**
      * @brief Trains the transformer on the given dataset.
@@ -365,4 +404,10 @@ class Transformer {
     const std::string& get_last_query() const {
         return last_input_query_;
     }
+
+    /**
+     * @brief Logs debug messages if debug mode is enabled
+     * @param msg The message to log
+     */
+    void debug_log(const std::string& msg);
 };

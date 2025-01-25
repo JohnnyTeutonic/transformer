@@ -65,6 +65,7 @@ void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
     // Allocate device memory
     float *d_grad_output, *d_input, *d_gamma;
     float *d_grad_gamma, *d_grad_beta;
+    float *d_mean, *d_var;
     std::cout << "Allocating device memory..." << std::endl;
     std::cout << "batch_size: " << batch_size << ", hidden_size: " << hidden_size << std::endl;
     std::cout << "grad_output size: " << grad_output.size() << std::endl;
@@ -77,14 +78,16 @@ void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
     CUDA_CHECK(cudaMalloc(&d_gamma, hidden_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_grad_gamma, hidden_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_grad_beta, hidden_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_mean, batch_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_var, batch_size * sizeof(float)));
 
     std::cout << "Copying data to device..." << std::endl;
     // Copy data to device
-    CUDA_CHECK(cudaMemcpy(d_grad_output, grad_output.data(), 
+    CUDA_CHECK(cudaMemcpy(d_grad_output, grad_output.get_data(), 
                         batch_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_input, input.data(), 
+    CUDA_CHECK(cudaMemcpy(d_input, input.get_data(), 
                         batch_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gamma, gamma.data(), 
+    CUDA_CHECK(cudaMemcpy(d_gamma, gamma.get_data(), 
                         hidden_size * sizeof(float), cudaMemcpyHostToDevice));
 
     std::cout << "Launching kernel..." << std::endl;
@@ -125,10 +128,10 @@ void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
 
     std::cout << "Copying results back to host..." << std::endl;
     std::cout << "Copying grad_gamma..." << std::endl;
-    CUDA_CHECK(cudaMemcpy(grad_gamma.data(), d_grad_gamma, hidden_size * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(grad_gamma.get_data(), d_grad_gamma, hidden_size * sizeof(float),
                         cudaMemcpyDeviceToHost));
     std::cout << "Copying grad_beta..." << std::endl;
-    CUDA_CHECK(cudaMemcpy(grad_beta.data(), d_grad_beta, hidden_size * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(grad_beta.get_data(), d_grad_beta, hidden_size * sizeof(float),
                         cudaMemcpyDeviceToHost));
 
     std::cout << "Freeing device memory..." << std::endl;
@@ -138,6 +141,8 @@ void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
     CUDA_CHECK(cudaFree(d_gamma));
     CUDA_CHECK(cudaFree(d_grad_gamma));
     CUDA_CHECK(cudaFree(d_grad_beta));
+    CUDA_CHECK(cudaFree(d_mean));
+    CUDA_CHECK(cudaFree(d_var));
     std::cout << "=== LayerNorm Backward Complete ===" << std::endl;
 }
 
@@ -158,9 +163,9 @@ void layer_norm_forward(const Matrix& input, const Matrix& gamma, const Matrix& 
     CUDA_CHECK(cudaMalloc(&d_variance, batch_size * sizeof(float)));
     
     // Copy input data to device
-    CUDA_CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gamma, gamma.data(), gamma.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_beta, beta.data(), beta.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_input, input.get_data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_gamma, gamma.get_data(), gamma.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_beta, beta.get_data(), beta.size() * sizeof(float), cudaMemcpyHostToDevice));
     
     // Launch kernels
     const int block_size = 256;
@@ -179,7 +184,7 @@ void layer_norm_forward(const Matrix& input, const Matrix& gamma, const Matrix& 
         hidden_size, batch_size, eps);
     
     // Copy result back to host
-    CUDA_CHECK(cudaMemcpy(output.data(), d_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(output.get_data(), d_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
     
     // Free device memory
     CUDA_CHECK(cudaFree(d_input));

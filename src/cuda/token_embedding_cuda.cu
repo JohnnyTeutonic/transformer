@@ -55,7 +55,7 @@ void TokenEmbedding::forward_cuda(const std::vector<int>& tokens, Matrix& output
     // Copy data to device
     CUDA_CHECK(
         cudaMemcpy(d_tokens, tokens.data(), seq_length * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_embedding_table, embedding_table.data(),
+    CUDA_CHECK(cudaMemcpy(d_embedding_table, embedding_table.get_data(),
                           embedding_table.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     // Launch kernel
@@ -69,7 +69,7 @@ void TokenEmbedding::forward_cuda(const std::vector<int>& tokens, Matrix& output
 
     // Copy result back to host
     output.resize(seq_length, hidden_size);
-    CUDA_CHECK(cudaMemcpy(output.data(), d_output, seq_length * hidden_size * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(output.get_data(), d_output, seq_length * hidden_size * sizeof(float),
                           cudaMemcpyDeviceToHost));
 
     // Cleanup
@@ -97,8 +97,8 @@ Matrix TokenEmbedding::project_to_vocab_cuda(const Matrix& input) {
 
     // Copy data to device
     CUDA_CHECK(
-        cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_embedding_table, embedding_table.data(),
+        cudaMemcpy(d_input, input.get_data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_embedding_table, embedding_table.get_data(),
                           embedding_table.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     // Launch kernel
@@ -113,7 +113,7 @@ Matrix TokenEmbedding::project_to_vocab_cuda(const Matrix& input) {
     // Create result matrix and copy data back
     Matrix result(seq_length, vocab_size);
     CUDA_CHECK(
-        cudaMemcpy(result.data(), d_output, result.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        cudaMemcpy(result.get_data(), d_output, result.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
     // Cleanup
     CUDA_CHECK(cudaFree(d_input));

@@ -738,13 +738,6 @@ std::vector<size_t> nucleusSampling(const std::vector<float>& probabilities, flo
     return result;
 }
 
-void from_json(const nlohmann::json& j, TransformerConfig::TokenizerConfig& t) {
-    j.at("use_subword").get_to(t.use_subword);
-    j.at("vocab_size").get_to(t.vocab_size);
-    j.at("model_path").get_to(t.model_path);
-    j.at("special_tokens").get_to(t.special_tokens);
-}
-
 struct PatternInfo {
     std::string pattern;
     float frequency_weight;  // Based on common usage

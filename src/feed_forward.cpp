@@ -16,6 +16,20 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+// CPU implementation of matrix multiplication
+void matmul(const Matrix& a, const Matrix& b, Matrix& c) {
+    #pragma omp parallel for collapse(2)
+    for (size_t i = 0; i < a.rows(); ++i) {
+        for (size_t j = 0; j < b.cols(); ++j) {
+            float sum = 0.0f;
+            for (size_t k = 0; k < a.cols(); ++k) {
+                sum += a(i, k) * b(k, j);
+            }
+            c(i, j) = sum;
+        }
+    }
+}
+
 FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dropout)
     : w1(hidden_size, intermediate_size), w2(intermediate_size, hidden_size), b1(intermediate_size),
       b2(hidden_size), dropout_prob(dropout), intermediate_cache(1, intermediate_size),
@@ -72,102 +86,153 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
 }
 
 Matrix FeedForward::forward(const Matrix& input) {
-    try {
-        std::cout << "\n=== FeedForward Dimensions Debug ===" << std::endl;
-        std::cout << "Input: " << input.rows() << "x" << input.cols() << std::endl;
-        std::cout << "W1: " << w1.rows() << "x" << w1.cols() << std::endl;
-        std::cout << "W2: " << w2.rows() << "x" << w2.cols() << std::endl;
-        std::cout << "B1: " << b1.size() << std::endl;
-        std::cout << "B2: " << b2.size() << std::endl;
-
+    std::cout << "\n=== FeedForward::forward START ===" << std::endl;
+    std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
+    
+    // Declare matrices outside of conditional blocks
+    Matrix intermediate, output;
+    bool using_cuda = false;
+    
 #ifdef USE_CUDA
+    // Try to initialize CUDA first
+    cudaError_t err = cudaFree(0);  // Simple CUDA runtime test
+    if (err == cudaSuccess) {
+        printf("Using CUDA\n");
+        auto& memory_mgr = cuda::MemoryManager::get_instance();
+        printf("Memory manager instance obtained\n");
+        
         try {
-            // Use CUDA memory manager for efficient memory allocation
-            auto& memory_mgr = cuda::MemoryManager::instance();
-            // Allocate intermediate results
-            Matrix intermediate(input.rows(), w1.cols());
-            std::cout << "Intermediate dimensions: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
+            // Allocate memory for intermediate and output matrices
+            size_t intermediate_size = input.rows() * w1.cols();
+            size_t output_size = input.rows() * w2.cols();
             
+            float* intermediate_data = memory_mgr.get_device_memory(intermediate_size);
+            float* output_data = memory_mgr.get_device_memory(output_size);
+            
+            // Create Matrix objects that wrap the device memory
+            Matrix intermediate(input.rows(), w1.cols(), intermediate_data, false);  // false means don't take ownership
+            Matrix output(input.rows(), w2.cols(), output_data, false);
+            
+            // First matrix multiplication
             cuda::matmul(input, w1, intermediate);
-            CUDA_CHECK(cudaGetLastError());
-            cudaDeviceSynchronize();
+            printf("First matmul completed\n");
             
-            std::cout << "After first matmul - Intermediate: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
-            std::cout << "Bias dimensions: " << b1.size() << std::endl;
+            // Apply bias and ReLU using CUDA kernels
+            cuda::FFNOps::add_bias_and_relu(intermediate, b1.data(), b1.size());
+            printf("Bias and ReLU applied\n");
             
-            // Apply bias and activation
-            intermediate.add_bias(b1);
-            CUDA_CHECK(cudaGetLastError());
-            cudaDeviceSynchronize();
-            
-            std::cout << "After bias addition - Intermediate: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
-            cuda::gelu_forward(intermediate);
-            CUDA_CHECK(cudaGetLastError());
-            cudaDeviceSynchronize();
-            
-            std::cout << "After GELU - Intermediate: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
-            // Store for backward pass
-            intermediate_cache = intermediate;
-            std::cout << "Intermediate cache dimensions: " << intermediate_cache.rows() << "x" << intermediate_cache.cols() << std::endl;
-            
-            // Explicitly preserve input batch size
-            Matrix output(input.rows(), w2.cols());  // Force output to be 1019 x hidden_size
-            std::cout << "Output dimensions: " << output.rows() << "x" << output.cols() << std::endl;
-            
+            // Second matrix multiplication
             cuda::matmul(intermediate, w2, output);
-            CUDA_CHECK(cudaGetLastError());
-            cudaDeviceSynchronize();
+            printf("Second matmul completed\n");
             
-            std::cout << "After second matmul - Output: " << output.rows() << "x" << output.cols() << std::endl;
-            output.add_bias(b2);
-            CUDA_CHECK(cudaGetLastError());
-            cudaDeviceSynchronize();
-            
-            std::cout << "After bias addition - Output: " << output.rows() << "x" << output.cols() << std::endl;
-            // Check dimensions before residual connection
-            if (output.rows() != input.rows() || output.cols() != input.cols()) {
-                throw std::runtime_error("FeedForward output dimensions " + 
-                    std::to_string(output.rows()) + "x" + std::to_string(output.cols()) +
-                    " don't match input dimensions " + 
-                    std::to_string(input.rows()) + "x" + std::to_string(input.cols()));
-            }
-            
-            // Add residual connection
-            output += input;
-            CUDA_CHECK(cudaGetLastError());
-            cudaDeviceSynchronize();
-            
-            return output;
-        } catch (const std::runtime_error& e) {
-            std::cerr << "CUDA feed forward failed, falling back to CPU: " << e.what() << std::endl;
-#endif
-            // CPU fallback implementation
-            Matrix intermediate = matmul(input, w1);
-            intermediate.add_bias(b1);
-            intermediate.apply_gelu();
-            intermediate_cache = intermediate;
-            
-            Matrix output = matmul(intermediate, w2);
-            output.add_bias(b2);
-            
-            // Check dimensions before residual connection
-            if (output.rows() != input.rows() || output.cols() != input.cols()) {
-                throw std::runtime_error("FeedForward output dimensions " + 
-                    std::to_string(output.rows()) + "x" + std::to_string(output.cols()) +
-                    " don't match input dimensions " + 
-                    std::to_string(input.rows()) + "x" + std::to_string(input.cols()));
-            }
-            
-            // Add residual connection
-            output += input;  // This is where the dimension mismatch occurs
-            
-            return output;
-#ifdef USE_CUDA
+            // Now safe to move the final results
+            intermediate = std::move(intermediate);
+            output = std::move(output);
+            using_cuda = true;
+            printf("CUDA computations completed successfully\n");
+        } catch (const std::exception& e) {
+            std::cerr << "Error in CUDA memory allocation: " << e.what() << std::endl;
+            std::cout << "Falling back to CPU implementation" << std::endl;
         }
-#endif
-    } catch (const std::exception& e) {
-        throw std::runtime_error("FeedForward forward failed: " + std::string(e.what()));
+    } else {
+        std::cout << "CUDA not available, falling back to CPU implementation" << std::endl;
     }
+#endif
+
+    // If CUDA failed or isn't available, use CPU implementation
+    if (!using_cuda) {
+        intermediate = Matrix(input.rows(), w1.cols());
+        output = Matrix(input.rows(), w2.cols());
+        std::cout << "Using CPU" << std::endl;
+        matmul(input, w1, intermediate);
+    }
+
+    // Debug intermediate values before ReLU
+    float min_pre_relu = std::numeric_limits<float>::infinity();
+    float max_pre_relu = -std::numeric_limits<float>::infinity();
+    float sum_pre_relu = 0.0f;
+    size_t nonzero_pre_relu = 0;
+    std::cout << "Intermediate matrix: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
+    for (size_t i = 0; i < intermediate.rows(); ++i) {
+        for (size_t j = 0; j < intermediate.cols(); ++j) {
+            float val = intermediate(i, j) + b1[j];
+            min_pre_relu = std::min(min_pre_relu, val);
+            max_pre_relu = std::max(max_pre_relu, val);
+            sum_pre_relu += val;
+            if (std::abs(val) > 1e-6) nonzero_pre_relu++;
+        }
+    }
+    
+    std::cout << "Before ReLU:" << std::endl;
+    std::cout << "Value range: [" << min_pre_relu << ", " << max_pre_relu << "]" << std::endl;
+    std::cout << "Mean: " << sum_pre_relu / (intermediate.rows() * intermediate.cols()) << std::endl;
+    std::cout << "Nonzero: " << nonzero_pre_relu << "/" 
+              << (intermediate.rows() * intermediate.cols()) << std::endl;
+    
+    // Add bias and apply activation
+    for (size_t i = 0; i < intermediate.rows(); ++i) {
+        for (size_t j = 0; j < intermediate.cols(); ++j) {
+            intermediate(i, j) += b1[j];
+            intermediate(i, j) = std::max(0.0f, intermediate(i, j)); // ReLU activation
+        }
+    }
+    
+    // Debug intermediate values after ReLU
+    float min_post_relu = std::numeric_limits<float>::infinity();
+    float max_post_relu = -std::numeric_limits<float>::infinity();
+    float sum_post_relu = 0.0f;
+    size_t nonzero_post_relu = 0;
+    
+    for (size_t i = 0; i < intermediate.rows(); ++i) {
+        for (size_t j = 0; j < intermediate.cols(); ++j) {
+            float val = intermediate(i, j);
+            min_post_relu = std::min(min_post_relu, val);
+            max_post_relu = std::max(max_post_relu, val);
+            sum_post_relu += val;
+            if (std::abs(val) > 1e-6) nonzero_post_relu++;
+        }
+    }
+    
+    std::cout << "After ReLU:" << std::endl;
+    std::cout << "Value range: [" << min_post_relu << ", " << max_post_relu << "]" << std::endl;
+    std::cout << "Mean: " << sum_post_relu / (intermediate.rows() * intermediate.cols()) << std::endl;
+    std::cout << "Nonzero: " << nonzero_post_relu << "/" 
+              << (intermediate.rows() * intermediate.cols()) << std::endl;
+
+    // Second matrix multiplication
+    if (using_cuda) {
+#ifdef USE_CUDA
+        cuda::matmul(intermediate, w2, output);
+#endif
+    } else {
+        matmul(intermediate, w2, output);
+    }
+    
+    // Add bias and debug final output
+    float min_output = std::numeric_limits<float>::infinity();
+    float max_output = -std::numeric_limits<float>::infinity();
+    float sum_output = 0.0f;
+    size_t nonzero_output = 0;
+    
+    for (size_t i = 0; i < output.rows(); ++i) {
+        for (size_t j = 0; j < output.cols(); ++j) {
+            output(i, j) += b2[j];
+            float val = output(i, j);
+            min_output = std::min(min_output, val);
+            max_output = std::max(max_output, val);
+            sum_output += val;
+            if (std::abs(val) > 1e-6) nonzero_output++;
+        }
+    }
+    
+    std::cout << "Final output:" << std::endl;
+    std::cout << "Value range: [" << min_output << ", " << max_output << "]" << std::endl;
+    std::cout << "Mean: " << sum_output / (output.rows() * output.cols()) << std::endl;
+    std::cout << "Nonzero: " << nonzero_output << "/" 
+              << (output.rows() * output.cols()) << std::endl;
+    
+    std::cout << "=== FeedForward::forward END ===\n" << std::endl;
+    return output;
 }
 
 void FeedForward::save(std::ostream& os) const {
@@ -178,8 +243,8 @@ void FeedForward::save(std::ostream& os) const {
     os.write(reinterpret_cast<const char*>(&intermediate_size), sizeof(intermediate_size));
     os.write(reinterpret_cast<const char*>(&dropout_prob), sizeof(dropout_prob));
 
-    os.write(reinterpret_cast<const char*>(w1.data()), w1.rows() * w1.cols() * sizeof(float));
-    os.write(reinterpret_cast<const char*>(w2.data()), w2.rows() * w2.cols() * sizeof(float));
+    os.write(reinterpret_cast<const char*>(w1.get_data()), w1.rows() * w1.cols() * sizeof(float));
+    os.write(reinterpret_cast<const char*>(w2.get_data()), w2.rows() * w2.cols() * sizeof(float));
     os.write(reinterpret_cast<const char*>(b1.data()), b1.size() * sizeof(float));
     os.write(reinterpret_cast<const char*>(b2.data()), b2.size() * sizeof(float));
 }
@@ -194,9 +259,9 @@ std::unique_ptr<FeedForward> FeedForward::load(std::istream& is) {
 
     auto ffn = std::make_unique<FeedForward>(hidden_size, intermediate_size, dropout_prob);
 
-    is.read(reinterpret_cast<char*>(ffn->w1.data()),
+    is.read(reinterpret_cast<char*>(ffn->w1.get_data()),
             ffn->w1.rows() * ffn->w1.cols() * sizeof(float));
-    is.read(reinterpret_cast<char*>(ffn->w2.data()),
+    is.read(reinterpret_cast<char*>(ffn->w2.get_data()),
             ffn->w2.rows() * ffn->w2.cols() * sizeof(float));
     is.read(reinterpret_cast<char*>(ffn->b1.data()), ffn->b1.size() * sizeof(float));
     is.read(reinterpret_cast<char*>(ffn->b2.data()), ffn->b2.size() * sizeof(float));

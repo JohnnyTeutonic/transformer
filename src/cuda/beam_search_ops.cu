@@ -94,7 +94,7 @@ namespace cuda {
         topk_kernel<<<grid, block>>>(d_scores, d_output_scores, d_output_indices, 
                                    scores.size(), k);
         
-        CUDA_CHECK(cudaMemcpy(output_scores.data(), d_output_scores, output_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(output_scores.get_data(), d_output_scores, output_size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(output_indices.data(), d_output_indices, k * sizeof(int), cudaMemcpyDeviceToHost));
         
         CUDA_CHECK(cudaFree(d_scores));
@@ -136,8 +136,8 @@ namespace cuda {
         CUDA_CHECK(cudaMalloc(&d_indices, beam_width * sizeof(int)));
         
         // Copy data to device
-        CUDA_CHECK(cudaMemcpy(d_current, current_scores.data(), current_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_next, next_scores.data(), next_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_current, current_scores.get_data(), current_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_next, next_scores.get_data(), next_size, cudaMemcpyHostToDevice));
         
         int vocab_size = next_scores.cols();
         printf("batch_size: %d\n", batch_size);
@@ -151,7 +151,7 @@ namespace cuda {
         // Copy results back
         printf("output_scores size: %zu\n", output_size);
         printf("output_indices size: %zu\n", beam_width * sizeof(int));
-        CUDA_CHECK(cudaMemcpy(output_scores.data(), d_output, output_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(output_scores.get_data(), d_output, output_size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(output_indices.data(), d_indices, beam_width * sizeof(int), cudaMemcpyDeviceToHost));
         printf("output_indices size: %zu\n", beam_width * sizeof(int));
         CUDA_CHECK(cudaFree(d_current));

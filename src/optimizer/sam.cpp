@@ -8,7 +8,7 @@ float SAM::compute_grad_norm(const std::vector<Matrix>& grads) {
     for (const auto& grad : grads) {
         for (size_t i = 0; i < grad.size(); ++i) {
             // Prevent underflow by clamping tiny gradients
-            float g = grad.data()[i];
+            float g = grad.get_data()[i];
             if (std::abs(g) < epsilon) {
                 g = 0.0f;
             }
@@ -64,9 +64,9 @@ void SAM::first_step(std::vector<Matrix*>& params, const std::vector<Matrix>& gr
 
         for (size_t j = 0; j < param.size(); ++j) {
             // Prevent parameter updates from becoming too large
-            float update = scale * grad.data()[j];
+            float update = scale * grad.get_data()[j];
             update = std::clamp(update, -1.0f, 1.0f);
-            param.data()[j] += update;
+            param.get_data()[j] += update;
         }
     }
 }
@@ -120,11 +120,11 @@ void SAM::compute_parameter_gradients(const Matrix& logits, const Matrix& target
     // Compute cross entropy gradients with numerical stability
     const float epsilon = 1e-12f;
     for (size_t i = 0; i < logits.size(); i++) {
-        if (target_distribution.data()[i] > 0.0f) {
+        if (target_distribution.get_data()[i] > 0.0f) {
             // Compute stable gradient for cross-entropy loss
-            float pred = std::min(std::max(logits.data()[i], epsilon), 1.0f - epsilon);
-            loss_grad.data()[i] =
-                (pred - target_distribution.data()[i]) / (pred * (1.0f - pred) + epsilon);
+            float pred = std::min(std::max(logits.get_data()[i], epsilon), 1.0f - epsilon);
+            loss_grad.get_data()[i] =
+                (pred - target_distribution.get_data()[i]) / (pred * (1.0f - pred) + epsilon);
         }
     }
 
@@ -139,7 +139,7 @@ void SAM::compute_parameter_gradients(const Matrix& logits, const Matrix& target
 
         // Compute layer gradients
         for (size_t i = 0; i < param_grads[idx].size(); i++) {
-            float grad = loss_grad.data()[i];
+            float grad = loss_grad.get_data()[i];
 
             // Apply gradient clipping
             grad = std::clamp(grad, -10.0f, 10.0f);
@@ -148,13 +148,13 @@ void SAM::compute_parameter_gradients(const Matrix& logits, const Matrix& target
             float noise = ((float) rand() / RAND_MAX - 0.5f) * 1e-5f;
             grad += noise;
 
-            param_grads[idx].data()[i] = grad;
+            param_grads[idx].get_data()[i] = grad;
         }
 
         // Scale gradients for better training stability
         float scale = 1.0f / std::sqrt(static_cast<float>(layer + 1));
         for (size_t i = 0; i < param_grads[idx].size(); i++) {
-            param_grads[idx].data()[i] *= scale;
+            param_grads[idx].get_data()[i] *= scale;
         }
     }
 }
@@ -196,11 +196,11 @@ Matrix SAM::compute_gradients(const Matrix& logits, const Matrix& hidden_states,
     // Apply gradient modifications for stability
     for (size_t i = 0; i < grad.size(); i++) {
         // Gradient clipping
-        float g = std::clamp(grad.data()[i], -1.0f, 1.0f);
+        float g = std::clamp(grad.get_data()[i], -1.0f, 1.0f);
 
         // Add gradient noise for regularization
-        if (grad.data()[i] != 0.0f) {
-            float noise_scale = 1e-4f * std::abs(grad.data()[i]);
+        if (grad.get_data()[i] != 0.0f) {
+            float noise_scale = 1e-4f * std::abs(grad.get_data()[i]);
             float noise = ((float) rand() / RAND_MAX - 0.5f) * noise_scale;
             g += noise;
         }
@@ -212,7 +212,7 @@ Matrix SAM::compute_gradients(const Matrix& logits, const Matrix& hidden_states,
             g *= std::min(1.0f / std::abs(g), 10.0f); // Scale large gradients
         }
 
-        grad.data()[i] = g;
+        grad.get_data()[i] = g;
     }
 
     // Store computed gradients for later use

@@ -6,13 +6,17 @@
 #include <mutex>
 #include <unordered_map>
 #include <vector>
-#include "../matrix.hpp"
+#include <string>
+#include <stdexcept>
 #include "cuda_check.cuh"
+
+// Forward declarations
+class Matrix;
 
 namespace cuda {
     class MemoryManager {
     public:
-        static MemoryManager& instance() {
+        static MemoryManager& get_instance() {
             static MemoryManager instance;
             return instance;
         }
@@ -30,6 +34,13 @@ namespace cuda {
                 return device_ptr;
             } catch (const std::exception& e) {
                 throw std::runtime_error("CUDA memory allocation failed: " + std::string(e.what()));
+            }
+        }
+
+        // Free CUDA memory
+        void free(void* ptr) {
+            if (ptr) {
+                cudaFree(ptr);
             }
         }
 

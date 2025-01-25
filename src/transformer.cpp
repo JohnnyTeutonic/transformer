@@ -39,7 +39,7 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
                                  const std::optional<KVCache>& kv_cache) {
     std::cout << "=== TransformerLayer::forward START ===" << std::endl;
 
-    // Layer norm before attention
+    // Layer norm before attention (using attention_ln)
     Matrix normalized = attention_ln->forward(input);
     
     // Debug normalized output
@@ -98,7 +98,40 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
     if (training) {
         attention_output = attention_dropout->forward(attention_output, true);
     }
-    Matrix residual = attention_output + normalized;
+
+    // Handle residual connection with different sequence lengths
+    std::cout << "Matrix addition dimensions:" << std::endl;
+    std::cout << "Left matrix: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
+    std::cout << "Right matrix: " << normalized.rows() << "x" << normalized.cols() << std::endl;
+
+    Matrix residual;
+    if (attention_output.rows() != normalized.rows()) {
+        // Cross-attention case: need to handle different sequence lengths
+        size_t output_seq_len = attention_output.rows();
+        size_t input_seq_len = normalized.rows();
+        size_t hidden_size = normalized.cols();
+
+        // Create a new matrix with the larger sequence length
+        residual = Matrix(output_seq_len, hidden_size);
+
+        // Copy attention output
+        for (size_t i = 0; i < output_seq_len; i++) {
+            for (size_t j = 0; j < hidden_size; j++) {
+                residual(i, j) = attention_output(i, j);
+            }
+        }
+
+        // Add the normalized input, repeating it as needed
+        for (size_t i = 0; i < output_seq_len; i++) {
+            size_t input_idx = i % input_seq_len;  // Repeat the input if needed
+            for (size_t j = 0; j < hidden_size; j++) {
+                residual(i, j) += normalized(input_idx, j);
+            }
+        }
+    } else {
+        // Same sequence length case: simple addition
+        residual = attention_output + normalized;
+    }
     
     // Debug residual
     float min_res = std::numeric_limits<float>::infinity();
@@ -123,8 +156,9 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
               << "Nonzero res: " << nonzero_res << "/" 
               << (residual.rows() * residual.cols()) << "\n\n";
     
-    std::cout << "calculating attention ln" << std::endl;
-    Matrix norm1 = attention_ln->forward(residual);
+    std::cout << "calculating ffn ln" << std::endl;
+    // Use ffn_ln for the second normalization instead of attention_ln
+    Matrix norm1 = ffn_ln->forward(residual);
     
     // Debug norm1
     float min_norm1 = std::numeric_limits<float>::infinity();
@@ -142,7 +176,7 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
         }
     }
     
-    std::cout << "After second attention layer norm:\n"
+    std::cout << "After feed forward layer norm:\n"
               << "Min norm1: " << min_norm1 << "\n"
               << "Max norm1: " << max_norm1 << "\n"
               << "Mean norm1: " << sum_norm1 / (norm1.rows() * norm1.cols()) << "\n"
@@ -310,35 +344,25 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
 }
 
 // Transformer implementation
-Transformer::Transformer(const TransformerConfig& config) : config(config) {
-    // Initialize dropout with config probability
-    dropout = std::make_unique<Dropout>(config.dropout_prob);
-
-    // Xavier/Glorot initialization with bounds
-    auto init_weight = [](float fan_in, float fan_out) -> float {
-        float limit = std::sqrt(6.0f / (fan_in + fan_out));
-        limit = std::min(limit, 0.1f); // Cap maximum initialization value
-        return (static_cast<float>(rand()) / RAND_MAX * 2.0f - 1.0f) * limit;
-    };
-
-    // Initialize token embedding with bounded values
-    token_embedding = std::make_unique<TokenEmbedding>(config.vocab_size, config.hidden_size);
-
-    // Initialize positional encoding
-    pos_encoding = std::make_unique<PositionalEncoding>(config.max_seq_length, config.hidden_size);
-
-    // Initialize transformer layers with bounded initialization
+Transformer::Transformer(const TransformerConfig& config_)
+    : config(config_)
+    , token_embedding(std::make_unique<TokenEmbedding>(config_.vocab_size, config_.hidden_size))
+    , pos_encoding(std::make_unique<PositionalEncoding>(config_.hidden_size, config_.max_seq_length))
+    , final_ln(std::make_unique<LayerNorm>(config_.hidden_size))
+    , dropout(std::make_unique<Dropout>(config_.dropout_rate)) {
+    
+    metrics.set_config(config_);  // Set the config for metrics
+    
+    // Initialize layers
     layers.reserve(config.num_layers);
-    m_kv_caches.reserve(config.num_layers);
     for (size_t i = 0; i < config.num_layers; ++i) {
-        layers.push_back(std::make_unique<TransformerLayer>(config, i));
-        m_kv_caches.emplace_back(config.max_seq_length);
+        layers.push_back(TransformerLayer::create(config, i));
     }
 
-    // Initialize final layer normalization
-    final_ln = std::make_unique<LayerNorm>(config.hidden_size);
+    // Initialize KV caches
+    m_kv_caches.resize(config.num_layers);
 
-    // Initialize the language model head with bounded values
+    // Initialize the language model head
     lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
 }
 
@@ -496,6 +520,10 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         m_layer_activations.clear();
     }
     
+    if (config.debug_mode) {
+        metrics.log_matrix_stats("Hidden States", hidden_states);
+    }
+    
     return hidden_states;
 }
 
@@ -551,7 +579,7 @@ void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens,
     for (size_t i = 0; i < params_before.size(); ++i) {
         Matrix diff = params_after[i] - params_before[i];
         for (size_t j = 0; j < diff.size(); ++j) {
-            max_weight_change = std::max(max_weight_change, std::abs(diff.data()[j]));
+            max_weight_change = std::max(max_weight_change, std::abs(diff(j / diff.cols(), j % diff.cols())));
         }
     }
     std::cout << "Max weight change in training step: " << max_weight_change << std::endl;
@@ -584,7 +612,9 @@ void Transformer::update_parameters(float learning_rate) {
 
         // Update rule: param = param - learning_rate * grad
         for (size_t j = 0; j < param.size(); ++j) {
-            param.data()[j] -= learning_rate * grad.data()[j];
+            size_t row = j / param.cols();
+            size_t col = j % param.cols();
+            param(row, col) -= learning_rate * grad(row, col);
         }
     }
 
@@ -612,8 +642,9 @@ void Transformer::update_parameters(float learning_rate) {
                 throw std::runtime_error("Dimension mismatch in attention bias update");
             }
 
+            // Use linear indexing for vectors
             for (size_t j = 0; j < bias.get().size(); ++j) {
-                bias.get().data()[j] -= learning_rate * bias_grad.get().data()[j];
+                bias.get()[j] -= learning_rate * bias_grad.get()[j];
             }
         }
 
@@ -635,8 +666,11 @@ void Transformer::update_parameters(float learning_rate) {
                 throw std::runtime_error("Dimension mismatch in layer norm update");
             }
 
+            // Use 2D indexing for matrices
             for (size_t j = 0; j < param.get().size(); ++j) {
-                param.get().data()[j] -= learning_rate * grad.get().data()[j];
+                size_t row = j / param.get().cols();
+                size_t col = j % param.get().cols();
+                param.get()(row, col) -= learning_rate * grad.get()(row, col);
             }
         }
 
@@ -658,8 +692,9 @@ void Transformer::update_parameters(float learning_rate) {
                 throw std::runtime_error("Dimension mismatch in feed forward bias update");
             }
 
+            // Use linear indexing for vectors
             for (size_t j = 0; j < bias.get().size(); ++j) {
-                bias.get().data()[j] -= learning_rate * bias_grad.get().data()[j];
+                bias.get()[j] -= learning_rate * bias_grad.get()[j];
             }
         }
     }
@@ -727,5 +762,11 @@ void Transformer::load(std::istream& is) {
 
     } catch (const std::exception& e) {
         throw std::runtime_error("Error loading transformer: " + std::string(e.what()));
+    }
+}
+
+void Transformer::debug_log(const std::string& msg) {
+    if (config.debug_mode) {
+        std::cout << "[DEBUG] " << msg << std::endl;
     }
 }

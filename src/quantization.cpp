@@ -90,7 +90,7 @@ Matrix Quantizer::quantize_cuda(const Matrix& input) {
 #ifdef USE_CUDA
     // Find min/max using CUDA reduction kernel
     float min_val, max_val;
-    find_minmax_cuda(input.data(), input.rows() * input.cols(), &min_val, &max_val);
+    find_minmax_cuda(input.get_data(), input.rows() * input.cols(), &min_val, &max_val);
 
     // Calculate scale and zero point
     float range = max_val - min_val;
@@ -103,7 +103,7 @@ Matrix Quantizer::quantize_cuda(const Matrix& input) {
 
     // Quantize using CUDA kernel
     Matrix quantized(input.rows(), input.cols());
-    CUDA_LAUNCH(quantize_kernel, grid_size, block_size, 0, 0, input.data(), quantized.data(),
+    CUDA_LAUNCH(quantize_kernel, grid_size, block_size, 0, 0, input.get_data(), quantized.get_data(),
                 input.rows() * input.cols(), scale, zero_point);
 
     return quantized;
@@ -119,7 +119,7 @@ Matrix Quantizer::dequantize_cuda(const Matrix& quantized) {
     const int grid_size = (quantized.rows() * quantized.cols() + block_size - 1) / block_size;
 
     Matrix result(quantized.rows(), quantized.cols());
-    CUDA_LAUNCH(dequantize_kernel, grid_size, block_size, 0, 0, quantized.data(), result.data(),
+    CUDA_LAUNCH(dequantize_kernel, grid_size, block_size, 0, 0, quantized.get_data(), result.get_data(),
                 quantized.rows() * quantized.cols(), scale, zero_point);
     return result;
 #else

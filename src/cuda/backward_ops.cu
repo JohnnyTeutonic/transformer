@@ -11,34 +11,39 @@ namespace cuda {
                                              int hidden_size, float eps);
     __global__ void gelu_backward_kernel(float* grad_output, const float* input, int size);
 
-    void layer_norm_backward(const Matrix& grad, const Matrix& input, 
-                           const Matrix& gamma, Matrix& dx, float eps) {
-        const int batch_size = input.rows();
-        const int hidden_size = input.cols();
+    void layer_norm_backward(const Matrix& grad, const Matrix& input, const Matrix& gamma,
+                           Matrix& dx, float eps) {
+        size_t batch_size = input.rows();
+        size_t hidden_size = input.cols();
         
-        float* d_grad, *d_input, *d_gamma, *d_dx;
         size_t grad_size = grad.size() * sizeof(float);
         size_t input_size = input.size() * sizeof(float);
         size_t gamma_size = gamma.size() * sizeof(float);
+
+        float *d_grad, *d_input, *d_gamma, *d_dx;
         
+        // Allocate device memory
         CUDA_CHECK(cudaMalloc(&d_grad, grad_size));
         CUDA_CHECK(cudaMalloc(&d_input, input_size));
         CUDA_CHECK(cudaMalloc(&d_gamma, gamma_size));
         CUDA_CHECK(cudaMalloc(&d_dx, grad_size));
-        
-        CUDA_CHECK(cudaMemcpy(d_grad, grad.data(), grad_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_input, input.data(), input_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_gamma, gamma.data(), gamma_size, cudaMemcpyHostToDevice));
-        
+
+        // Copy data to device
+        CUDA_CHECK(cudaMemcpy(d_grad, grad.get_data(), grad_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_input, input.get_data(), input_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_gamma, gamma.get_data(), gamma_size, cudaMemcpyHostToDevice));
+
+        // Launch kernel
         dim3 block(256);
-        dim3 grid((batch_size + 255) / 256);
-        size_t shared_mem_size = 3 * block.x * sizeof(float);
+        dim3 grid((batch_size * hidden_size + block.x - 1) / block.x);
         
-        layer_norm_backward_kernel<<<grid, block, shared_mem_size>>>(
-            d_grad, d_input, d_gamma, d_dx, batch_size, hidden_size, eps);
-        
-        CUDA_CHECK(cudaMemcpy(dx.data(), d_dx, grad_size, cudaMemcpyDeviceToHost));
-        
+        layer_norm_backward_kernel<<<grid, block>>>(d_grad, d_input, d_gamma, d_dx,
+                                                  batch_size, hidden_size, eps);
+
+        // Copy result back to host
+        CUDA_CHECK(cudaMemcpy(dx.get_data(), d_dx, grad_size, cudaMemcpyDeviceToHost));
+
+        // Free device memory
         CUDA_CHECK(cudaFree(d_grad));
         CUDA_CHECK(cudaFree(d_input));
         CUDA_CHECK(cudaFree(d_gamma));
@@ -46,22 +51,22 @@ namespace cuda {
     }
     
     void gelu_backward(Matrix& grad_output, const Matrix& input) {
-        float* d_grad, *d_input;
+        float *d_grad, *d_input;
         size_t size = input.size() * sizeof(float);
-        
+
         CUDA_CHECK(cudaMalloc(&d_grad, size));
         CUDA_CHECK(cudaMalloc(&d_input, size));
-        
-        CUDA_CHECK(cudaMemcpy(d_grad, grad_output.data(), size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_input, input.data(), size, cudaMemcpyHostToDevice));
-        
+
+        CUDA_CHECK(cudaMemcpy(d_grad, grad_output.get_data(), size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_input, input.get_data(), size, cudaMemcpyHostToDevice));
+
         dim3 block(256);
-        dim3 grid((input.size() + 255) / 256);
-        
+        dim3 grid((input.size() + block.x - 1) / block.x);
+
         gelu_backward_kernel<<<grid, block>>>(d_grad, d_input, input.size());
-        
-        CUDA_CHECK(cudaMemcpy(grad_output.data(), d_grad, size, cudaMemcpyDeviceToHost));
-        
+
+        CUDA_CHECK(cudaMemcpy(grad_output.get_data(), d_grad, size, cudaMemcpyDeviceToHost));
+
         CUDA_CHECK(cudaFree(d_grad));
         CUDA_CHECK(cudaFree(d_input));
     }

@@ -18,9 +18,9 @@ Matrix FeedForward::backward_cuda(const Matrix& grad, const Matrix& input) const
     CUDA_CHECK(cudaMalloc(&d_dx, batch_size * hidden_size * sizeof(float)));
 
     // Copy data to device
-    CUDA_CHECK(cudaMemcpy(d_grad, grad.data(), batch_size * hidden_size * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(d_grad, grad.get_data(), batch_size * hidden_size * sizeof(float),
                           cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_w2, w2.data(), hidden_size * intermediate_size * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(d_w2, w2.get_data(), hidden_size * intermediate_size * sizeof(float),
                           cudaMemcpyHostToDevice));
 
     // Launch kernels
@@ -43,7 +43,7 @@ Matrix FeedForward::backward_cuda(const Matrix& grad, const Matrix& input) const
 
     // Copy result back to host
     Matrix dx(batch_size, hidden_size);
-    CUDA_CHECK(cudaMemcpy(dx.data(), d_dx, batch_size * hidden_size * sizeof(float),
+    CUDA_CHECK(cudaMemcpy(dx.get_data(), d_dx, batch_size * hidden_size * sizeof(float),
                           cudaMemcpyDeviceToHost));
 
     // Free device memory

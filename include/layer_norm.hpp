@@ -120,11 +120,10 @@ public:
         return *this;
     }
 
-    Matrix get_gradients() const {
-        // Create a matrix that combines both gradients
-        Matrix combined(1, hidden_size_ * 2);
-        std::copy(grad_gamma_.data(), grad_gamma_.data() + hidden_size_, combined.data());
-        std::copy(grad_beta_.data(), grad_beta_.data() + hidden_size_, combined.data() + hidden_size_);
+    Matrix get_combined_gradients() const {
+        Matrix combined(1, 2 * hidden_size_);
+        std::copy(grad_gamma_.get_data(), grad_gamma_.get_data() + hidden_size_, combined.get_data());
+        std::copy(grad_beta_.get_data(), grad_beta_.get_data() + hidden_size_, combined.get_data() + hidden_size_);
         return combined;
     }
 

@@ -16,7 +16,7 @@ TokenEmbedding::TokenEmbedding(size_t vocab_size, size_t embedding_dim)
     // Add validation
     bool all_zero = true;
     for (size_t i = 0; i < std::min(size_t(10), weights_.size()); i++) {
-        if (weights_.data()[i] != 0.0f) {
+        if (weights_.get_data()[i] != 0.0f) {
             all_zero = false;
             break;
         }
@@ -76,7 +76,7 @@ Matrix TokenEmbedding::forward(const std::vector<int>& tokens) {
 
     // Validate output
     for (size_t i = 0; i < output.size(); i++) {
-        if (std::isnan(output.data()[i]) || std::isinf(output.data()[i])) {
+        if (std::isnan(output.get_data()[i]) || std::isinf(output.get_data()[i])) {
             throw std::runtime_error("Invalid value in output embeddings at position " +
                                      std::to_string(i));
         }

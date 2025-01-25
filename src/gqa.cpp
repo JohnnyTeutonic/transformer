@@ -115,7 +115,7 @@ Matrix GroupedQueryAttention::forward(const Matrix& x, const AttentionMask& mask
     Matrix output_gpu(batch_size, hidden_size);
 
     // Launch CUDA kernel
-    launch_gqa_kernel(Q_gpu.data(), K_gpu.data(), V_gpu.data(), output_gpu.data(), batch_size,
+    launch_gqa_kernel(Q_gpu.get_data(), K_gpu.get_data(), V_gpu.get_data(), output_gpu.get_data(), batch_size,
                       num_heads, num_kv_heads, seq_len, head_dim, nullptr);
 
     return output_gpu.to_cpu();

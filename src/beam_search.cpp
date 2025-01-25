@@ -547,7 +547,7 @@ std::vector<BeamSearch::Hypothesis> BeamSearch::search_cuda(
     int eos_token_id) {
 #ifdef USE_CUDA
     try {
-        auto& memory_mgr = cuda::MemoryManager::instance();
+        auto& memory_mgr = cuda::MemoryManager::get_instance();
         
         // Initialize beam scores and sequences
         Matrix beam_scores(beam_width_, 1);

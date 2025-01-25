@@ -18,6 +18,8 @@ using FloatVector = Vector;
 class AttentionMask {
   public:
     Matrix mask;  ///< The actual mask matrix where 0 indicates masked positions
+    bool is_causal;
+    size_t window_size;
 
     /**
      * @brief Creates a causal (triangular) mask for autoregressive attention.
@@ -35,14 +37,14 @@ class AttentionMask {
     static AttentionMask create_padding_mask(const std::vector<int>& lengths, size_t max_len);
     
     AttentionMask() = default;
-    explicit operator bool() const { return has_mask_; }
-    const Matrix& value() const { return mask_; }
+    explicit operator bool() const { return is_causal; }
+    const Matrix& value() const { return mask; }
 
     // Constructor taking a mask matrix
-    explicit AttentionMask(const Matrix& mask) : mask_(mask), has_mask_(true) {}
+    AttentionMask(const Matrix& m, bool causal = true, size_t window = 0) 
+        : mask(m), is_causal(causal), window_size(window) {}
 
   private:
-    Matrix mask_;
     bool has_mask_ = false;
 };
 
@@ -457,6 +459,12 @@ class MultiHeadAttention {
     Matrix compute_key_gradients(const Matrix& grad, const Matrix& input);
     Matrix compute_value_gradients(const Matrix& grad, const Matrix& input);
     Matrix combine_gradients(const Matrix& d_query, const Matrix& d_key, const Matrix& d_value);
+
+    Matrix reshape_to_attention_shape(const Matrix& input, 
+                                    size_t batch_size, 
+                                    size_t seq_length,
+                                    size_t num_heads,
+                                    size_t head_dim);
 };
 
 // Add sliding window attention

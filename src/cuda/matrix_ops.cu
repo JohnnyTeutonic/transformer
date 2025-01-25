@@ -1,28 +1,37 @@
+#ifdef USE_CUDA
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include "../../include/cuda/matrix_ops.cuh"
 #include "../../include/cuda/cuda_check.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
+#include "../../include/cuda/memory_manager.cuh"
 
 // Forward declare all kernels
 __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C, 
                                       int M, int N, int K);
 __global__ void gelu_forward_kernel(float* x, int size);
 
+// Global cuBLAS handle
+static cublasHandle_t cublas_handle;
+static bool cublas_initialized = false;
+
 namespace cuda {
-    // Global cuBLAS handle
-    static cublasHandle_t cublas_handle;
-
-    void initialize_cuda() {
+    __host__ void initialize_cuda() {
         CUDA_CHECK(cudaSetDevice(0));
-        CUBLAS_CHECK(cublasCreate(&cublas_handle));
+        if (!cublas_initialized) {
+            CUBLAS_CHECK(cublasCreate(&cublas_handle));
+            cublas_initialized = true;
+        }
     }
 
-    void cleanup_cuda() {
-        CUBLAS_CHECK(cublasDestroy(cublas_handle));
+    __host__ void cleanup_cuda() {
+        if (cublas_initialized) {
+            CUBLAS_CHECK(cublasDestroy(cublas_handle));
+            cublas_initialized = false;
+        }
     }
 
-    void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
+    __host__ void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
         // Verify dimensions
         if (A.cols() != B.rows()) {
             throw std::runtime_error("Matrix multiplication dimension mismatch: " +
@@ -35,43 +44,55 @@ namespace cuda {
                 std::to_string(A.rows()) + "x" + std::to_string(B.cols()) + " got " +
                 std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
         }
-        dim3 block(32, 32);
-        dim3 grid((B.cols() + 31) / 32, (A.rows() + 31) / 32);
+
+        // Initialize cuBLAS if needed
+        if (!cublas_initialized) {
+            initialize_cuda();
+        }
+
+        // First ensure all matrices are on GPU
+        Matrix A_gpu = A.is_cuda() ? A : A.to_gpu();
+        Matrix B_gpu = B.is_cuda() ? B : B.to_gpu();
+        if (!C.is_cuda()) {
+            C = Matrix(C.rows(), C.cols(), nullptr, false);  // Create GPU matrix
+        }
+
+        // cuBLAS uses column-major order, while we use row-major order
+        // So we compute C = B^T * A^T to get the correct result
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
         
-        float* d_A, *d_B, *d_C;
-        size_t A_size = A.rows() * A.cols() * sizeof(float);
-        size_t B_size = B.rows() * B.cols() * sizeof(float);
-        size_t C_size = A.rows() * B.cols() * sizeof(float);
+        // Get raw pointers
+        float* d_A = A_gpu.get_data();
+        float* d_B = B_gpu.get_data();
+        float* d_C = C.get_data();
 
-        CUDA_CHECK(cudaMalloc(&d_A, A_size));
-        CUDA_CHECK(cudaMalloc(&d_B, B_size));
-        CUDA_CHECK(cudaMalloc(&d_C, C_size));
-
-        CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
-
-        matrix_multiply_kernel<<<grid, block>>>(d_A, d_B, d_C, A.rows(), B.cols(), A.cols());
-
-        CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
-
-        CUDA_CHECK(cudaFree(d_A));
-        CUDA_CHECK(cudaFree(d_B));
-        CUDA_CHECK(cudaFree(d_C));
+        // Perform matrix multiplication: C = alpha * (B^T * A^T) + beta * C
+        CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                B.cols(), A.rows(), A.cols(),
+                                &alpha,
+                                d_B, B.cols(),
+                                d_A, A.cols(),
+                                &beta,
+                                d_C, C.cols()));
+        
+        // Synchronize to catch any errors
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    void gelu_forward(Matrix& x) {
+    __host__ void gelu_forward(Matrix& x) {
         float* d_x;
         size_t size = x.size() * sizeof(float);
         
         CUDA_CHECK(cudaMalloc(&d_x, size));
-        CUDA_CHECK(cudaMemcpy(d_x, x.data(), size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_x, x.get_data(), size, cudaMemcpyHostToDevice));
         
         dim3 block(256);
         dim3 grid((x.size() + 255) / 256);
         
         gelu_forward_kernel<<<grid, block>>>(d_x, x.size());
         
-        CUDA_CHECK(cudaMemcpy(x.data(), d_x, size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(x.get_data(), d_x, size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(d_x));
     }
 }
@@ -126,3 +147,4 @@ __global__ void gelu_forward_kernel(float* x, int size) {
         x[idx] = val * cdf;
     }
 }
+#endif // USE_CUDA

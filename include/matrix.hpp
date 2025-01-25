@@ -1,7 +1,10 @@
 #pragma once
-#ifdef CUDA_AVAILABLE
+
+#ifdef USE_CUDA
 #include <cuda_runtime.h>
+#include "cuda/memory_manager.cuh"
 #endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -17,6 +20,12 @@
 // Forward declarations
 class Matrix;
 class Vector;
+
+// Forward declare cuda namespace
+namespace cuda {
+    class MatrixOps;  // Forward declare any classes that need friend access
+    class MemoryManager;  // Forward declare MemoryManager
+}
 
 /**
  * @brief A 2D matrix class optimized for neural network operations.
@@ -37,12 +46,23 @@ class Matrix {
     std::tuple<size_t, size_t> shape_; ///< Matrix shape as (rows, cols)
     bool owns_data_ = true;          ///< Whether this matrix owns its data or views external data
 
-#ifdef CUDA_AVAILABLE
+#ifdef USE_CUDA
     float* gpu_data_ = nullptr;      ///< Matrix data storage on GPU
     bool is_on_gpu_ = false;         ///< Whether the data is currently on GPU
 #endif
 
+    bool is_cuda_ = false;
+
   public:
+    // Make CUDA operations a friend of Matrix
+    friend class cuda::MatrixOps;
+    
+    /**
+     * @brief Check if matrix is using CUDA memory
+     * @return true if matrix is using CUDA memory
+     */
+    bool is_cuda() const { return is_cuda_; }
+
     /**
      * @brief Default constructor.
      */
@@ -68,10 +88,29 @@ class Matrix {
      * @brief Constructs a matrix using external data with ownership control.
      * @param rows Number of rows
      * @param cols Number of columns
-     * @param external_data Pointer to external data
-     * @param is_owner Whether this matrix should own the data
+     * @param external_data Pointer to external data (can be host or device memory)
+     * @param is_owner Whether this matrix should own the data (for host memory)
+     *                 or whether it's CUDA memory (for device memory)
      */
-    Matrix(size_t rows, size_t cols, float* external_data, bool is_owner);
+    Matrix(size_t rows, size_t cols, float* external_data, bool is_owner)
+        : rows_(rows), cols_(cols), shape_(std::make_tuple(rows, cols)) {
+        if (is_owner) {
+            // Host memory case
+            owns_data_ = true;
+            is_cuda_ = false;
+            data_.assign(external_data, external_data + (rows * cols));
+        } else {
+            // Device memory case
+            owns_data_ = true;
+            is_cuda_ = true;
+#ifdef USE_CUDA
+            gpu_data_ = external_data;
+            is_on_gpu_ = true;
+#else
+            throw std::runtime_error("CUDA support not enabled");
+#endif
+        }
+    }
 
     /**
      * @brief Gets the number of rows.
@@ -141,7 +180,7 @@ class Matrix {
      * @brief Gets a pointer to the underlying data.
      * @return Const pointer to data (CPU or GPU based on current location)
      */
-#ifdef CUDA_AVAILABLE
+#ifdef USE_CUDA
     const float* get_data() const {
         return is_on_gpu_ ? gpu_data_ : data_.data();
     }
@@ -255,20 +294,43 @@ class Matrix {
         }
 
         Matrix result(rows(), cols());
+        const float* this_data = get_data();
+        const float* other_data = other.get_data();
+        float* result_data = result.get_data();
+        
         for (size_t i = 0; i < size(); ++i) {
-            result.data()[i] = data()[i] * other.data()[i];
+            result_data[i] = this_data[i] * other_data[i];
         }
         return result;
     }
 
     // Returns a view into a block of the matrix
     Matrix block(size_t start_row, size_t start_col, size_t num_rows, size_t num_cols) const {
-        Matrix result(num_rows, num_cols);
-        for (size_t i = 0; i < num_rows; ++i) {
-            for (size_t j = 0; j < num_cols; ++j) {
-                result(i, j) = (*this)(start_row + i, start_col + j);
-            }
+        // Validate input parameters
+        if (start_row >= rows_ || start_col >= cols_) {
+            throw std::out_of_range("Block start position out of matrix bounds");
         }
+        if (start_row + num_rows > rows_ || start_col + num_cols > cols_) {
+            throw std::out_of_range("Block dimensions exceed matrix bounds");
+        }
+        if (num_rows == 0 || num_cols == 0) {
+            throw std::invalid_argument("Block dimensions cannot be zero");
+        }
+
+        // Create result matrix with proper size
+        Matrix result(num_rows, num_cols);
+        
+        // Copy data with bounds checking
+        try {
+            for (size_t i = 0; i < num_rows; ++i) {
+                for (size_t j = 0; j < num_cols; ++j) {
+                    result(i, j) = (*this)(start_row + i, start_col + j);
+                }
+            }
+        } catch (const std::exception& e) {
+            throw std::runtime_error("Error creating matrix block: " + std::string(e.what()));
+        }
+        
         return result;
     }
 
@@ -279,7 +341,7 @@ class Matrix {
         cols_ = other.cols_;
         shape_ = other.shape_;
         owns_data_ = other.owns_data_;
-#ifdef CUDA_AVAILABLE
+#ifdef USE_CUDA
         if (other.is_on_gpu_) {
             cudaMalloc(&gpu_data_, data_.size() * sizeof(float));
             cudaMemcpy(gpu_data_, other.gpu_data_, data_.size() * sizeof(float),
@@ -291,92 +353,76 @@ class Matrix {
 
     Matrix& operator=(const Matrix& other); // Declaration only
 
-    // Move operations - full implementation
-    Matrix(Matrix&& other) noexcept
-        : data_(std::move(other.data_)), rows_(other.rows_), cols_(other.cols_),
-          shape_(other.shape_), owns_data_(other.owns_data_) {
-        // Zero out the source object
+    // Move constructor
+    Matrix(Matrix&& other) noexcept 
+        : data_(std::move(other.data_)),
+          rows_(other.rows_),
+          cols_(other.cols_),
+          shape_(other.shape_),
+          owns_data_(other.owns_data_),
+          is_cuda_(other.is_cuda_) {
+#ifdef USE_CUDA
+        gpu_data_ = other.gpu_data_;
+        is_on_gpu_ = other.is_on_gpu_;
+        // Important: null out the other's GPU pointer
+        other.gpu_data_ = nullptr;
+        other.is_on_gpu_ = false;
+#endif
         other.rows_ = 0;
         other.cols_ = 0;
-        other.shape_ = std::make_tuple(0, 0);
         other.owns_data_ = false;
+        other.is_cuda_ = false;
     }
 
+    // Move assignment
     Matrix& operator=(Matrix&& other) noexcept {
         if (this != &other) {
+            // Free existing resources
+            if (owns_data_) {
+#ifdef USE_CUDA
+                if (is_cuda_ && gpu_data_) {
+                    cuda::MemoryManager::get_instance().free(gpu_data_);
+                }
+#endif
+            }
+
+            // Move resources
             data_ = std::move(other.data_);
             rows_ = other.rows_;
             cols_ = other.cols_;
             shape_ = other.shape_;
             owns_data_ = other.owns_data_;
-
+            is_cuda_ = other.is_cuda_;
+#ifdef USE_CUDA
+            gpu_data_ = other.gpu_data_;
+            is_on_gpu_ = other.is_on_gpu_;
+            // Important: null out the other's GPU pointer
+            other.gpu_data_ = nullptr;
+            other.is_on_gpu_ = false;
+#endif
+            // Reset other
             other.rows_ = 0;
             other.cols_ = 0;
-            other.shape_ = std::make_tuple(0, 0);
             other.owns_data_ = false;
+            other.is_cuda_ = false;
         }
         return *this;
     }
 
-#ifdef CUDA_AVAILABLE
-    Matrix to_gpu() const {
-        Matrix gpu_matrix = *this;
-        if (!gpu_matrix.is_on_gpu_) {
-            cudaError_t err;
-            err = cudaMalloc(&gpu_matrix.gpu_data_, data_.size() * sizeof(float));
-            if (err != cudaSuccess) {
-                throw std::runtime_error("CUDA malloc failed: " +
-                                         std::string(cudaGetErrorString(err)));
-            }
-
-            err = cudaMemcpy(gpu_matrix.gpu_data_, data_.data(), data_.size() * sizeof(float),
-                             cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) {
-                cudaFree(gpu_matrix.gpu_data_);
-                throw std::runtime_error("CUDA memcpy H2D failed: " +
-                                         std::string(cudaGetErrorString(err)));
-            }
-            gpu_matrix.is_on_gpu_ = true;
-        }
-        return gpu_matrix;
-    }
-
-    Matrix to_cpu() const {
-        if (!is_on_gpu_)
-            return *this;
-        Matrix cpu_matrix = *this;
-        cudaMemcpy(cpu_matrix.data_.data(), gpu_data_, data_.size() * sizeof(float),
-                   cudaMemcpyDeviceToHost);
-        return cpu_matrix;
-    }
-
-    const float* data() const {
-        return is_on_gpu_ ? gpu_data_ : data_.data();
-    }
-    float* data() {
-        return is_on_gpu_ ? gpu_data_ : data_.data();
-    }
-#else
-    const float* data() const {
-        return data_.data();
-    }
-    float* data() {
-        return data_.data();
-    }
-#endif
-
+    // Destructor
     ~Matrix() {
-#ifdef CUDA_AVAILABLE
-        if (gpu_data_ != nullptr) {
-            cudaFree(gpu_data_);
-            gpu_data_ = nullptr;
-        }
+        if (owns_data_) {
+#ifdef USE_CUDA
+            if (is_cuda_ && gpu_data_) {
+                cuda::MemoryManager::get_instance().free(gpu_data_);
+            }
 #endif
+        }
     }
 
     static Matrix from_vector(const std::vector<float>& vec) {
         Matrix mat(1, vec.size());
-        std::copy(vec.begin(), vec.end(), mat.data());
+        std::copy(vec.begin(), vec.end(), mat.get_data());
         return mat;
     }
 
@@ -399,11 +445,46 @@ class Matrix {
      * @throws std::runtime_error if matrix doesn't own its data
      */
     void initialize_constant(float value);
+
+    /**
+     * @brief Transfers the matrix data to GPU memory.
+     * @return A new Matrix object that points to GPU memory
+     */
+    Matrix to_gpu() const {
+        #ifdef USE_CUDA
+        float* gpu_ptr;
+        size_t total_size = rows_ * cols_ * sizeof(float);
+        cudaMalloc(&gpu_ptr, total_size);
+        cudaMemcpy(gpu_ptr, data_.data(), total_size, cudaMemcpyHostToDevice);
+        return Matrix(rows_, cols_, gpu_ptr, false);  // false indicates GPU ownership
+        #else
+        throw std::runtime_error("CUDA support not enabled");
+        #endif
+    }
+
+    /**
+     * @brief Transfers the matrix data from GPU to CPU memory.
+     * @return A new Matrix object in CPU memory
+     */
+    Matrix to_cpu() const {
+        #ifdef USE_CUDA
+        if (!is_cuda_) {
+            return *this;  // Already on CPU
+        }
+        Matrix cpu_matrix(rows_, cols_);
+        size_t total_size = rows_ * cols_ * sizeof(float);
+        cudaMemcpy(cpu_matrix.get_data(), gpu_data_, total_size, cudaMemcpyDeviceToHost);
+        return cpu_matrix;
+        #else
+        return *this;  // Always on CPU when CUDA is not enabled
+        #endif
+    }
 };
 
 // Make to_vector inline to allow multiple definitions
 inline std::vector<int> to_vector(const Matrix& m) {
-    return std::vector<int>(m.data(), m.data() + m.size());
+    const float* data = m.get_data();
+    return std::vector<int>(data, data + m.size());
 }
 
 // Non-member operators

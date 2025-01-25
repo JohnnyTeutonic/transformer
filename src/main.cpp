@@ -7,7 +7,7 @@
 
 // Add necessary forward declarations and structures
 std::unique_ptr<Tokenizer> tokenizer;
-PerformanceMetrics metrics; // Single definition of the global metrics variable
+PerformanceMetrics metrics;  // Now this will work with default constructor
 
 // Configuration constants
 const float INITIAL_LEARNING_RATE = 0.001f;
@@ -190,251 +190,34 @@ int main(int argc, char* argv[]) {
             size_t num_batches =
                 (training_pairs.size() + config.batch_size - 1) / config.batch_size;
 
-            // Process batches
+            // Process full batches
             for (size_t batch = 0; batch < num_batches; ++batch) {
-                metrics.start_timer("batch_processing");
-
+                // Process full batches
                 size_t start_idx = batch * config.batch_size;
                 size_t end_idx = std::min(start_idx + config.batch_size, training_pairs.size());
-                size_t current_batch_size = end_idx - start_idx;
-
-                // Find maximum sequence length in this batch
-                size_t max_seq_len = 0;
-                for (size_t j = start_idx; j < end_idx; ++j) {
-                    const auto& [input_str, target_str] = training_pairs[j];
-                    std::vector<int> input_tokens = tokenizer->encode(input_str);
-                    std::vector<int> target_tokens = tokenizer->encode(target_str);
-                    // Consider both input and target sequence lengths
-                    max_seq_len = std::max({max_seq_len, input_tokens.size(), target_tokens.size()});
-                }
-                std::cout << "\n=== Processing Batch " << batch << " ===\n";
-
-                // Create batch with validation
-                std::vector<std::vector<int>> input_batch;
-                std::vector<std::vector<int>> target_batch;  // Rename from target_tokens
-
-                // Fill and validate batch with padding
-                bool batch_valid = true;
-                for (size_t j = start_idx; j < end_idx; ++j) {
-                    const auto& [input_str, target_str] = training_pairs[j];
-
-                    // Preprocess text
-                    std::string processed_input = input_str;
-                    std::string processed_target = target_str;
-                    tokenizer->preprocess_text(processed_input);
-                    tokenizer->preprocess_text(processed_target);
-
-                    // Encode using appropriate tokenizer
-                    std::vector<int> input_tokens = tokenizer->encode(processed_input);
-                    std::vector<int> target_tokens = tokenizer->encode(processed_target);
-
-                    // Validate sequences
-                    if (!Utils::validate_input_sequence(input_tokens, tokenizer->vocab_size()) ||
-                        !Utils::validate_input_sequence(target_tokens, tokenizer->vocab_size())) {
-                        std::cerr << "Invalid sequence at position " << j << std::endl;
-                        batch_valid = false;
-                        break;
-                    }
-
-                    // Pad sequences to max_seq_len
-                    while (input_tokens.size() < max_seq_len) {
-                        input_tokens.push_back(tokenizer->get_pad_token_id());
-                    }
-                    while (target_tokens.size() < max_seq_len) {  // Add padding for target tokens
-                        target_tokens.push_back(tokenizer->get_pad_token_id());
-                    }
-
-                    input_batch.push_back(input_tokens);
-                    target_batch.push_back(target_tokens);  // Use target_batch instead of target_tokens
-                }
-
-                if (!batch_valid)
-                    continue; // Skip invalid batches
-
-                std::cout << "Input batch size: " << input_batch.size() << " sequences\n";
-                std::cout << "Target batch size: " << target_batch.size() << " sequences\n";
-
-                // First collect valid sequences
-                std::vector<std::vector<int>> valid_input_batch;
-                std::vector<std::vector<int>> valid_target_batch;
-
-                for (size_t i = 0; i < input_batch.size(); i++) {
-                    const auto& input_sequence = input_batch[i];
-                    const auto& target_sequence = target_batch[i];
-                    
-                    if (input_sequence.size() != max_seq_len) {
-                        std::cerr << "Error: Input sequence length mismatch. Expected " << max_seq_len 
-                                  << " but got " << input_sequence.size() << std::endl;
-                        continue;
-                    }
-                    
-                    if (target_sequence.size() != max_seq_len) {
-                        std::cerr << "Error: Target sequence length mismatch. Expected " << max_seq_len 
-                                  << " but got " << target_sequence.size() << std::endl;
-                        continue;
-                    }
-                    
-                    valid_input_batch.push_back(input_sequence);
-                    valid_target_batch.push_back(target_sequence);
-                }
-
-                if (valid_input_batch.empty()) {
-                    std::cerr << "Error: No valid sequences in batch\n";
-                    continue;
-                }
-
-                auto batch_start_time = std::chrono::high_resolution_clock::now();
-
-                // Create target distribution for entire batch using only valid sequences
-                Matrix target_distribution = Utils::create_batch_target_distribution(
-                    valid_target_batch, *tokenizer, config.vocab_size, max_seq_len);
-
-                // Process the batch as a single sequence
-                std::vector<int> flattened_batch;
-                flattened_batch.reserve(valid_input_batch.size() * max_seq_len);
-                for (const auto& sequence : valid_input_batch) {
-                    flattened_batch.insert(flattened_batch.end(), sequence.begin(), sequence.end());
-                }
-
-                // Forward pass with the flattened batch
-                transformer.set_training(true);
-                metrics.start_timer("forward_pass");
-                Matrix hidden_states = transformer.forward(flattened_batch, "", *tokenizer);
-                metrics.stop_timer("forward_pass");
-
-                metrics.record_memory_usage(hidden_states.bytes());
-                Matrix logits = lm_head->project_to_vocab(hidden_states);
-
-                // Only print predictions every 50 batches to reduce output
-                if (batch % 50 == 0) {
-                    std::cout << "\n=== Batch " << batch << " Status ===\n";
-                    std::cout << "Batch size: " << valid_input_batch.size() << " sequences\n";
-                    std::cout << "Total tokens: " << flattened_batch.size() << "\n";
-                    std::cout << "Hidden states shape: " << hidden_states.rows() << "x" << hidden_states.cols() << "\n";
-                    std::cout << "Memory usage: " << (hidden_states.bytes() / 1024.0f / 1024.0f) << " MB\n";
-                    
-                    // Print sample predictions
-                    std::cout << "\nSample predictions:\n";
-                    Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
-                }
-
-                float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
-
-                // Add L1 regularization to encourage sparsity
-                float l1_loss = 0.0f;
-                for (size_t i = 0; i < hidden_states.rows(); i++) {
-                    for (size_t j = 0; j < hidden_states.cols(); j++) {
-                        l1_loss += std::abs(hidden_states(i, j));
+                
+                // Create properly batched input
+                Matrix batched_input(config.batch_size, config.hidden_size);
+                
+                // Fill batch
+                for (size_t i = 0; i < config.batch_size; i++) {
+                    if (start_idx + i < end_idx) {
+                        const auto& [input_str, _] = training_pairs[start_idx + i];
+                        std::vector<int> tokens = tokenizer->encode(input_str);
+                        // Copy tokens to batched input
+                        for (size_t j = 0; j < tokens.size(); j++) {
+                            batched_input(i, j) = static_cast<float>(tokens[j]);
+                        }
                     }
                 }
-                batch_loss += L1_REGULARIZATION * l1_loss;
-
-                // First calculate the loss gradients
-                Matrix loss_gradients(current_batch_size, config.vocab_size);
-                for (size_t i = 0; i < current_batch_size; i++) {
-                    for (size_t j = 0; j < config.vocab_size; j++) {
-                        float predicted = logits(i, j);
-                        float target = target_distribution(i, j);
-                        loss_gradients(i, j) = predicted - target;
-                    }
-                }
-
-                // Then do the backward pass
-                Matrix lm_head_gradients = lm_head->backward(loss_gradients);
-                transformer.backward(lm_head_gradients, flattened_batch, learning_rate);
-
-                // Update tracking variables
-                float current_loss = batch_loss;
-                if (current_loss >= prev_loss) {
-                    no_improvement_count++;
-                    if (no_improvement_count > 10) {
-                        std::cout << "Warning: Loss not improving for " << no_improvement_count 
-                                  << " iterations" << std::endl;
-                    }
-                } else {
-                    no_improvement_count = 0;
-                }
-                prev_loss = current_loss;
-                epoch_loss += batch_loss;
-                global_step++;
-
-                metrics.stop_timer("batch_processing");
-
-                auto batch_end_time = std::chrono::high_resolution_clock::now();
-                auto batch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    batch_end_time - batch_start_time).count();
-
-                // Only print if we haven't exceeded max iterations
-                if (completed_iterations < MAX_OUTPUT_ITERATIONS) {
-                    if (batch % 10 == 0) {
-                        std::cout << "\rBatch " << batch << " completed in " << batch_duration 
-                                  << "ms (Loss: " << batch_loss
-                                  << ", LR: " << learning_rate << ")" << std::flush;
-                    }
-
-                    // Make predictions after each batch
-                    std::string test_input = "I go to";
-                    std::string processed_input = test_input;
-                    tokenizer->preprocess_text(processed_input);
-                    std::vector<int> test_tokens = tokenizer->encode(processed_input);
-                    
-                    // Get model prediction (in evaluation mode)
-                    transformer.set_training(false);
-                    Matrix test_hidden = transformer.forward(test_tokens, test_input, *tokenizer);
-                    Matrix pred_logits = lm_head->project_to_vocab(test_hidden);
-                    transformer.set_training(true);  // Set back to training mode
-                    
-                    // Show the top predictions
-                    std::cout << "\n=== Batch " << batch << " Predictions for '" << test_input << "' ===\n";
-                    Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
-                    std::cout << "================================================\n";
-
-                    // Test additional queries
-                    std::vector<std::string> additional_queries = {
-                        "The weather is",
-                        "I want to",
-                        "The cat",
-                        "She likes to"
-                    };
-
-                    for (const auto& query : additional_queries) {
-                        processed_input = query;
-                        tokenizer->preprocess_text(processed_input);
-                        test_tokens = tokenizer->encode(processed_input);
-                        
-                        transformer.set_training(false);
-                        test_hidden = transformer.forward(test_tokens, query, *tokenizer);
-                        pred_logits = lm_head->project_to_vocab(test_hidden);
-                        transformer.set_training(true);
-                        
-                        std::cout << "\n=== Batch " << batch << " Predictions for '" << query << "' ===\n";
-                        Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
-                        std::cout << "================================================\n";
-                    }
-                }
-
-                // Update iteration counter at the end of each epoch
-                if (batch == num_batches - 1) {
-                    completed_iterations++;
-                    if (completed_iterations == MAX_OUTPUT_ITERATIONS) {
-                        std::cout << "\nReached " << MAX_OUTPUT_ITERATIONS << " iterations. Suppressing further output.\n";
-                    }
-                }
-
-                // Print progress and metrics every 10 batches
-                if ((batch + 1) % 10 == 0 || batch + 1 == num_batches) {
-                    std::cout << "\rBatch " << batch + 1 << "/" << num_batches << " in epoch "
-                              << epoch + 1 << " (Loss: " << batch_loss
-                              << ", Avg Loss: " << epoch_loss / (batch + 1)
-                              << ", LR: " << learning_rate << ")" << std::flush;
-
-                    // Print performance metrics
-                    metrics.print_metrics();
-                }
-
-                // In the training loop, after processing each batch
-                for (const auto& tokens : input_batch) {
-                    lm_head->update_token_frequencies(tokens);
+                
+                // Forward pass with full batch
+                Matrix output = transformer.forward(batched_input);
+                
+                // Only log occasionally
+                if (batch % 100 == 0) {
+                    std::cout << "Batch " << batch << "/" << num_batches 
+                              << " Loss: " << batch_loss << std::endl;
                 }
             }
 

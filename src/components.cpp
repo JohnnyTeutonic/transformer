@@ -5,6 +5,7 @@
 #include <string>
 #include "../include/components.hpp"
 #include "../include/cuda/matrix_ops.cuh"
+
 // Constructor implementations
 Matrix::Matrix() : rows_(0), cols_(0), shape_(std::make_tuple(0, 0)) {}
 
@@ -42,10 +43,6 @@ Matrix::Matrix(size_t rows, size_t cols, float init_val) {
 Matrix::Matrix(size_t rows, size_t cols, float* external_data)
     : data_(external_data, external_data + rows * cols), rows_(rows), cols_(cols),
       shape_(std::make_tuple(rows, cols)), owns_data_(false) {}
-
-Matrix::Matrix(size_t rows, size_t cols, float* external_data, bool is_owner)
-    : data_(external_data, external_data + rows * cols), rows_(rows), cols_(cols),
-      shape_(std::make_tuple(rows, cols)), owns_data_(is_owner) {}
 
 Matrix& Matrix::operator=(const Matrix& other) {
     if (this != &other) {

@@ -1,6 +1,7 @@
 #include "../../include/cuda/feed_forward_kernels.cuh"
 #include "../../include/cuda/cuda_check.cuh"
 #include "../../include/matrix.hpp"
+#include "../../include/cuda/cuda_utils.cuh"
 #include <cuda_runtime.h>
 
 namespace cuda {
@@ -57,8 +58,8 @@ namespace cuda {
         CUDA_CHECK(cudaMalloc(&d_dx, dx_size));
         CUDA_CHECK(cudaMalloc(&d_intermediate, intermediate_size_bytes));
         
-        CUDA_CHECK(cudaMemcpy(d_grad, grad.data(), grad_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_weights, weights.data(), weights_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_grad, grad.get_data(), grad_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_weights, weights.get_data(), weights_size, cudaMemcpyHostToDevice));
         
         dim3 block(256);
         dim3 grid((batch_size * intermediate_size + 255) / 256);
@@ -74,22 +75,48 @@ namespace cuda {
                 d_intermediate, d_weights, d_dx, batch_size, hidden_size, intermediate_size);
         }
         
-        CUDA_CHECK(cudaMemcpy(dx.data(), d_dx, dx_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(dx.get_data(), d_dx, dx_size, cudaMemcpyDeviceToHost));
         
         CUDA_CHECK(cudaFree(d_grad));
         CUDA_CHECK(cudaFree(d_weights));
         CUDA_CHECK(cudaFree(d_dx));
         CUDA_CHECK(cudaFree(d_intermediate));
     }
-}
 
-__global__ void gelu_backward_kernel(const float* d_intermediate, float* d_input,
-                                     const int num_elements) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_elements) {
-        float x = d_input[idx];
-        float cdf = 0.5f * (1.0f + tanhf(0.797884f * (x + 0.044715f * x * x * x)));
-        float pdf = 0.797884f * (1.0f - tanhf(0.797884f * x) * tanhf(0.797884f * x));
-        d_input[idx] = d_intermediate[idx] * (cdf + x * pdf);
+    __global__ void add_bias_and_relu_kernel(float* input, const float* bias, int rows, int cols) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < rows * cols) {
+            int row = idx / cols;
+            int col = idx % cols;
+            input[idx] += bias[col];
+            input[idx] = input[idx] > 0 ? input[idx] : 0;
+        }
     }
-}
+
+    namespace FFNOps {
+        void add_bias_and_relu(Matrix& input, const float* bias, size_t bias_size) {
+            if (!input.is_cuda()) {
+                throw std::runtime_error("Input matrix must be on GPU");
+            }
+            if (input.cols() != bias_size) {
+                throw std::runtime_error("Bias size must match input columns");
+            }
+            
+            dim3 block(256);
+            dim3 grid((input.rows() * input.cols() + block.x - 1) / block.x);
+            
+            add_bias_and_relu_kernel<<<grid, block>>>(input.get_data(), bias, input.rows(), input.cols());
+        }
+    }  // namespace FFNOps
+
+    __global__ void gelu_backward_kernel(const float* d_intermediate, float* d_input,
+                                       const int num_elements) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < num_elements) {
+            float x = d_input[idx];
+            float cdf = 0.5f * (1.0f + tanhf(0.797884f * (x + 0.044715f * x * x * x)));
+            float pdf = 0.797884f * (1.0f - tanhf(0.797884f * x) * tanhf(0.797884f * x));
+            d_input[idx] = d_intermediate[idx] * (cdf + x * pdf);
+        }
+    }
+}  // namespace cuda

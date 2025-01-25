@@ -34,8 +34,8 @@ namespace cuda {
             // Zero initialize the scores buffer
             CUDA_CHECK(cudaMemset(d_scores, 0, scores.size() * sizeof(float)));
 
-            CUDA_CHECK(cudaMemcpy(d_Q, Q.data(), Q.size() * sizeof(float), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_K, K.data(), K.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_Q, Q.get_data(), Q.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_K, K.get_data(), K.size() * sizeof(float), cudaMemcpyHostToDevice));
             
             // Synchronize to ensure memory transfers are complete
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -56,7 +56,7 @@ namespace cuda {
             // Synchronize after kernel
             CUDA_CHECK(cudaDeviceSynchronize());
 
-            CUDA_CHECK(cudaMemcpy(scores.data(), d_scores, scores.size() * sizeof(float), 
+            CUDA_CHECK(cudaMemcpy(scores.get_data(), d_scores, scores.size() * sizeof(float), 
                                 cudaMemcpyDeviceToHost));
 
         } catch (const std::exception& e) {
@@ -82,11 +82,11 @@ namespace cuda {
         size_t size = matrix.size() * sizeof(float);
 
         CUDA_CHECK(cudaMalloc(&d_matrix, size));
-        CUDA_CHECK(cudaMemcpy(d_matrix, matrix.data(), size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_matrix, matrix.get_data(), size, cudaMemcpyHostToDevice));
 
         softmax_kernel<<<matrix.rows(), 1>>>(d_matrix, matrix.rows(), matrix.cols());
 
-        CUDA_CHECK(cudaMemcpy(matrix.data(), d_matrix, size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(matrix.get_data(), d_matrix, size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(d_matrix));
     }
 
@@ -107,16 +107,16 @@ namespace cuda {
         CUDA_CHECK(cudaMalloc(&d_V, QKV_size));
         CUDA_CHECK(cudaMalloc(&d_output, output_size));
 
-        CUDA_CHECK(cudaMemcpy(d_Q, Q.data(), QKV_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_K, K.data(), QKV_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_V, V.data(), QKV_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_Q, Q.get_data(), QKV_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_K, K.get_data(), QKV_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_V, V.get_data(), QKV_size, cudaMemcpyHostToDevice));
 
         // Allocate shared memory for scores
         size_t shared_mem_size = seq_len * sizeof(float);
         attention_kernel<<<grid, block, shared_mem_size>>>(d_Q, d_K, d_V, d_output,
                                                          batch_size, seq_len, head_dim, hidden_dim);
 
-        CUDA_CHECK(cudaMemcpy(output.data(), d_output, output_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(output.get_data(), d_output, output_size, cudaMemcpyDeviceToHost));
 
         CUDA_CHECK(cudaFree(d_Q));
         CUDA_CHECK(cudaFree(d_K));

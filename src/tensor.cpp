@@ -21,7 +21,7 @@ Tensor::Tensor(const Matrix& mat, const std::vector<unsigned long>& shape) {
     }
 
     dims_ = shape;
-    data_ = std::vector<float>(mat.data(), mat.data() + mat.size());
+    data_ = std::vector<float>(mat.get_data(), mat.get_data() + mat.size());
 }
 
 float& Tensor::at(unsigned long i, unsigned long j, unsigned long k, unsigned long l) {

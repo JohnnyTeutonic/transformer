@@ -59,5 +59,10 @@
     "unk_token_id": 1,
     "bos_token_id": 2,
     "eos_token_id": 3,
-    "mask_token_id": 4
+    "mask_token_id": 4,
+    "debug": {
+        "verbose_logging": false,
+        "log_matrix_stats": false,
+        "log_frequency": 100
+    }
 } 

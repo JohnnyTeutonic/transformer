@@ -3,64 +3,115 @@
 #include <cmath>
 #include <omp.h>
 #include "../include/cuda/backward_ops.cuh"
+#include <random>
 
 LayerNorm::LayerNorm(size_t hidden_size, float eps)
     : hidden_size_(hidden_size), 
       eps_(eps),
-      gamma_(Matrix(1, hidden_size, 1.0f)),
-      beta_(Matrix(1, hidden_size, 0.0f)),
+      gamma_(Matrix(1, hidden_size)),
+      beta_(Matrix(1, hidden_size)),
       input_cache_(Matrix(1, hidden_size)),
       output_cache_(Matrix(1, hidden_size)),
       grad_gamma_(Matrix(1, hidden_size)),
-      grad_beta_(Matrix(1, hidden_size)) {}
+      grad_beta_(Matrix(1, hidden_size)) {
+    
+    // Initialize gamma with small random values around 1.0
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::normal_distribution<float> gamma_dist(1.0f, 0.02f);
+    
+    // Initialize beta with small random values around 0
+    std::normal_distribution<float> beta_dist(0.0f, 0.02f);
+    
+    for (size_t i = 0; i < hidden_size; ++i) {
+        gamma_(0, i) = gamma_dist(gen);
+        beta_(0, i) = beta_dist(gen);
+    }
+    
+    std::cout << "LayerNorm initialized with hidden_size=" << hidden_size 
+              << ", eps=" << eps << std::endl;
+}
 
 Matrix LayerNorm::forward(const Matrix& input) {
-    try {
-        input_cache_ = input;  // Store for backward pass
-        
-#ifdef USE_CUDA
-        try {
-            Matrix output(input.rows(), input.cols());
-            cuda::layer_norm_forward(input, gamma_, beta_, output, eps_);
-            return output;
-        } catch (const std::runtime_error& e) {
-            std::cerr << "CUDA layer norm failed, falling back to CPU: " << e.what() << std::endl;
-#endif
-            // CPU implementation
-            Matrix output(input.rows(), input.cols());
-            const float MIN_VAR = 1e-6f;  // Minimum variance threshold
-            
-            for (size_t i = 0; i < input.rows(); ++i) {
-                float mean = 0.0f;
-                float var = 0.0f;
-                
-                // Compute mean
-                for (size_t j = 0; j < input.cols(); ++j) {
-                    mean += input(i, j);
-                }
-                mean /= input.cols();
-                
-                // Compute variance
-                for (size_t j = 0; j < input.cols(); ++j) {
-                    float diff = input(i, j) - mean;
-                    var += diff * diff;
-                }
-                var = std::max(var / input.cols(), MIN_VAR);  // Apply minimum variance threshold
-                
-                // Normalize
-                float std = std::sqrt(var + eps_);
-                for (size_t j = 0; j < input.cols(); ++j) {
-                    output(i, j) = gamma_(0, j) * (input(i, j) - mean) / std + beta_(0, j);
-                }
-            }
-            output_cache_ = output;  // Store for backward pass
-            return output;
-#ifdef USE_CUDA
+    std::cout << "\n=== LayerNorm::forward START ===" << std::endl;
+    std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
+    
+    Matrix output(input.rows(), input.cols());
+    
+    // Track statistics for debugging
+    float min_mean = std::numeric_limits<float>::infinity();
+    float max_mean = -std::numeric_limits<float>::infinity();
+    float min_var = std::numeric_limits<float>::infinity();
+    float max_var = -std::numeric_limits<float>::infinity();
+    float min_norm = std::numeric_limits<float>::infinity();
+    float max_norm = -std::numeric_limits<float>::infinity();
+    
+    // Normalize each row independently
+    for (size_t i = 0; i < input.rows(); ++i) {
+        // Calculate mean
+        float mean = 0.0f;
+        for (size_t j = 0; j < input.cols(); ++j) {
+            mean += input(i, j);
         }
-#endif
-    } catch (const std::exception& e) {
-        throw std::runtime_error("LayerNorm forward failed: " + std::string(e.what()));
+        mean /= input.cols();
+        min_mean = std::min(min_mean, mean);
+        max_mean = std::max(max_mean, mean);
+        
+        // Calculate variance
+        float var = 0.0f;
+        for (size_t j = 0; j < input.cols(); ++j) {
+            float diff = input(i, j) - mean;
+            var += diff * diff;
+        }
+        var /= input.cols();
+        min_var = std::min(min_var, var);
+        max_var = std::max(max_var, var);
+        
+        // Normalize and apply scale and shift
+        float std_dev = std::sqrt(var + eps_);
+        for (size_t j = 0; j < input.cols(); ++j) {
+            float normalized = (input(i, j) - mean) / std_dev;
+            output(i, j) = gamma_(0, j) * normalized + beta_(0, j);
+            min_norm = std::min(min_norm, output(i, j));
+            max_norm = std::max(max_norm, output(i, j));
+        }
     }
+    
+    // Print statistics
+    std::cout << "Layer Norm Statistics:" << std::endl;
+    std::cout << "Mean range: [" << min_mean << ", " << max_mean << "]" << std::endl;
+    std::cout << "Variance range: [" << min_var << ", " << max_var << "]" << std::endl;
+    std::cout << "Output range: [" << min_norm << ", " << max_norm << "]" << std::endl;
+    
+    // Count near-zero values
+    size_t near_zero = 0;
+    for (size_t i = 0; i < output.rows(); ++i) {
+        for (size_t j = 0; j < output.cols(); ++j) {
+            if (std::abs(output(i, j)) < 1e-6) {
+                near_zero++;
+            }
+        }
+    }
+    std::cout << "Near-zero values: " << near_zero << "/" << (output.rows() * output.cols()) << std::endl;
+    
+    // Check gamma and beta values
+    float min_gamma = std::numeric_limits<float>::infinity();
+    float max_gamma = -std::numeric_limits<float>::infinity();
+    float min_beta = std::numeric_limits<float>::infinity();
+    float max_beta = -std::numeric_limits<float>::infinity();
+    
+    for (size_t j = 0; j < gamma_.size(); ++j) {
+        min_gamma = std::min(min_gamma, gamma_(0, j));
+        max_gamma = std::max(max_gamma, gamma_(0, j));
+        min_beta = std::min(min_beta, beta_(0, j));
+        max_beta = std::max(max_beta, beta_(0, j));
+    }
+    
+    std::cout << "Gamma range: [" << min_gamma << ", " << max_gamma << "]" << std::endl;
+    std::cout << "Beta range: [" << min_beta << ", " << max_beta << "]" << std::endl;
+    std::cout << "=== LayerNorm::forward END ===\n" << std::endl;
+    
+    return output;
 }
 
 Matrix LayerNorm::compute_gradients(const Matrix& grad_output) {
@@ -120,8 +171,8 @@ void LayerNorm::save(std::ostream& os) const {
     os.write(reinterpret_cast<const char*>(&eps_), sizeof(eps_));
     os.write(reinterpret_cast<const char*>(&hidden_size_), sizeof(hidden_size_));
     // Save gamma and beta as raw data
-    os.write(reinterpret_cast<const char*>(gamma_.data()), hidden_size_ * sizeof(float));
-    os.write(reinterpret_cast<const char*>(beta_.data()), hidden_size_ * sizeof(float));
+    os.write(reinterpret_cast<const char*>(gamma_.get_data()), hidden_size_ * sizeof(float));
+    os.write(reinterpret_cast<const char*>(beta_.get_data()), hidden_size_ * sizeof(float));
 }
 
 std::unique_ptr<LayerNorm> LayerNorm::load(std::istream& is) {
@@ -135,8 +186,8 @@ std::unique_ptr<LayerNorm> LayerNorm::load(std::istream& is) {
     auto ln = std::make_unique<LayerNorm>(hidden_size, eps);
 
     // Load gamma and beta data directly
-    is.read(reinterpret_cast<char*>(ln->gamma_.data()), hidden_size * sizeof(float));
-    is.read(reinterpret_cast<char*>(ln->beta_.data()), hidden_size * sizeof(float));
+    is.read(reinterpret_cast<char*>(ln->gamma_.get_data()), hidden_size * sizeof(float));
+    is.read(reinterpret_cast<char*>(ln->beta_.get_data()), hidden_size * sizeof(float));
 
     return ln;
 }

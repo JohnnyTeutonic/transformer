@@ -52,7 +52,7 @@ void HalfPrecisionTraining::convert_to_fp16(Matrix& matrix) {
         std::cout << "Converting matrix of size " << size << " to FP16" << std::endl;
         
         // Copy input to GPU
-        CUDA_CHECK(cudaMemcpy(d_float, matrix.data(), size * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_float, matrix.get_data(), size * sizeof(float), cudaMemcpyHostToDevice));
         
         // Ensure synchronization
         cuda_manager->synchronize();
@@ -85,14 +85,14 @@ void HalfPrecisionTraining::convert_to_fp16(Matrix& matrix) {
         // CPU fallback
         #pragma omp parallel for
         for (size_t i = 0; i < size; ++i) {
-            half_data[i] = static_cast<half_type>(matrix.data()[i]);
+            half_data[i] = static_cast<half_type>(matrix.get_data()[i]);
         }
     }
 #else
     // CPU version
     #pragma omp parallel for
     for (size_t i = 0; i < size; ++i) {
-        half_data[i] = static_cast<half_type>(matrix.data()[i]);
+        half_data[i] = static_cast<half_type>(matrix.get_data()[i]);
     }
 #endif
 }
@@ -139,7 +139,7 @@ void HalfPrecisionTraining::convert_to_fp32(Matrix& matrix) {
         }
 
         // Copy result back to host
-        CUDA_CHECK(cudaMemcpy(matrix.data(), d_float, size * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(matrix.get_data(), d_float, size * sizeof(float), cudaMemcpyDeviceToHost));
 
         // Safe cleanup
         cuda_manager->deallocate(d_float);
@@ -154,13 +154,13 @@ void HalfPrecisionTraining::convert_to_fp32(Matrix& matrix) {
         
         #pragma omp parallel for
         for (size_t i = 0; i < size; ++i) {
-            matrix.data()[i] = static_cast<float>(half_data[i]);
+            matrix.get_data()[i] = static_cast<float>(half_data[i]);
         }
     }
 #else
     #pragma omp parallel for
     for (size_t i = 0; i < size; ++i) {
-        matrix.data()[i] = static_cast<float>(half_data[i]);
+        matrix.get_data()[i] = static_cast<float>(half_data[i]);
     }
 #endif
 }
