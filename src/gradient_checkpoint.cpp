@@ -1,6 +1,7 @@
 #include "../include/gradient_checkpoint.hpp"
 #include <string>
 
+// Static member definitions
 std::unordered_map<size_t, Matrix> GradientCheckpoint::checkpoints;
 std::unordered_map<std::string, Matrix> GradientCheckpoint::activation_cache;
 

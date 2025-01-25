@@ -420,17 +420,25 @@ void Transformer::backward(std::vector<Matrix>& outputs, const Matrix& target_di
 
     // Backward pass through each layer in reverse order
     for (int i = config.num_layers - 1; i >= 0; --i) {
+        // Get cached activations for this layer
+        std::string attn_key = "attn_norm_" + std::to_string(i);
+        Matrix attn_cached = GradientCheckpoint::get_activation(attn_key);
+        
         // Backward through layer normalization
-        grad = layers[i]->attention_ln->backward(grad, learning_rate);
+        grad = layers[i]->attention_ln->backward(grad, attn_cached);
+
+        // Get cached feed forward input
+        std::string ffn_key = "ffn_norm_" + std::to_string(i);
+        Matrix ffn_cached = GradientCheckpoint::get_activation(ffn_key);
 
         // Backward through feed forward network
-        grad = layers[i]->feed_forward->backward(grad, learning_rate);
+        grad = layers[i]->feed_forward->backward(grad, ffn_cached);
         
         // Backward through second layer norm
-        grad = layers[i]->ffn_ln->backward(grad, layers[i]->forward(layers[i]->attention_ln->forward(layers[i]->attention_ln->forward(grad)), layers[i]->attention_ln->forward(grad), m_kv_caches[i]));
+        grad = layers[i]->ffn_ln->backward(grad, attn_cached);
 
         // Backward through multi-head attention
-        grad = layers[i]->self_attention->backward(grad, layers[i]->attention_ln->forward(grad), layers[i]->forward(layers[i]->attention_ln->forward(layers[i]->attention_ln->forward(grad)), layers[i]->attention_ln->forward(grad), m_kv_caches[i]));
+        grad = layers[i]->self_attention->backward(grad, attn_cached, target_distribution);
 
         if (use_fp16) {
             // Convert gradients back to FP16 for memory efficiency
@@ -438,23 +446,19 @@ void Transformer::backward(std::vector<Matrix>& outputs, const Matrix& target_di
         }
     }
 
-    // Backward through input embedding and position encoding
-    grad = token_embedding->backward(grad, learning_rate);
-    
-    // Update parameters using accumulated gradients
-    for (int i = 0; i < config.num_layers; ++i) {
-        layers[i]->self_attention->update_parameters(learning_rate);
-        layers[i]->feed_forward->update_parameters(learning_rate);
-        layers[i]->attention_ln->update_parameters(learning_rate);
-        layers[i]->ffn_ln->update_parameters(learning_rate);
+    // Backward through input embedding
+    std::vector<int> input_indices(grad.rows());  // Create indices for embedding backward
+    for (size_t i = 0; i < grad.rows(); i++) {
+        input_indices[i] = i;  // Use position as index
     }
+    // Call backward but don't assign result since it's void
+    token_embedding->backward(grad, input_indices);
     
-    token_embedding->update_parameters(learning_rate);
+    // Apply gradients using the transformer's update_parameters method
+    update_parameters(learning_rate);
 
-    // Clear any temporary GPU memory
-    if (cuda::is_initialized()) {
-        cuda::cleanup_temporary_memory();
-    }
+    // Clear all cached activations at once
+    GradientCheckpoint::reset_cache();
 }
 
 void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens,

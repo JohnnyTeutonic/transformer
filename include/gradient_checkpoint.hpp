@@ -2,6 +2,7 @@
 
 #include "components.hpp"
 #include <unordered_map>
+#include <string>
 
 /**
  * @brief Implements gradient checkpointing for memory-efficient training.
@@ -74,6 +75,10 @@ class GradientCheckpoint {
      * @return true if the activation exists in cache, false otherwise
      */
     static bool has_activation(const std::string& key);
+
+    static void reset_cache() {
+        activation_cache.clear();
+    }
 
   private:
     static std::unordered_map<size_t, Matrix> checkpoints;      ///< Layer-indexed activation storage
