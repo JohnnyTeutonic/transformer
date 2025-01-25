@@ -1,8 +1,8 @@
-#include "../include/transformer.hpp"
-#include "../include/cuda/cublas_check.cuh"
-#include "../include/cuda/cuda_check.cuh"
-#include "../include/logger.hpp"
-#include "../include/half_precision.hpp"
+#include "transformer.hpp"
+#include "cuda/cublas_check.cuh"
+#include "cuda/cuda_check.cuh"
+#include "logger.hpp"
+#include "half_precision.hpp"
 #include <cublas_v2.h>
 #include <fstream>
 #include <iostream>
@@ -344,187 +344,47 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
 }
 
 // Transformer implementation
-Transformer::Transformer(const TransformerConfig& config_)
-    : config(config_)
-    , token_embedding(std::make_unique<TokenEmbedding>(config_.vocab_size, config_.hidden_size))
-    , pos_encoding(std::make_unique<PositionalEncoding>(config_.hidden_size, config_.max_seq_length))
-    , final_ln(std::make_unique<LayerNorm>(config_.hidden_size))
-    , dropout(std::make_unique<Dropout>(config_.dropout_rate)) {
+Transformer::Transformer(const TransformerConfig& config) : config(config) {
+    token_embedding = std::make_unique<TokenEmbedding>(config.vocab_size, config.hidden_size);
+    pos_encoding = std::make_unique<PositionalEncoding>(config.max_seq_length, config.hidden_size);
     
-    metrics.set_config(config_);  // Set the config for metrics
-    
-    // Initialize layers
-    layers.reserve(config.num_layers);
     for (size_t i = 0; i < config.num_layers; ++i) {
-        layers.push_back(TransformerLayer::create(config, i));
+        layers.push_back(std::make_unique<TransformerLayer>(config, i));
     }
-
-    // Initialize KV caches
-    m_kv_caches.resize(config.num_layers);
-
-    // Initialize the language model head
+    
+    final_ln = std::make_unique<LayerNorm>(config.hidden_size);
     lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+    m_kv_caches.resize(config.num_layers);
 }
 
-Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const Tokenizer& tokenizer, bool use_cache) {
-    static const bool use_fp16 = config.use_fp16;
+Transformer::~Transformer() = default;
 
-    // Store the input tokens and query
-    last_input_tokens_ = input_tokens;
-    last_input_query_ = original_query.empty() ? tokenizer.decode(input_tokens) : original_query;
-
-    // Get embeddings and add positional encodings
-    Matrix embeddings = token_embedding->forward(input_tokens);
+Matrix Transformer::forward(const Matrix& input) {
+    Matrix output = input;
     
-    // Debug embeddings
-    float min_emb = std::numeric_limits<float>::infinity();
-    float max_emb = -std::numeric_limits<float>::infinity();
-    float sum_emb = 0.0f;
-    size_t nonzero_emb = 0;
-    
-    for (size_t i = 0; i < embeddings.rows(); i++) {
-        for (size_t j = 0; j < embeddings.cols(); j++) {
-            float val = embeddings(i, j);
-            min_emb = std::min(min_emb, val);
-            max_emb = std::max(max_emb, val);
-            sum_emb += val;
-            if (std::abs(val) > 1e-6) nonzero_emb++;
-        }
-    }
-    
-    std::cout << "\nEmbedding Statistics:\n"
-              << "Min emb: " << min_emb << "\n"
-              << "Max emb: " << max_emb << "\n"
-              << "Mean emb: " << sum_emb / (embeddings.rows() * embeddings.cols()) << "\n"
-              << "Nonzero emb: " << nonzero_emb << "/" 
-              << (embeddings.rows() * embeddings.cols()) << "\n\n";
-    
-    Matrix position_ids(input_tokens.size(), 1);
-    for (size_t i = 0; i < input_tokens.size(); ++i) {
-        position_ids(i, 0) = static_cast<float>(i);
-    }
-    
-    // Batch process embeddings
-    Matrix pos_encodings = pos_encoding->forward(position_ids);
-    
-    // Debug positional encodings
-    float min_pos = std::numeric_limits<float>::infinity();
-    float max_pos = -std::numeric_limits<float>::infinity();
-    float sum_pos = 0.0f;
-    size_t nonzero_pos = 0;
-    
-    for (size_t i = 0; i < pos_encodings.rows(); i++) {
-        for (size_t j = 0; j < pos_encodings.cols(); j++) {
-            float val = pos_encodings(i, j);
-            min_pos = std::min(min_pos, val);
-            max_pos = std::max(max_pos, val);
-            sum_pos += val;
-            if (std::abs(val) > 1e-6) nonzero_pos++;
-        }
-    }
-    
-    std::cout << "Positional Encoding Statistics:\n"
-              << "Min pos: " << min_pos << "\n"
-              << "Max pos: " << max_pos << "\n"
-              << "Mean pos: " << sum_pos / (pos_encodings.rows() * pos_encodings.cols()) << "\n"
-              << "Nonzero pos: " << nonzero_pos << "/" 
-              << (pos_encodings.rows() * pos_encodings.cols()) << "\n\n";
-    
-    if (use_fp16) {
-        HalfPrecisionTraining::convert_to_fp16(embeddings);
-        HalfPrecisionTraining::convert_to_fp16(pos_encodings);
-    }
-    embeddings += pos_encodings;
-    
-    // Create causal mask for next-token prediction
-    AttentionMask mask = AttentionMask::create_causal_mask(input_tokens.size());
-    
-    // Forward through layers with minimal synchronization
-    hidden_states = embeddings;
-    m_layer_activations.clear();
-    m_layer_activations.reserve(layers.size());
-
-    if (training && dropout) {
-        hidden_states = dropout->forward(hidden_states, true);
-    }
-
-    // Process layers with minimal synchronization
+    // Forward through each transformer layer
     for (size_t i = 0; i < layers.size(); ++i) {
-        try {
-            m_layer_activations.push_back(hidden_states);
-            
-            // Debug hidden states before layer
-            float min_hidden = std::numeric_limits<float>::infinity();
-            float max_hidden = -std::numeric_limits<float>::infinity();
-            float sum_hidden = 0.0f;
-            size_t nonzero_hidden = 0;
-            
-            for (size_t r = 0; r < hidden_states.rows(); r++) {
-                for (size_t c = 0; c < hidden_states.cols(); c++) {
-                    float val = hidden_states(r, c);
-                    min_hidden = std::min(min_hidden, val);
-                    max_hidden = std::max(max_hidden, val);
-                    sum_hidden += val;
-                    if (std::abs(val) > 1e-6) nonzero_hidden++;
-                }
-            }
-            
-            std::cout << "Hidden States Statistics before layer " << i << ":\n"
-                      << "Min hidden: " << min_hidden << "\n"
-                      << "Max hidden: " << max_hidden << "\n"
-                      << "Mean hidden: " << sum_hidden / (hidden_states.rows() * hidden_states.cols()) << "\n"
-                      << "Nonzero hidden: " << nonzero_hidden << "/" 
-                      << (hidden_states.rows() * hidden_states.cols()) << "\n\n";
-            
-            hidden_states = layers[i]->forward(hidden_states, mask,
-                                             use_cache ? std::optional<KVCache>(m_kv_caches[i])
-                                                     : std::nullopt);
-        } catch (const std::exception& e) {
-            std::cerr << "Error in layer " << i << ": " << e.what() << std::endl;
-            throw;
-        }
+        output = layers[i]->forward(output, AttentionMask(), m_kv_caches[i]);
     }
+    
+    // Apply final layer norm
+    output = final_ln->forward(output);
+    
+    return output;
+}
 
-    // Final normalization
-    hidden_states = final_ln->forward(hidden_states);
+Matrix Transformer::forward(const std::vector<int>& input_ids, 
+                          const std::string& mode,
+                          const Tokenizer& tokenizer,
+                          bool training) {
+    // Convert input_ids to embeddings
+    Matrix embeddings = token_embedding->forward(input_ids);
     
-    // Debug final hidden states
-    float min_final = std::numeric_limits<float>::infinity();
-    float max_final = -std::numeric_limits<float>::infinity();
-    float sum_final = 0.0f;
-    size_t nonzero_final = 0;
+    // Add positional encodings
+    Matrix pos_encoded = pos_encoding->forward(embeddings);
     
-    for (size_t i = 0; i < hidden_states.rows(); i++) {
-        for (size_t j = 0; j < hidden_states.cols(); j++) {
-            float val = hidden_states(i, j);
-            min_final = std::min(min_final, val);
-            max_final = std::max(max_final, val);
-            sum_final += val;
-            if (std::abs(val) > 1e-6) nonzero_final++;
-        }
-    }
-    
-    std::cout << "Final Hidden States Statistics:\n"
-              << "Min final: " << min_final << "\n"
-              << "Max final: " << max_final << "\n"
-              << "Mean final: " << sum_final / (hidden_states.rows() * hidden_states.cols()) << "\n"
-              << "Nonzero final: " << nonzero_final << "/" 
-              << (hidden_states.rows() * hidden_states.cols()) << "\n\n";
-    
-    // Single sync point at the end
-    CUDA_CHECK(cudaGetLastError());
-    cudaDeviceSynchronize();
-    
-    // Clear activations after use
-    if (!training) {
-        m_layer_activations.clear();
-    }
-    
-    if (config.debug_mode) {
-        metrics.log_matrix_stats("Hidden States", hidden_states);
-    }
-    
-    return hidden_states;
+    // Forward through transformer layers
+    return forward(pos_encoded);
 }
 
 void Transformer::clear_kv_cache() {
@@ -735,10 +595,6 @@ std::vector<Matrix>& Transformer::parameters() {
     }
 
     return all_params;
-}
-
-Transformer::~Transformer() {
-    std::cout << "Transformer destructor called" << std::endl;
 }
 
 void Transformer::load(std::istream& is) {

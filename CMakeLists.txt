@@ -1,49 +1,27 @@
-cmake_minimum_required(VERSION 3.15)
-project(transformer_cpp CUDA CXX)
+cmake_minimum_required(VERSION 3.10)
+project(transformer CUDA CXX)
 
-# Set CUDA architecture policy
-cmake_policy(SET CMP0104 NEW)
+# Set C++ and CUDA standards
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 14)
 
-# Add Doxygen support
-find_package(Doxygen)
-if(DOXYGEN_FOUND)
-    add_custom_target(docs
-        ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Generating API documentation with Doxygen"
-        VERBATIM)
-endif()
+# Find required packages
+find_package(CUDA REQUIRED)
+enable_language(CUDA)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+# Set CUDA paths more explicitly
+set(CUDA_TOOLKIT_ROOT_DIR $ENV{CUDA_PATH} CACHE PATH "CUDA Toolkit location")
+set(CUDA_INCLUDE_DIRS ${CUDA_TOOLKIT_ROOT_DIR}/include CACHE PATH "CUDA Include Directory")
 
-# Set default CUDA architectures if not specified
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 86)
-endif()
+# Set minimal CUDA flags needed for compilation
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS}
+    -O3
+    --expt-relaxed-constexpr
+    -gencode arch=compute_60,code=sm_60
+)
 
 # Include FetchContent for downloading dependencies
 include(FetchContent)
-
-# Find required packages
-find_package(CUDAToolkit)
-
-# Set CUDA availability flag
-if(CUDAToolkit_FOUND)
-    message(STATUS "CUDA found - enabling CUDA support")
-    add_definitions(-DCUDA_AVAILABLE)
-else()
-    message(STATUS "CUDA not found - building without CUDA support")
-endif()
-
-# Optional: Find OpenMP
-if(MSVC)
-    find_package(OpenMP QUIET)
-else()
-    find_package(OpenMP)
-endif()
 
 # Download and build nlohmann/json
 FetchContent_Declare(
@@ -51,180 +29,153 @@ FetchContent_Declare(
     URL https://github.com/nlohmann/json/releases/download/v3.11.2/json.tar.xz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-set(FETCHCONTENT_QUIET OFF)
 FetchContent_MakeAvailable(json)
 
-# Include directories
-if(CUDAToolkit_FOUND)
-    include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+# Get nlohmann/json include directory
+FetchContent_GetProperties(json)
+get_target_property(JSON_INC_DIR nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+
+# Set CUDA architectures if not specified
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 60)
 endif()
 
-# Base include directories - single source of truth for all includes
+# Add CUDA-specific compile definitions
+add_definitions(-DUSE_CUDA)
+
+# Include directories
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/third_party
+    ${CUDA_INCLUDE_DIRS}
+    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    ${JSON_INC_DIR}
 )
 
-# Add tiktoken include directory globally
-include_directories(
+# Add CUDA source files
+set(CUDA_SOURCES
+    src/cuda/matrix_ops.cu
+    src/cuda/attention_ops.cu
+    src/cuda/backward_ops.cu
+    src/cuda/feed_forward_kernels.cu
+    src/cuda/half_precision_kernels.cu
+    src/cuda/cuda_utils.cu
+    src/cuda/cuda_init.cu
+    src/cuda/token_embedding_cuda.cu
+    src/cuda/layernorm_cuda.cu
+    src/cuda/gqa_kernels.cu
+    src/cuda/beam_search_ops.cu
+    src/cuda/tokenizer_kernels.cu
+)
+
+# Set CUDA specific compile options
+foreach(cuda_source ${CUDA_SOURCES})
+    set_source_files_properties(${cuda_source} PROPERTIES
+        CUDA_SOURCE_PROPERTY_FORMAT OBJ
+        CUDA_SEPARABLE_COMPILATION ON
+        LANGUAGE CUDA
+    )
+endforeach()
+
+# Create CUDA library
+cuda_add_library(cuda_kernels STATIC ${CUDA_SOURCES})
+
+# Set include directories for CUDA kernels
+target_include_directories(cuda_kernels
+    PUBLIC
     ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tiktoken/cpp/include
+    ${CMAKE_SOURCE_DIR}/include/cuda
+    ${CUDA_INCLUDE_DIRS}
+    ${CUDA_TOOLKIT_ROOT_DIR}/include
 )
 
-# Core source files
-set(CORE_SOURCES
+# Link CUDA libraries (using plain syntax)
+target_link_libraries(cuda_kernels
+    ${CUDA_LIBRARIES}
+    ${CUDA_CUBLAS_LIBRARIES}
+    ${CUDA_curand_LIBRARY}
+)
+
+# Set CUDA specific properties
+set_target_properties(cuda_kernels PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES}
+)
+
+# Add source files
+set(SOURCES
+    src/main.cpp
+    src/transformer.cpp
+    src/matrix.cpp
+    src/feed_forward.cpp
+    src/attention.cpp
+    src/logger.cpp
+    src/utils.cpp
+    src/tokenizer.cpp
+    src/model_saver.cpp
+    src/language_model_head.cpp
     src/components.cpp
     src/vector_ops.cpp
-    src/logger.cpp
-    src/model_saver.cpp
     src/half_precision.cpp
     src/gradient_checkpoint.cpp
-    src/utils.cpp
     src/performance_metrics.cpp
     src/gqa.cpp
     src/beam_search.cpp
     src/config.cpp
-    src/tokenizer.cpp
     src/tiktoken_tokenizer.cpp
-)
-
-# Neural network components
-set(NN_SOURCES
-    src/attention.cpp
-    src/transformer.cpp
-    src/layer_norm.cpp
-    src/feed_forward.cpp
-    src/embeddings.cpp
-)
-
-# Training and utilities
-set(UTIL_SOURCES
     src/cache.cpp
     src/quantization.cpp
     src/optimizer.cpp
-)
-
-
-# Language model components
-set(LM_SOURCES
     src/lm_head.cpp
     src/vocabulary.cpp
-)
-
-# Optimization components
-set(OPTIMIZER_SOURCES
+    src/tensor.cpp
     src/optimizer/sam.cpp
 )
 
-# Add the tensor source file to the sources list
-set(SOURCES
-    ${SOURCES}
-    src/tensor.cpp
-)
+# Create main library
+add_library(transformer_lib STATIC ${SOURCES})
 
-# Add the tensor header to the includes
-set(HEADERS
-    ${HEADERS}
-    include/tensor.hpp
-)
-
-# Add CUDA compilation flags
-if(CUDAToolkit_FOUND)
-    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_60)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-endif()
-
-# Add CUDA kernels library first if CUDA is found
-if(CUDAToolkit_FOUND)
-    add_library(cuda_kernels STATIC
-        src/cuda/matrix_ops.cu
-        src/cuda/attention_ops.cu
-        src/cuda/backward_ops.cu
-        src/cuda/feed_forward_kernels.cu
-        src/cuda/half_precision_kernels.cu
-        src/cuda/cuda_utils.cu
-        src/cuda/cuda_init.cu
-        src/cuda/token_embedding_cuda.cu
-        src/cuda/layernorm_cuda.cu
-        src/cuda/gqa_kernels.cu
-        src/cuda/beam_search_ops.cu
-        src/cuda/tokenizer_kernels.cu
-    )
-
-    set_target_properties(cuda_kernels PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        LANGUAGE CUDA
-    )
-
-    target_include_directories(cuda_kernels
-        PRIVATE
-        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRS}
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/third_party
-    )
-
-    target_compile_definitions(cuda_kernels
-        PRIVATE
-        BUILD_CUDA_LIB
-    )
-
-    target_link_libraries(cuda_kernels
-        PUBLIC
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::curand
-    )
-endif()
-
-# Then create transformer_lib
-add_library(transformer_lib
-    ${CORE_SOURCES}
-    ${NN_SOURCES}
-    ${UTIL_SOURCES}
-    ${ATTENTION_SOURCES}
-    ${LM_SOURCES}
-    ${OPTIMIZER_SOURCES}
-    src/data_augmentation.cpp
-    src/matrix.cpp
-)
-
-# Link all dependencies in one place
-if(CUDAToolkit_FOUND)
-    target_link_libraries(transformer_lib
-        PUBLIC
-        cuda_kernels
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::curand
-    )
-endif()
-
-target_link_libraries(transformer_lib
+# Set include directories for transformer_lib
+target_include_directories(transformer_lib
     PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/third_party
+    ${JSON_INC_DIR}  # Add json include directory
+)
+
+# Link libraries for transformer_lib
+target_link_libraries(transformer_lib 
+    PUBLIC
+    cuda_kernels
+    ${CUDA_LIBRARIES}
+    ${CUDA_CUBLAS_LIBRARIES}
     nlohmann_json::nlohmann_json
 )
 
 # Create executable
 add_executable(transformer src/main.cpp)
-
-# Link libraries
-target_compile_definitions(transformer_lib
-    PUBLIC
-    USE_CUDA
+target_link_libraries(transformer 
+    PRIVATE
+    transformer_lib
 )
 
-if(MSVC)
-    target_compile_options(transformer_lib
-        PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/W3">
-    )
-else()
-    target_compile_options(transformer_lib
-        PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -Wall>
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>
-    )
+# Optional: Find and link OpenMP
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(transformer_lib PUBLIC OpenMP::OpenMP_CXX)
 endif()
+
+# Add definitions
+add_definitions(
+    -DPAD_TOKEN_ID=0
+    -DUNK_TOKEN_ID=1
+    -DBOS_TOKEN_ID=2
+    -DEOS_TOKEN_ID=3
+    -DMASK_TOKEN_ID=4
+    -DCUDA_AVAILABLE
+)
 
 # Installation
 install(TARGETS transformer transformer_lib
@@ -247,34 +198,6 @@ else()
     message(WARNING "tcmalloc not found, continuing without it")
 endif()
 
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(transformer_lib PUBLIC OpenMP::OpenMP_CXX)
-endif()
-
-# Add SOURCES to the library instead
-target_sources(transformer_lib 
-    PRIVATE 
-    ${SOURCES}
-)
-
-find_package(nlohmann_json 3.2.0 REQUIRED)
-target_link_libraries(transformer_lib PRIVATE nlohmann_json::nlohmann_json)
-
-# Make sure the include directory is in the include path
-target_include_directories(transformer_lib 
-    PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/third_party
-)
-
-add_definitions(
-    -DPAD_TOKEN_ID=0
-    -DUNK_TOKEN_ID=1
-    -DBOS_TOKEN_ID=2
-    -DEOS_TOKEN_ID=3
-    -DMASK_TOKEN_ID=4
-)
-
 # Simplified tiktoken data copying
 add_custom_command(TARGET transformer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tiktoken_data"
@@ -288,7 +211,7 @@ add_custom_command(TARGET transformer POST_BUILD
     COMMENT "Copying tiktoken data files to build directory"
 )
 
-if(CUDAToolkit_FOUND)
+if(CUDA_FOUND)
     # Set source file properties to compile with CUDA
     set_source_files_properties(
         src/lm_head.cpp

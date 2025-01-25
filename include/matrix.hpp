@@ -49,9 +49,8 @@ class Matrix {
 #ifdef USE_CUDA
     float* gpu_data_ = nullptr;      ///< Matrix data storage on GPU
     bool is_on_gpu_ = false;         ///< Whether the data is currently on GPU
-#endif
-
     bool is_cuda_ = false;
+#endif
 
   public:
     // Make CUDA operations a friend of Matrix
@@ -410,15 +409,7 @@ class Matrix {
     }
 
     // Destructor
-    ~Matrix() {
-        if (owns_data_) {
-#ifdef USE_CUDA
-            if (is_cuda_ && gpu_data_) {
-                cuda::MemoryManager::get_instance().free(gpu_data_);
-            }
-#endif
-        }
-    }
+    ~Matrix();
 
     static Matrix from_vector(const std::vector<float>& vec) {
         Matrix mat(1, vec.size());
@@ -479,6 +470,23 @@ class Matrix {
         return *this;  // Always on CPU when CUDA is not enabled
         #endif
     }
+
+    // Add friend declaration for gelu function
+    friend void gelu(Matrix& x);
+    friend void gelu_derivative(Matrix& x);
+
+    // Add accessor methods
+    float* data() { return data_.data(); }
+    const float* data() const { return data_.data(); }
+    
+    // Get raw data size
+    size_t data_size() const { return data_.size(); }
+
+#ifdef USE_CUDA
+    // CUDA-specific methods
+    float* gpu_data() { return gpu_data_; }
+    const float* gpu_data() const { return gpu_data_; }
+#endif
 };
 
 // Make to_vector inline to allow multiple definitions

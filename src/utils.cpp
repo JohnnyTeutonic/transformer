@@ -29,6 +29,13 @@ bool starts_with(const std::string& str, const std::string& prefix) {
            str.compare(0, prefix.size(), prefix) == 0;
 }
 
+bool ends_with(const std::string& str, const std::string& suffix) {
+    if (str.length() < suffix.length()) {
+        return false;
+    }
+    return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
+}
+
 float Utils::adjust_learning_rate(float current_lr, float loss_ratio, size_t step) {
     const size_t WARMUP_STEPS = 50;
     const float PEAK_LR = 5e-4;
@@ -809,7 +816,7 @@ PatternMetrics Utils::evaluate_pattern_completion(
                   << "\nTarget: '" << target << "'" << std::endl;
         
         // Only process inputs that end with "in the"
-        if (!input.ends_with(" in the")) continue;
+        if (!ends_with(input, " in the")) continue;
 
         // Process and get prediction
         std::string processed_input = input;

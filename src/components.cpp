@@ -406,17 +406,26 @@ Matrix matmul(const Matrix& A, const Matrix& B) {
 }
 
 void gelu(Matrix& x) {
-    #ifdef USE_CUDA
-    Matrix grad(x.rows(), x.cols());
-    cuda::gelu_backward(grad, x);
-    x = grad;
-    #else
-    // Original CPU implementation
-    constexpr float sqrt_2_over_pi = 0.7978845608028654f;
-    for (size_t i = 0; i < x.size(); i++) {
-        float val = x.data_[i];
-        float cdf = 0.5f * (1.0f + std::tanh(sqrt_2_over_pi * (val + 0.044715f * val * val * val)));
-        x.data_[i] = val * cdf;
+    const float sqrt_2_over_pi = std::sqrt(2.0f / M_PI);
+    float* data = x.data();
+    const size_t size = x.data_size();
+    
+    for (size_t i = 0; i < size; i++) {
+        float val = data[i];
+        float cdf = 0.5f * (1.0f + std::erf(val / std::sqrt(2.0f)));
+        data[i] = val * cdf;
     }
-    #endif
+}
+
+void gelu_derivative(Matrix& x) {
+    const float sqrt_2_over_pi = std::sqrt(2.0f / M_PI);
+    float* data = x.data();
+    const size_t size = x.data_size();
+    
+    for (size_t i = 0; i < size; i++) {
+        float val = data[i];
+        float cdf = 0.5f * (1.0f + std::erf(val / std::sqrt(2.0f)));
+        float pdf = sqrt_2_over_pi * std::exp(-0.5f * val * val);
+        data[i] = cdf + val * pdf;
+    }
 }
