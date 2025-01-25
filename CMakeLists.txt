@@ -134,7 +134,49 @@ if(CUDAToolkit_FOUND)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 endif()
 
-# Create library
+# Add CUDA kernels library first if CUDA is found
+if(CUDAToolkit_FOUND)
+    add_library(cuda_kernels STATIC
+        src/cuda/matrix_ops.cu
+        src/cuda/attention_ops.cu
+        src/cuda/backward_ops.cu
+        src/cuda/feed_forward_kernels.cu
+        src/cuda/half_precision_kernels.cu
+        src/cuda/cuda_utils.cu
+        src/cuda/cuda_init.cu
+        src/cuda/token_embedding_cuda.cu
+        src/cuda/layernorm_cuda.cu
+        src/cuda/gqa_kernels.cu
+        src/cuda/beam_search_ops.cu
+        src/cuda/tokenizer_kernels.cu
+    )
+
+    set_target_properties(cuda_kernels PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        LANGUAGE CUDA
+    )
+
+    target_include_directories(cuda_kernels
+        PRIVATE
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+
+    target_compile_definitions(cuda_kernels
+        PRIVATE
+        BUILD_CUDA_LIB
+    )
+
+    target_link_libraries(cuda_kernels
+        PUBLIC
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::curand
+    )
+endif()
+
+# Then create transformer_lib
 add_library(transformer_lib
     ${CORE_SOURCES}
     ${NN_SOURCES}
@@ -146,36 +188,26 @@ add_library(transformer_lib
     src/matrix.cpp
 )
 
-# Set CUDA specific properties for the library
-set_target_properties(transformer_lib PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE ON
-)
-
-# Create executable
-add_executable(transformer src/main.cpp)
-
-# Link libraries
-target_link_libraries(transformer_lib
-    PUBLIC
-    nlohmann_json::nlohmann_json
-)
-
+# Link all dependencies in one place
 if(CUDAToolkit_FOUND)
     target_link_libraries(transformer_lib
         PUBLIC
+        cuda_kernels
         CUDA::cudart
         CUDA::cublas
         CUDA::curand
     )
 endif()
 
-target_link_libraries(transformer
-    PRIVATE
-    transformer_lib
+target_link_libraries(transformer_lib
+    PUBLIC
+    nlohmann_json::nlohmann_json
 )
 
-# Compiler options
+# Create executable
+add_executable(transformer src/main.cpp)
+
+# Link libraries
 target_compile_definitions(transformer_lib
     PUBLIC
     USE_CUDA
@@ -217,51 +249,6 @@ endif()
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(transformer_lib PUBLIC OpenMP::OpenMP_CXX)
-endif()
-
-# Add CUDA kernels library only if CUDA is found
-if(CUDAToolkit_FOUND)
-    add_library(cuda_kernels STATIC
-        src/cuda/matrix_ops.cu
-        src/cuda/attention_ops.cu
-        src/cuda/backward_ops.cu
-        src/cuda/feed_forward_kernels.cu
-        src/cuda/half_precision_kernels.cu
-        src/cuda/cuda_utils.cu
-        src/cuda/cuda_init.cu
-        src/cuda/token_embedding_cuda.cu
-        src/cuda/layernorm_cuda.cu
-        src/cuda/gqa_kernels.cu
-        src/cuda/beam_search_ops.cu
-        src/cuda/tokenizer_kernels.cu
-    )
-
-    set_target_properties(cuda_kernels PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        LANGUAGE CUDA
-    )
-
-    # Add CUDA include directories
-    target_include_directories(cuda_kernels
-        PRIVATE
-        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRS}
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/third_party
-    )
-
-    # Link CUDA libraries to cuda_kernels
-    target_link_libraries(cuda_kernels
-        PUBLIC
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::curand
-    )
-
-    # Link cuda_kernels to transformer_lib
-    target_link_libraries(transformer_lib
-        PUBLIC
-        cuda_kernels
-    )
 endif()
 
 # Add SOURCES to the library instead
