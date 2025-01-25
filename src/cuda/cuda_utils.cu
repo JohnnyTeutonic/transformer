@@ -1,5 +1,7 @@
 #include "../../include/cuda/cuda_utils.cuh"
 #include "../../include/cuda/cuda_check.cuh"
+#include "../../include/cuda/cuda_init.cuh"
+#include "../../include/matrix.hpp"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -8,17 +10,20 @@ namespace cuda {
         int row = blockIdx.x * blockDim.x + threadIdx.x;
 
         if (row < seq_len) {
+            // Find max value for numerical stability
             float max_val = scores[row * seq_len];
             for (int i = 1; i < seq_len; i++) {
                 max_val = max(max_val, scores[row * seq_len + i]);
             }
 
+            // Compute exp and sum
             float sum = 0.0f;
             for (int i = 0; i < seq_len; i++) {
                 scores[row * seq_len + i] = expf(scores[row * seq_len + i] - max_val);
                 sum += scores[row * seq_len + i];
             }
 
+            // Normalize
             for (int i = 0; i < seq_len; i++) {
                 scores[row * seq_len + i] /= sum;
             }
@@ -26,56 +31,73 @@ namespace cuda {
     }
 
     void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream) {
+        if (!is_initialized()) {
+            initialize_cuda();
+        }
+
         dim3 block_dim(256);
         dim3 grid_dim((seq_len + block_dim.x - 1) / block_dim.x);
 
         softmax_kernel<<<grid_dim, block_dim, 0, stream>>>(scores, seq_len);
+        CUDA_CHECK(cudaGetLastError());
     }
 
-    Matrix cuda_matmul(const Matrix& A, const Matrix& B) {
-        std::cout << "Starting CUDA matrix multiplication..." << std::endl;
-        std::cout << "Matrix A: " << A.rows() << "x" << A.cols() << std::endl;
-        std::cout << "Matrix B: " << B.rows() << "x" << B.cols() << std::endl;
-
-        cublasHandle_t handle;
-        cublasStatus_t status;
-        cudaError_t err;
-
-        status = cublasCreate(&handle);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to create cuBLAS handle");
+    Matrix gpu_matmul(const Matrix& A, const Matrix& B) {
+        if (!is_initialized()) {
+            initialize_cuda();
         }
 
-        float alpha = 1.0f;
-        float beta = 0.0f;
+        // Get dimensions
+        const int M = A.rows();
+        const int N = B.cols();
+        const int K = A.cols();
 
-        Matrix C(A.rows(), B.cols(), 0.0f);
-        Matrix C_gpu = C.to_gpu();
-        std::cout << "Created output matrix C: " << C.rows() << "x" << C.cols() << std::endl;
+        // Create result matrix
+        Matrix C(M, N);
 
-        try {
-            status = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, B.cols(), A.rows(), A.cols(), &alpha,
-                                 B.get_data(), B.cols(), A.get_data(), A.cols(), &beta,
-                                 C_gpu.get_data(), C_gpu.cols());
+        // Set scaling factors
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
 
-            if (status != CUBLAS_STATUS_SUCCESS) {
-                throw std::runtime_error("cuBLAS SGEMM failed with status: " + std::to_string(status));
-            }
+        // Get the global cuBLAS handle
+        extern cublasHandle_t cublas_handle;
 
-            // Synchronize to catch any asynchronous errors
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                throw std::runtime_error("CUDA sync failed: " + std::string(cudaGetErrorString(err)));
-            }
+        // Perform matrix multiplication
+        CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                N, M, K, &alpha,
+                                B.get_data(), N,
+                                A.get_data(), K,
+                                &beta,
+                                C.get_data(), N));
 
-            std::cout << "CUDA matrix multiplication completed successfully" << std::endl;
-            C = C_gpu.to_cpu();
-        } catch (const std::exception& e) {
-            cublasDestroy(handle);
-            throw;
-        }
-
-        cublasDestroy(handle);
         return C;
+    }
+}
+
+// Move these outside of any namespace
+namespace {
+    bool cuda_initialized = false;
+}
+
+bool is_initialized() {
+    return cuda_initialized;
+}
+
+bool initialize_cuda() {
+    if (!is_initialized()) {
+        cudaError_t error = cudaSetDevice(0);
+        if (error != cudaSuccess) {
+            // Handle error
+            return false;
+        }
+        cuda_initialized = true;
+    }
+    return true;
+}
+
+void cleanup_cuda() {
+    if (cuda_initialized) {
+        cudaDeviceReset();
+        cuda_initialized = false;
     }
 }

@@ -1,18 +1,17 @@
-#include "../../include/cuda_utils.hpp"
+#include "../../include/cuda/cuda_utils.cuh"
+#include "../../include/cuda/cuda_check.cuh"
+#include "../../include/cuda/cuda_init.cuh"
 
-// Global cuBLAS handle
-cublasHandle_t cublas_handle;
+namespace cuda {
 
-// Initialize cuBLAS handle at program start
-__attribute__((constructor))
-static void init_cublas() {
-    CUBLAS_CHECK(cublasCreate(&cublas_handle));
+void initialize_memory_manager() {
+    if (!is_initialized()) {
+        initialize_cuda();
+    }
 }
 
-// Destroy cuBLAS handle at program end
-__attribute__((destructor))
-static void destroy_cublas() {
-    if (cublas_handle != nullptr) {
-        cublasDestroy(cublas_handle);
-    }
-} 
+void cleanup_memory_manager() {
+    cleanup_cuda();
+}
+
+} // namespace cuda 

@@ -12,15 +12,10 @@
 #include "../../include/cuda/cuda_check.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
 #include "../../include/cuda/memory_manager.cuh"
+#include "../../include/cuda/cuda_init.cuh"
 
-// Forward declare all kernels
-__global__ void matrix_multiply_kernel(const float* A, const float* B, float* C, 
-                                      int M, int N, int K);
+// Forward declare kernels
 __global__ void gelu_forward_kernel(float* x, int size);
-
-// Global cuBLAS handle
-static cublasHandle_t cublas_handle;
-static bool cublas_initialized = false;
 
 // Helper functions outside of cuda namespace
 static void throw_runtime_error(const char* msg) {
@@ -28,29 +23,14 @@ static void throw_runtime_error(const char* msg) {
 }
 
 namespace cuda {
-    void initialize_cuda() {
-        CUDA_CHECK(cudaSetDevice(0));
-        if (!cublas_initialized) {
-            CUBLAS_CHECK(cublasCreate(&cublas_handle));
-            cublas_initialized = true;
-        }
-    }
-
-    void cleanup_cuda() {
-        if (cublas_initialized) {
-            CUBLAS_CHECK(cublasDestroy(cublas_handle));
-            cublas_initialized = false;
-        }
-    }
-
     Matrix matmul(const Matrix& A, const Matrix& B) {
         // Verify dimensions
         if (A.cols() != B.rows()) {
             throw_runtime_error("Matrix multiplication dimension mismatch");
         }
 
-        // Initialize cuBLAS if needed
-        if (!cublas_initialized) {
+        // Initialize CUDA if needed
+        if (!is_initialized()) {
             initialize_cuda();
         }
 
@@ -60,30 +40,34 @@ namespace cuda {
         // First ensure all matrices are on GPU
         Matrix A_gpu = A.is_cuda() ? A : A.to_gpu();
         Matrix B_gpu = B.is_cuda() ? B : B.to_gpu();
-        Matrix C_gpu(C.rows(), C.cols(), nullptr, false);  // Create GPU matrix
+        Matrix C_gpu(C.rows(), C.cols(), nullptr, true);  // Create GPU matrix
 
-        // cuBLAS uses column-major order, while we use row-major order
-        // So we compute C = B^T * A^T to get the correct result
+        // Get dimensions
+        const int M = A.rows();
+        const int N = B.cols();
+        const int K = A.cols();
+
+        // Set scaling factors
         const float alpha = 1.0f;
         const float beta = 0.0f;
-        
+
         // Get raw pointers
         float* d_A = A_gpu.get_data();
         float* d_B = B_gpu.get_data();
         float* d_C = C_gpu.get_data();
 
-        // Perform matrix multiplication: C = alpha * (B^T * A^T) + beta * C
+        // Get the global cuBLAS handle
+        extern cublasHandle_t cublas_handle;
+
+        // Perform matrix multiplication using cuBLAS
+        // Note: cuBLAS uses column-major order, so we compute C = B^T * A^T
         CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                B.cols(), A.rows(), A.cols(),
-                                &alpha,
-                                d_B, B.cols(),
-                                d_A, A.cols(),
+                                N, M, K, &alpha,
+                                d_B, N,  // Leading dimension of B is N
+                                d_A, K,  // Leading dimension of A is K
                                 &beta,
-                                d_C, C.cols()));
-        
-        // Synchronize to catch any errors
-        CUDA_CHECK(cudaDeviceSynchronize());
-        
+                                d_C, N));  // Leading dimension of C is N
+
         return C_gpu;
     }
 
@@ -184,47 +168,6 @@ namespace cuda {
 }
 
 // Kernel implementations
-__global__ void matrix_multiply_kernel(const float* A, const float* B, float* C, 
-                                     int M, int N, int K) {
-    // Use shared memory for better performance
-    __shared__ float shared_A[32][32];
-    __shared__ float shared_B[32][32];
-
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    float sum = 0.0f;
-
-    for (int tile = 0; tile < (K + 31) / 32; ++tile) {
-        // Load data into shared memory
-        if (row < M && tile * 32 + threadIdx.x < K)
-            shared_A[threadIdx.y][threadIdx.x] = A[row * K + tile * 32 + threadIdx.x];
-        else
-            shared_A[threadIdx.y][threadIdx.x] = 0.0f;
-
-        if (col < N && tile * 32 + threadIdx.y < K)
-            shared_B[threadIdx.y][threadIdx.x] = B[(tile * 32 + threadIdx.y) * N + col];
-        else
-            shared_B[threadIdx.y][threadIdx.x] = 0.0f;
-
-        __syncthreads();
-
-        // Compute partial dot product
-        if (row < M && col < N) {
-            for (int k = 0; k < 32; ++k) {
-                sum += shared_A[threadIdx.y][k] * shared_B[k][threadIdx.x];
-            }
-        }
-
-        __syncthreads();
-    }
-
-    if (row < M && col < N) {
-        C[row * N + col] = sum;
-    }
-}
-
-// GELU kernel implementations
 __global__ void gelu_forward_kernel(float* x, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {

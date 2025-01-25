@@ -4,9 +4,13 @@
 // Forward declare Matrix class
 class Matrix;
 
+// Add these declarations at the top
+bool is_initialized();
+bool initialize_cuda();
+void cleanup_cuda();
+
 #ifdef CUDA_AVAILABLE
 namespace cuda {
-    void initialize_cuda();
     void cleanup_cuda();
     void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
     
@@ -18,7 +22,6 @@ namespace cuda {
 }
 #else
 namespace cuda {
-    void initialize_cuda();
     void cleanup_cuda();
     void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
 }

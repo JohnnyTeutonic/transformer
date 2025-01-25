@@ -103,16 +103,17 @@ Matrix FeedForward::forward(const Matrix& input) {
         
         try {
             // Allocate memory for intermediate and output matrices
+            printf("Allocating memory for intermediate and output matrices\n");
             size_t intermediate_size = input.rows() * w1.cols();
             size_t output_size = input.rows() * w2.cols();
-            
+            printf("Intermediate size: %zu, Output size: %zu\n", intermediate_size, output_size);
             float* intermediate_data = memory_mgr.get_device_memory(intermediate_size);
             float* output_data = memory_mgr.get_device_memory(output_size);
-            
+            printf("Memory allocated for intermediate and output matrices\n");
             // Create Matrix objects that wrap the device memory
             Matrix intermediate(input.rows(), w1.cols(), intermediate_data, false);  // false means don't take ownership
             Matrix output(input.rows(), w2.cols(), output_data, false);
-            
+            printf("Matrix objects created\n");
             // First matrix multiplication
             intermediate = cuda::matmul(input, w1);
             printf("First matmul completed\n");
@@ -128,6 +129,7 @@ Matrix FeedForward::forward(const Matrix& input) {
             // Now safe to move the final results
             intermediate = std::move(intermediate);
             output = std::move(output);
+            printf("Final results moved\n");
             using_cuda = true;
             printf("CUDA computations completed successfully\n");
         } catch (const std::exception& e) {
