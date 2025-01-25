@@ -49,4 +49,6 @@ class Utils {
         Transformer& transformer,
         const Tokenizer& tokenizer,
         const std::vector<std::pair<std::string, std::string>>& validation_data);
+    static void analyze_training_patterns(
+        const std::vector<std::pair<std::string, std::string>>& pairs);
 };

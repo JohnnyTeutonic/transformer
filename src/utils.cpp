@@ -17,6 +17,13 @@
 #include <map>
 #include <limits>
 
+struct JobCategory {
+    std::string category;
+    std::vector<std::string> job_titles;
+    std::vector<std::string> common_verbs;
+    std::vector<std::string> common_locations;
+};
+
 bool starts_with(const std::string& str, const std::string& prefix) {
     return str.size() >= prefix.size() && 
            str.compare(0, prefix.size(), prefix) == 0;
@@ -82,6 +89,12 @@ Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int
 }
 
 float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distribution) {
+    // Add debug prints
+    std::cout << "\nComputing loss:"
+              << "\nLogits shape: " << logits.rows() << "x" << logits.cols()
+              << "\nTarget shape: " << target_distribution.rows() << "x" 
+              << target_distribution.cols() << std::endl;
+              
     if (logits.empty() || target_distribution.empty()) {
         return 0.0f;
     }
@@ -115,6 +128,7 @@ float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distr
         }
     }
 
+    std::cout << "Batch loss: " << total_loss / batch_size << std::endl;
     return total_loss / batch_size;
 }
 
@@ -265,10 +279,49 @@ std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
     DataAugmentation augmenter(0.3f, 0.3f);
     auto augmented_pairs = augmenter.augmentDataset(training_pairs);
     
-    std::cout << "Original dataset size: " << training_pairs.size() << std::endl;
-    std::cout << "Augmented dataset size: " << augmented_pairs.size() << std::endl;
+    std::cout << "\n=== Data Augmentation Analysis ===\n";
+    std::cout << "Original pairs: " << training_pairs.size() << "\n";
+    std::cout << "Augmented pairs: " << augmented_pairs.size() << "\n";
     
-    return augmented_pairs;
+    // Compare original and augmented examples
+    std::cout << "\nSample augmentations:\n";
+    for (size_t i = 0; i < std::min(size_t(5), training_pairs.size()); i++) {
+        std::cout << "\nOriginal: '" << training_pairs[i].first 
+                  << "' -> '" << training_pairs[i].second << "'\n";
+        
+        // Find augmentations of this example
+        std::cout << "Augmentations:\n";
+        for (const auto& [aug_input, aug_output] : augmented_pairs) {
+            if (aug_input.find(training_pairs[i].first) != std::string::npos ||
+                training_pairs[i].first.find(aug_input) != std::string::npos) {
+                std::cout << "  '" << aug_input << "' -> '" << aug_output << "'\n";
+            }
+        }
+    }
+    
+    // Keep the malformed pairs check
+    int malformed_count = 0;
+    std::cout << "\nChecking for malformed pairs...\n";
+    for (const auto& [input, output] : training_pairs) {
+        if (input.empty() || output.empty()) {
+            std::cout << "Empty input or output found\n";
+            malformed_count++;
+            continue;
+        }
+        
+        if (input.length() < 5 || output.length() < 2) {
+            std::cout << "Suspiciously short pair: '" << input << "' -> '" << output << "'\n";
+            malformed_count++;
+        }
+    }
+    
+    if (malformed_count > 0) {
+        std::cout << "Warning: Found " << malformed_count << " potentially malformed pairs\n";
+    }
+    
+    analyze_training_patterns(training_pairs);
+    
+    return training_pairs;
 }
 
 void Utils::analyze_token_mappings(
@@ -766,6 +819,19 @@ void from_json(const nlohmann::json& j, TransformerConfig::TokenizerConfig& t) {
     j.at("special_tokens").get_to(t.special_tokens);
 }
 
+struct PatternInfo {
+    std::string pattern;
+    float frequency_weight;  // Based on common usage
+    std::string example;
+};
+
+const std::vector<PatternInfo> weighted_patterns = {
+    {" to the", 1.0f, "most common"},
+    {" in the", 0.9f, "very common"},
+    {" according to", 0.5f, "less common"},
+    // ...
+};
+
 PatternMetrics Utils::evaluate_pattern_completion(
     Transformer& transformer,
     const Tokenizer& tokenizer,
@@ -777,20 +843,63 @@ PatternMetrics Utils::evaluate_pattern_completion(
     size_t destination_correct = 0;
     std::map<std::string, int> error_counts;
 
+    // Define the expected pattern structure
+    const std::vector<std::string> action_verbs = {
+        "work", "assist", "organize", "serve", "create", "operate", "study",
+        "design", "build", "test", "analyze", "develop", "research", "manage",
+        "monitor", "code", "train", "teach", "maintain", "process"
+    };
+
+    // Function to check if a string follows job title pattern (typically 1-3 words)
+    auto is_job_title = [](const std::string& s) {
+        std::stringstream ss(s);
+        std::string word;
+        int word_count = 0;
+        while (ss >> word && word_count < 4) {
+            word_count++;
+        }
+        return word_count >= 1 && word_count <= 3;
+    };
+
+    // Function to check if a string is a specialized location (typically 2-3 words)
+    auto is_specialized_location = [](const std::string& s) {
+        std::stringstream ss(s);
+        std::string word;
+        std::vector<std::string> words;
+        while (ss >> word) {
+            words.push_back(word);
+        }
+        // Location should be 1-3 words and often ends with: lab, room, center, studio, etc.
+        static const std::vector<std::string> common_endings = {
+            "lab", "room", "center", "studio", "office", "facility", "station"
+        };
+        if (words.size() < 1 || words.size() > 3) return false;
+        
+        // Check if last word is a common location ending
+        std::string last_word = words.back();
+        return std::find(common_endings.begin(), common_endings.end(), last_word) 
+               != common_endings.end();
+    };
+
     transformer.set_training(false);
     
     for (const auto& [input, target] : validation_data) {
-        if (!input.ends_with(" to the")) continue;  // Skip non-pattern examples
+        // Add debug prints
+        std::cout << "\nProcessing example:"
+                  << "\nInput: '" << input << "'"
+                  << "\nTarget: '" << target << "'" << std::endl;
         
+        // Only process inputs that end with "in the"
+        if (!input.ends_with(" in the")) continue;
+
+        // Process and get prediction
         std::string processed_input = input;
         tokenizer.preprocess_text(processed_input);
         std::vector<int> input_tokens = tokenizer.encode(processed_input);
-        
-        // Get model prediction
         Matrix hidden = transformer.forward(input_tokens, input, tokenizer);
         Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden);
         
-        // Get top prediction
+        // Get prediction
         int predicted_token = -1;
         float max_logit = -std::numeric_limits<float>::infinity();
         for (size_t i = 0; i < logits.cols(); ++i) {
@@ -802,24 +911,42 @@ PatternMetrics Utils::evaluate_pattern_completion(
         
         std::string prediction = tokenizer.decode({predicted_token});
         std::string expected = target;
+
+        // Check if prediction follows the specialized location pattern
+        bool follows_pattern = is_specialized_location(prediction);
         
-        // Check if basic pattern is followed
-        if (prediction.length() > 0 && !prediction.starts_with(" ")) {
+        if (follows_pattern) {
             pattern_correct++;
         } else {
             error_counts[prediction]++;
+            std::cout << "Pattern error - Input: \"" << input << "\", Predicted: \"" 
+                      << prediction << "\", Expected: \"" << expected << "\"\n";
         }
         
-        // Check if destination matches
+        // Check exact match
         if (prediction == expected) {
             destination_correct++;
         }
         
         total++;
+
+        // Print top predictions for debugging
+        std::cout << "Top 5 predictions for '" << input << "':\n";
+        std::vector<std::pair<float, int>> top_logits;
+        for (size_t i = 0; i < logits.cols(); ++i) {
+            top_logits.push_back({logits(logits.rows() - 1, i), i});
+        }
+        std::partial_sort(top_logits.begin(), top_logits.begin() + 5, top_logits.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (int i = 0; i < 5; ++i) {
+            std::cout << "  " << tokenizer.decode({top_logits[i].second}) 
+                      << " (score: " << top_logits[i].first << ")\n";
+        }
     }
     
     transformer.set_training(true);
     
+    // Calculate metrics
     metrics.pattern_accuracy = total > 0 ? static_cast<float>(pattern_correct) / total : 0.0f;
     metrics.destination_accuracy = total > 0 ? static_cast<float>(destination_correct) / total : 0.0f;
     
@@ -834,5 +961,179 @@ PatternMetrics Utils::evaluate_pattern_completion(
         metrics.common_mistakes.push_back(sorted_errors[i].second);
     }
     
+    // Print detailed metrics
+    std::cout << "\nPattern Completion Metrics:\n"
+              << "Total examples evaluated: " << total << "\n"
+              << "Pattern accuracy: " << (metrics.pattern_accuracy * 100.0f) << "%\n"
+              << "Destination accuracy: " << (metrics.destination_accuracy * 100.0f) << "%\n"
+              << "Most common mistakes:\n";
+    
+    for (const auto& mistake : metrics.common_mistakes) {
+        std::cout << "  - \"" << mistake << "\" (count: " << error_counts[mistake] << ")\n";
+    }
+    std::cout << std::endl;
+    
     return metrics;
+}
+
+void Utils::analyze_training_patterns(const std::vector<std::pair<std::string, std::string>>& pairs) {
+    std::cout << "\n=== Detailed Training Data Analysis ===\n";
+    
+    // Categories for different types of jobs
+    std::map<std::string, std::vector<std::string>> job_patterns = {
+        {"tech", {"engineer", "developer", "programmer", "architect", "analyst"}},
+        {"science", {"scientist", "researcher", "specialist", "expert"}},
+        {"creative", {"designer", "artist", "creator", "composer"}},
+        {"service", {"worker", "assistant", "manager", "coordinator"}},
+        {"craft", {"maker", "crafter", "builder", "smith"}}
+    };
+
+    // Initialize categories with proper JobCategory structs
+    std::map<std::string, JobCategory> categories;
+    for (const auto& [category, patterns] : job_patterns) {
+        JobCategory cat;
+        cat.category = category;
+        cat.job_titles = patterns;  // Initialize with the patterns
+        categories[category] = cat;
+    }
+    
+    // Track statistics
+    std::map<std::string, int> verb_counts;
+    std::map<std::string, std::set<std::string>> verb_locations;  // what locations each verb is used with
+    std::map<std::string, std::set<std::string>> location_endings;  // categorize by ending (lab, room, etc)
+    std::map<std::string, JobCategory> job_stats;
+    
+    for (const auto& [input, output] : pairs) {
+        std::stringstream ss(input);
+        std::vector<std::string> words;
+        std::string word;
+        while (ss >> word) {
+            words.push_back(word);
+        }
+        
+        if (words.size() < 4) continue;  // Skip malformed entries
+        
+        // Extract components
+        std::string job_title;
+        std::string verb;
+        size_t verb_pos = 0;
+        
+        // Find the verb (word before "in the")
+        for (size_t i = 0; i < words.size(); i++) {
+            if (words[i] == "in" && i + 1 < words.size() && words[i + 1] == "the") {
+                verb = words[i - 1];
+                verb_pos = i - 1;
+                break;
+            }
+        }
+        
+        // Get job title (everything before the verb)
+        for (size_t i = 0; i < verb_pos; i++) {
+            if (i > 0) job_title += " ";
+            job_title += words[i];
+        }
+        
+        // Categorize job
+        std::string job_category = "other";
+        for (const auto& [category, patterns] : categories) {
+            for (const auto& pattern : patterns.job_titles) {
+                if (job_title.find(pattern) != std::string::npos) {
+                    job_category = category;
+                    break;
+                }
+            }
+            if (job_category != "other") break;
+        }
+        
+        // Update statistics
+        verb_counts[verb]++;
+        verb_locations[verb].insert(output);
+        
+        // Analyze location endings
+        std::stringstream loc_ss(output);
+        std::vector<std::string> loc_words;
+        while (loc_ss >> word) {
+            loc_words.push_back(word);
+        }
+        if (!loc_words.empty()) {
+            std::string ending = loc_words.back();
+            location_endings[ending].insert(output);
+        }
+        
+        // Update job category stats
+        job_stats[job_category].job_titles.push_back(job_title);
+        job_stats[job_category].common_verbs.push_back(verb);
+        job_stats[job_category].common_locations.push_back(output);
+    }
+    
+    // Print analysis
+    std::cout << "\n1. Verb Analysis:\n";
+    std::cout << "Top 10 most common verbs:\n";
+    std::vector<std::pair<int, std::string>> sorted_verbs;
+    for (const auto& [verb, count] : verb_counts) {
+        sorted_verbs.push_back({count, verb});
+    }
+    std::sort(sorted_verbs.rbegin(), sorted_verbs.rend());
+    for (size_t i = 0; i < std::min(size_t(10), sorted_verbs.size()); i++) {
+        std::cout << sorted_verbs[i].second << ": " << sorted_verbs[i].first 
+                  << " uses\n";
+        std::cout << "  Sample locations: ";
+        size_t loc_count = 0;
+        for (const auto& loc : verb_locations[sorted_verbs[i].second]) {
+            if (loc_count++ < 3) std::cout << "'" << loc << "' ";
+        }
+        std::cout << "\n";
+    }
+    
+    std::cout << "\n2. Location Analysis:\n";
+    std::cout << "Common location endings:\n";
+    for (const auto& [ending, locations] : location_endings) {
+        std::cout << ending << ": " << locations.size() << " unique locations\n";
+        std::cout << "  Examples: ";
+        size_t count = 0;
+        for (const auto& loc : locations) {
+            if (count++ < 3) std::cout << "'" << loc << "' ";
+        }
+        std::cout << "\n";
+    }
+    
+    std::cout << "\n3. Job Category Analysis:\n";
+    for (const auto& [category, stats] : job_stats) {
+        std::cout << "\nCategory: " << category << "\n";
+        std::cout << "  Total jobs: " << stats.job_titles.size() << "\n";
+        
+        // Most common job titles
+        std::map<std::string, int> title_counts;
+        for (const auto& title : stats.job_titles) {
+            title_counts[title]++;
+        }
+        std::cout << "  Common titles: ";
+        std::vector<std::pair<int, std::string>> sorted_titles;
+        for (const auto& [title, count] : title_counts) {
+            sorted_titles.push_back({count, title});
+        }
+        std::sort(sorted_titles.rbegin(), sorted_titles.rend());
+        for (size_t i = 0; i < std::min(size_t(3), sorted_titles.size()); i++) {
+            std::cout << "'" << sorted_titles[i].second << "' (" 
+                      << sorted_titles[i].first << ") ";
+        }
+        std::cout << "\n";
+        
+        // Most common verbs for this category
+        std::map<std::string, int> cat_verb_counts;
+        for (const auto& verb : stats.common_verbs) {
+            cat_verb_counts[verb]++;
+        }
+        std::cout << "  Common verbs: ";
+        std::vector<std::pair<int, std::string>> sorted_cat_verbs;
+        for (const auto& [verb, count] : cat_verb_counts) {
+            sorted_cat_verbs.push_back({count, verb});
+        }
+        std::sort(sorted_cat_verbs.rbegin(), sorted_cat_verbs.rend());
+        for (size_t i = 0; i < std::min(size_t(3), sorted_cat_verbs.size()); i++) {
+            std::cout << "'" << sorted_cat_verbs[i].second << "' (" 
+                      << sorted_cat_verbs[i].first << ") ";
+        }
+        std::cout << "\n";
+    }
 }

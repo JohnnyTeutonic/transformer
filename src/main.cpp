@@ -13,6 +13,7 @@ const float INITIAL_LEARNING_RATE = 0.001f;
 float learning_rate = INITIAL_LEARNING_RATE;
 float prev_loss = std::numeric_limits<float>::max();
 size_t global_step = 0;
+size_t no_improvement_count = 0;
 
 int main(int argc, char* argv[]) {
     std::cout << "entering main" << std::endl;
@@ -398,7 +399,17 @@ int main(int argc, char* argv[]) {
                 transformer.backward(lm_head_gradients, flattened_batch, learning_rate);
 
                 // Update tracking variables
-                prev_loss = batch_loss;
+                float current_loss = batch_loss;
+                if (current_loss >= prev_loss) {
+                    no_improvement_count++;
+                    if (no_improvement_count > 10) {
+                        std::cout << "Warning: Loss not improving for " << no_improvement_count 
+                                  << " iterations" << std::endl;
+                    }
+                } else {
+                    no_improvement_count = 0;
+                }
+                prev_loss = current_loss;
                 epoch_loss += batch_loss;
                 global_step++;
 
