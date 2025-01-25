@@ -414,7 +414,47 @@ void Transformer::backward(std::vector<Matrix>& outputs, const Matrix& target_di
     if (use_fp16) {
         HalfPrecisionTraining::convert_to_fp16(grad);
     }
-    // ... rest of batch implementation
+
+    // Calculate initial gradient (cross entropy derivative)
+    grad = grad - target_distribution;
+
+    // Backward pass through each layer in reverse order
+    for (int i = config.num_layers - 1; i >= 0; --i) {
+        // Backward through layer normalization
+        grad = layers[i]->attention_ln->backward(grad, learning_rate);
+
+        // Backward through feed forward network
+        grad = layers[i]->feed_forward->backward(grad, learning_rate);
+        
+        // Backward through second layer norm
+        grad = layers[i]->ffn_ln->backward(grad, layers[i]->forward(layers[i]->attention_ln->forward(layers[i]->attention_ln->forward(grad)), layers[i]->attention_ln->forward(grad), m_kv_caches[i]));
+
+        // Backward through multi-head attention
+        grad = layers[i]->self_attention->backward(grad, layers[i]->attention_ln->forward(grad), layers[i]->forward(layers[i]->attention_ln->forward(layers[i]->attention_ln->forward(grad)), layers[i]->attention_ln->forward(grad), m_kv_caches[i]));
+
+        if (use_fp16) {
+            // Convert gradients back to FP16 for memory efficiency
+            HalfPrecisionTraining::convert_to_fp16(grad);
+        }
+    }
+
+    // Backward through input embedding and position encoding
+    grad = token_embedding->backward(grad, learning_rate);
+    
+    // Update parameters using accumulated gradients
+    for (int i = 0; i < config.num_layers; ++i) {
+        layers[i]->self_attention->update_parameters(learning_rate);
+        layers[i]->feed_forward->update_parameters(learning_rate);
+        layers[i]->attention_ln->update_parameters(learning_rate);
+        layers[i]->ffn_ln->update_parameters(learning_rate);
+    }
+    
+    token_embedding->update_parameters(learning_rate);
+
+    // Clear any temporary GPU memory
+    if (cuda::is_initialized()) {
+        cuda::cleanup_temporary_memory();
+    }
 }
 
 void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens,

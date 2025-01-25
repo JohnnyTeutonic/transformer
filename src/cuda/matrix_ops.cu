@@ -58,7 +58,7 @@ namespace cuda {
 
         // Get the global cuBLAS handle
         extern cublasHandle_t cublas_handle;
-
+        printf("cuBLAS handle obtained\n");
         // Perform matrix multiplication using cuBLAS
         // Note: cuBLAS uses column-major order, so we compute C = B^T * A^T
         CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
@@ -67,7 +67,7 @@ namespace cuda {
                                 d_A, K,  // Leading dimension of A is K
                                 &beta,
                                 d_C, N));  // Leading dimension of C is N
-
+        printf("Matrix multiplication completed\n");
         return C_gpu;
     }
 

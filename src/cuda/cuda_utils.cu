@@ -46,22 +46,22 @@ namespace cuda {
         if (!is_initialized()) {
             initialize_cuda();
         }
-
+        printf("GPU matrix multiplication initialized\n");
         // Get dimensions
         const int M = A.rows();
         const int N = B.cols();
         const int K = A.cols();
-
+        printf("Dimensions: %d, %d, %d\n", M, N, K);
         // Create result matrix
         Matrix C(M, N);
 
         // Set scaling factors
         const float alpha = 1.0f;
         const float beta = 0.0f;
-
+        printf("Scaling factors set\n");
         // Get the global cuBLAS handle
         extern cublasHandle_t cublas_handle;
-
+        printf("cuBLAS handle obtained\n");
         // Perform matrix multiplication
         CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                                 N, M, K, &alpha,
