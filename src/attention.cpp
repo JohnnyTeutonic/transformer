@@ -176,14 +176,14 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
         debug_matrix("Value Projection", V);
         
         // Get dimensions
-        size_t batch_size = input.rows();
-        size_t hidden_size = input.cols();  // This should be the model's hidden_size
-        size_t seq_len = batch_size;  // For self-attention, sequence length equals batch size
+        size_t batch_size = 32;  // Keep the actual batch size
+        size_t seq_len = input.rows() / batch_size;  // Calculate sequence length per batch
+        size_t hidden_size = input.cols();  // Model's hidden size
         
 #ifdef USE_CUDA
         try {
             // Use CUDA for attention computation
-            Matrix scores(batch_size, batch_size);  // Full sequence length for attention
+            Matrix scores(batch_size * seq_len, batch_size * seq_len);  // Full attention matrix
             
             // Batch compute attention scores and softmax
             cuda::compute_attention_scores(Q, K, scores, 1.0f / std::sqrt(head_dim), num_heads);
@@ -197,7 +197,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
             debug_matrix("Softmax Attention Scores", scores);
             
             // Single synchronization point after main computation
-            Matrix output(batch_size, hidden_size);
+            Matrix output(batch_size * seq_len, hidden_size);
             cuda::attention_forward(Q, K, V, output, batch_size, num_heads, seq_len);
             debug_matrix("Attention Output", output);
             
@@ -821,7 +821,7 @@ Tensor MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     }
 
     // Initialize output matrix
-    Matrix output(Q.rows(), V.cols(), 0.0f);
+    Matrix output(batch_size * seq_len, hidden_size);
 
     // Block size for processing (adjust based on available memory)
     const size_t BLOCK_SIZE = 1024; // Process 1024 rows at a time

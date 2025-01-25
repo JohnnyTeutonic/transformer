@@ -24,8 +24,8 @@ public:
     // Vocabulary size
     size_t vocab_size() const;
 
-    // Initialize with model type
-    void initialize(const std::string& encoding_name = "cl100k_base");
+    // Initialize with custom GPT-2 vocabulary
+    void initialize(const std::string& encoding_name = "gpt2");
 
     bool is_initialized() const { return tiktoken_ != nullptr; }
 

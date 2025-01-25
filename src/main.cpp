@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <random>
 #include "../include/tokenizer.hpp"
+#include <chrono>
 
 // Add necessary forward declarations and structures
 std::unique_ptr<Tokenizer> tokenizer;
@@ -14,6 +15,29 @@ float learning_rate = INITIAL_LEARNING_RATE;
 float prev_loss = std::numeric_limits<float>::max();
 size_t global_step = 0;
 size_t no_improvement_count = 0;
+size_t completed_iterations = 0;
+const size_t MAX_OUTPUT_ITERATIONS = 2;
+const float GRADIENT_CLIP_THRESHOLD = 1.0f;
+const float L1_REGULARIZATION = 0.01f;  // Sparsity regularization
+const size_t INCREASED_BATCH_SIZE = 32;  // Increased from 1
+float batch_loss = 0.0f;
+
+// Add before the gradient scaling code
+float calculateGradientMagnitude(const std::vector<Matrix>& gradients) {
+    float total_magnitude = 0.0f;
+    int count = 0;
+    
+    for (const auto& grad : gradients) {
+        for (size_t i = 0; i < grad.rows(); i++) {
+            for (size_t j = 0; j < grad.cols(); j++) {
+                total_magnitude += std::abs(grad(i, j));
+                count++;
+            }
+        }
+    }
+    
+    return count > 0 ? total_magnitude / count : 0.0f;
+}
 
 int main(int argc, char* argv[]) {
     std::cout << "entering main" << std::endl;
@@ -64,6 +88,10 @@ int main(int argc, char* argv[]) {
         // Update vocabulary size in config based on tokenizer
         config.vocab_size = tokenizer->vocab_size();
         std::cout << "Using vocabulary size: " << config.vocab_size << std::endl;
+
+        // Update batch size in config
+        config.batch_size = INCREASED_BATCH_SIZE;
+        std::cout << "Using increased batch size: " << config.batch_size << std::endl;
 
         // Initialize model with updated config
         Transformer transformer(config);
@@ -159,11 +187,11 @@ int main(int argc, char* argv[]) {
         for (size_t epoch = 0; epoch < config.num_epochs; ++epoch) {
             std::cout << "Epoch " << epoch + 1 << "/" << config.num_epochs << "\n";
             float epoch_loss = 0.0f;
-            size_t total_batches =
+            size_t num_batches =
                 (training_pairs.size() + config.batch_size - 1) / config.batch_size;
 
             // Process batches
-            for (size_t batch = 0; batch < total_batches; ++batch) {
+            for (size_t batch = 0; batch < num_batches; ++batch) {
                 metrics.start_timer("batch_processing");
 
                 size_t start_idx = batch * config.batch_size;
@@ -179,7 +207,7 @@ int main(int argc, char* argv[]) {
                     // Consider both input and target sequence lengths
                     max_seq_len = std::max({max_seq_len, input_tokens.size(), target_tokens.size()});
                 }
-                std::cout << "\n=== Processing Batch " << batch + 1 << " ===\n";
+                std::cout << "\n=== Processing Batch " << batch << " ===\n";
 
                 // Create batch with validation
                 std::vector<std::vector<int>> input_batch;
@@ -255,6 +283,8 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
+                auto batch_start_time = std::chrono::high_resolution_clock::now();
+
                 // Create target distribution for entire batch using only valid sequences
                 Matrix target_distribution = Utils::create_batch_target_distribution(
                     valid_target_batch, *tokenizer, config.vocab_size, max_seq_len);
@@ -262,12 +292,9 @@ int main(int argc, char* argv[]) {
                 // Process the batch as a single sequence
                 std::vector<int> flattened_batch;
                 flattened_batch.reserve(valid_input_batch.size() * max_seq_len);
-
-                // Flatten the batch into a single sequence
                 for (const auto& sequence : valid_input_batch) {
                     flattened_batch.insert(flattened_batch.end(), sequence.begin(), sequence.end());
                 }
-                std::cout << "Flattened batch size: " << flattened_batch.size() << " tokens\n";
 
                 // Forward pass with the flattened batch
                 transformer.set_training(true);
@@ -276,125 +303,43 @@ int main(int argc, char* argv[]) {
                 metrics.stop_timer("forward_pass");
 
                 metrics.record_memory_usage(hidden_states.bytes());
-
                 Matrix logits = lm_head->project_to_vocab(hidden_states);
 
-                // Compute loss and its gradients for all tokens in sequence
-                float batch_loss = Utils::compute_batch_loss(logits, target_distribution);
+                // Only print predictions every 50 batches to reduce output
+                if (batch % 50 == 0) {
+                    std::cout << "\n=== Batch " << batch << " Status ===\n";
+                    std::cout << "Batch size: " << valid_input_batch.size() << " sequences\n";
+                    std::cout << "Total tokens: " << flattened_batch.size() << "\n";
+                    std::cout << "Hidden states shape: " << hidden_states.rows() << "x" << hidden_states.cols() << "\n";
+                    std::cout << "Memory usage: " << (hidden_states.bytes() / 1024.0f / 1024.0f) << " MB\n";
+                    
+                    // Print sample predictions
+                    std::cout << "\nSample predictions:\n";
+                    Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
+                }
 
-                // Compute softmax gradients for each token in the sequence
-                Matrix loss_gradients = Matrix(logits.rows(), logits.cols(), 0.0f);
-                for (size_t i = 0; i < logits.rows(); i++) {
-                    // Compute softmax for this token's logits
-                    std::vector<float> token_logits;
-                    float max_logit = -std::numeric_limits<float>::infinity();
+                float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
 
-                    for (size_t j = 0; j < config.vocab_size; j++) {
-                        float logit = logits(i, j);
-                        token_logits.push_back(logit);
-                        max_logit = std::max(max_logit, logit);
+                // Add L1 regularization to encourage sparsity
+                float l1_loss = 0.0f;
+                for (size_t i = 0; i < hidden_states.rows(); i++) {
+                    for (size_t j = 0; j < hidden_states.cols(); j++) {
+                        l1_loss += std::abs(hidden_states(i, j));
                     }
+                }
+                batch_loss += L1_REGULARIZATION * l1_loss;
 
-                    float sum_exp = 0.0f;
-                    std::vector<float> exp_logits(config.vocab_size);
-
+                // First calculate the loss gradients
+                Matrix loss_gradients(current_batch_size, config.vocab_size);
+                for (size_t i = 0; i < current_batch_size; i++) {
                     for (size_t j = 0; j < config.vocab_size; j++) {
-                        exp_logits[j] = std::exp(token_logits[j] - max_logit);
-                        sum_exp += exp_logits[j];
-                    }
-
-                    // Compute gradients for cross-entropy loss
-                    float scaling_factor = 100.0f;  // Base scaling factor
-                    size_t non_pad_tokens = 0;
-
-                    // First pass to count non-padding tokens
-                    for (size_t j = 0; j < config.vocab_size; j++) {
-                        if (target_distribution(i, j) > 0.0f && j != tokenizer->get_pad_token_id()) {
-                            non_pad_tokens++;
-                        }
-                    }
-
-                    // Adjust scaling factor based on token density
-                    if (non_pad_tokens > 0) {
-                        scaling_factor *= std::sqrt(float(config.vocab_size) / non_pad_tokens);
-                    }
-
-                    for (size_t j = 0; j < config.vocab_size; j++) {
-                        float softmax_output = exp_logits[j] / sum_exp;
-                        float gradient = 0.0f;
-                        
-                        // Only compute meaningful gradients for non-padding tokens
-                        if (j != tokenizer->get_pad_token_id()) {
-                            gradient = (softmax_output - target_distribution(i, j)) * scaling_factor;
-                            // Clip gradients to reasonable range
-                            gradient = std::max(std::min(gradient, 1.0f), -1.0f);
-                        }
-                        loss_gradients(i, j) = gradient;
+                        float predicted = logits(i, j);
+                        float target = target_distribution(i, j);
+                        loss_gradients(i, j) = predicted - target;
                     }
                 }
 
-                // Log gradient and token statistics
-                float total_grad_magnitude = 0.0f;
-                float max_grad_magnitude = 0.0f;
-                size_t total_tokens = loss_gradients.rows() * loss_gradients.cols();
-                size_t non_padding_tokens = 0;
-
-                for (size_t i = 0; i < loss_gradients.rows(); i++) {
-                    for (size_t j = 0; j < loss_gradients.cols(); j++) {
-                        float grad_magnitude = std::abs(loss_gradients(i, j));
-                        if (grad_magnitude > 0.0f) {  // Count non-zero gradients
-                            total_grad_magnitude += grad_magnitude;
-                            max_grad_magnitude = std::max(max_grad_magnitude, grad_magnitude);
-                            non_padding_tokens++;
-                        }
-                    }
-                }
-
-                // Calculate average only over non-padding tokens
-                float avg_grad_magnitude = non_padding_tokens > 0 ? 
-                    total_grad_magnitude / non_padding_tokens : 0.0f;
-
-                std::cout << "Gradient Statistics:\n"
-                          << "  Average magnitude (non-padding): " << avg_grad_magnitude << "\n"
-                          << "  Maximum magnitude: " << max_grad_magnitude << "\n"
-                          << "  Non-padding tokens: " << non_padding_tokens << "/" << total_tokens 
-                          << " (" << (100.0f * non_padding_tokens / total_tokens) << "%)\n";
-
-                // More dynamic learning rate adjustment
-                float loss_ratio = batch_loss / (prev_loss + 1e-10f);
-                float grad_scale = std::min(avg_grad_magnitude, 1.0f);  // Scale based on gradient magnitude
-                
-                // Adjust thresholds based on training progress
-                float upper_threshold = 1.05f - (0.01f * std::min(global_step / 1000.0f, 0.04f));  // Starts at 1.05, decreases to 1.01
-                float lower_threshold = 0.95f + (0.01f * std::min(global_step / 1000.0f, 0.04f));  // Starts at 0.95, increases to 0.99
-                
-                if (loss_ratio > upper_threshold) {
-                    // More aggressive decrease when loss increases significantly
-                    float decrease_factor = 0.8f + (0.15f * grad_scale);  // Between 0.8 and 0.95
-                    learning_rate *= decrease_factor;
-                    std::cout << "Decreasing learning rate by factor " << decrease_factor 
-                              << " (loss ratio: " << loss_ratio << ")\n";
-                } else if (loss_ratio < lower_threshold) {
-                    // More aggressive increase when loss decreases significantly
-                    float increase_factor = 1.2f - (0.15f * grad_scale);  // Between 1.05 and 1.2
-                    learning_rate *= increase_factor;
-                    std::cout << "Increasing learning rate by factor " << increase_factor 
-                              << " (loss ratio: " << loss_ratio << ")\n";
-                }
-                
-                // Wider bounds for learning rate
-                float min_lr = 1e-6f;
-                float max_lr = 5e-2f;
-                if (global_step < 100) {  // Allow larger learning rates early in training
-                    max_lr = 1e-1f;
-                }
-                
-                learning_rate = std::max(min_lr, std::min(learning_rate, max_lr));
-                
-                std::cout << "Learning rate adjusted to: " << learning_rate 
-                          << " (loss ratio: " << loss_ratio << ")\n";
-
-                // Backpropagate through the model
+                // Then do the backward pass
                 Matrix lm_head_gradients = lm_head->backward(loss_gradients);
                 transformer.backward(lm_head_gradients, flattened_batch, learning_rate);
 
@@ -415,49 +360,70 @@ int main(int argc, char* argv[]) {
 
                 metrics.stop_timer("batch_processing");
 
-                // Make predictions after each batch
-                std::string test_input = "I go to";
-                std::string processed_input = test_input;
-                tokenizer->preprocess_text(processed_input);
-                std::vector<int> test_tokens = tokenizer->encode(processed_input);
-                
-                // Get model prediction (in evaluation mode)
-                transformer.set_training(false);
-                Matrix test_hidden = transformer.forward(test_tokens, test_input, *tokenizer);
-                Matrix pred_logits = lm_head->project_to_vocab(test_hidden);
-                transformer.set_training(true);  // Set back to training mode
-                
-                // Show the top predictions
-                std::cout << "\n=== Batch " << batch + 1 << " Predictions for '" << test_input << "' ===\n";
-                Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
-                std::cout << "================================================\n";
+                auto batch_end_time = std::chrono::high_resolution_clock::now();
+                auto batch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    batch_end_time - batch_start_time).count();
 
-                // Test additional queries
-                std::vector<std::string> additional_queries = {
-                    "The weather is",
-                    "I want to",
-                    "The cat",
-                    "She likes to"
-                };
+                // Only print if we haven't exceeded max iterations
+                if (completed_iterations < MAX_OUTPUT_ITERATIONS) {
+                    if (batch % 10 == 0) {
+                        std::cout << "\rBatch " << batch << " completed in " << batch_duration 
+                                  << "ms (Loss: " << batch_loss
+                                  << ", LR: " << learning_rate << ")" << std::flush;
+                    }
 
-                for (const auto& query : additional_queries) {
-                    processed_input = query;
+                    // Make predictions after each batch
+                    std::string test_input = "I go to";
+                    std::string processed_input = test_input;
                     tokenizer->preprocess_text(processed_input);
-                    test_tokens = tokenizer->encode(processed_input);
+                    std::vector<int> test_tokens = tokenizer->encode(processed_input);
                     
+                    // Get model prediction (in evaluation mode)
                     transformer.set_training(false);
-                    test_hidden = transformer.forward(test_tokens, query, *tokenizer);
-                    pred_logits = lm_head->project_to_vocab(test_hidden);
-                    transformer.set_training(true);
+                    Matrix test_hidden = transformer.forward(test_tokens, test_input, *tokenizer);
+                    Matrix pred_logits = lm_head->project_to_vocab(test_hidden);
+                    transformer.set_training(true);  // Set back to training mode
                     
-                    std::cout << "\n=== Batch " << batch + 1 << " Predictions for '" << query << "' ===\n";
+                    // Show the top predictions
+                    std::cout << "\n=== Batch " << batch << " Predictions for '" << test_input << "' ===\n";
                     Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
                     std::cout << "================================================\n";
+
+                    // Test additional queries
+                    std::vector<std::string> additional_queries = {
+                        "The weather is",
+                        "I want to",
+                        "The cat",
+                        "She likes to"
+                    };
+
+                    for (const auto& query : additional_queries) {
+                        processed_input = query;
+                        tokenizer->preprocess_text(processed_input);
+                        test_tokens = tokenizer->encode(processed_input);
+                        
+                        transformer.set_training(false);
+                        test_hidden = transformer.forward(test_tokens, query, *tokenizer);
+                        pred_logits = lm_head->project_to_vocab(test_hidden);
+                        transformer.set_training(true);
+                        
+                        std::cout << "\n=== Batch " << batch << " Predictions for '" << query << "' ===\n";
+                        Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
+                        std::cout << "================================================\n";
+                    }
+                }
+
+                // Update iteration counter at the end of each epoch
+                if (batch == num_batches - 1) {
+                    completed_iterations++;
+                    if (completed_iterations == MAX_OUTPUT_ITERATIONS) {
+                        std::cout << "\nReached " << MAX_OUTPUT_ITERATIONS << " iterations. Suppressing further output.\n";
+                    }
                 }
 
                 // Print progress and metrics every 10 batches
-                if ((batch + 1) % 10 == 0 || batch + 1 == total_batches) {
-                    std::cout << "\rBatch " << batch + 1 << "/" << total_batches << " in epoch "
+                if ((batch + 1) % 10 == 0 || batch + 1 == num_batches) {
+                    std::cout << "\rBatch " << batch + 1 << "/" << num_batches << " in epoch "
                               << epoch + 1 << " (Loss: " << batch_loss
                               << ", Avg Loss: " << epoch_loss / (batch + 1)
                               << ", LR: " << learning_rate << ")" << std::flush;
@@ -473,7 +439,7 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.num_epochs
-                      << " (Loss: " << epoch_loss / total_batches << ")" << std::endl;
+                      << " (Loss: " << epoch_loss / num_batches << ")" << std::endl;
 
             // Save checkpoint
             if ((epoch + 1) % checkpoint_frequency == 0) {
@@ -491,8 +457,8 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Try to save
-                if (!model_saver.saveCheckpoint(transformer, save_directory, model_name, epoch + 1,
-                                                epoch_loss)) {
+                if (!model_saver.saveCheckpoint(transformer, save_directory, model_name, 
+                                                 global_step, epoch_loss)) {
                     std::cerr << "Failed to save checkpoint, but continuing training" << std::endl;
                     // Don't exit, just continue training
                 }

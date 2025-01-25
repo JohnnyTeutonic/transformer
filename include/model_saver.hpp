@@ -42,7 +42,7 @@ class ModelSaver {
      * @param model_name Name of the model
      * @return true if save successful, false otherwise
      */
-    bool saveModel(const Transformer& transformer, const std::string& directory,
+    bool saveModel(Transformer& transformer, const std::string& directory,
                    const std::string& model_name);
 
     /**
@@ -78,8 +78,8 @@ class ModelSaver {
      * @param loss Current loss value
      * @return true if checkpoint saved successfully
      */
-    bool saveCheckpoint(const Transformer& transformer, const std::string& directory,
-                        const std::string& model_name, int epoch, float loss);
+    bool saveCheckpoint(Transformer& transformer, const std::string& directory,
+                        const std::string& model_name, size_t step, float loss);
 
     /**
      * @brief Loads the most recent checkpoint.

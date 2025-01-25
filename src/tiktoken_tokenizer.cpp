@@ -2,13 +2,38 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
 
 TiktokenTokenizer::TiktokenTokenizer() = default;
 
 void TiktokenTokenizer::initialize(const std::string& encoding_name) {
     try {
-        std::cout << "Initializing tiktoken with encoding: " << encoding_name << std::endl;
-        tiktoken_ = std::make_unique<tiktoken::Encoding>(encoding_name);
+        std::cout << "Initializing custom GPT-2 tokenizer" << std::endl;
+        
+        // Load vocabulary file
+        std::filesystem::path vocab_path = "../build/tiktoken_data/gpt2.vocab";
+        if (!std::filesystem::exists(vocab_path)) {
+            throw std::runtime_error("GPT-2 vocabulary file not found at: " + vocab_path.string());
+        }
+
+        std::ifstream vocab_file(vocab_path);
+        if (!vocab_file.is_open()) {
+            throw std::runtime_error("Failed to open vocabulary file: " + vocab_path.string());
+        }
+
+        // Create a custom encoding using the vocabulary file
+        tiktoken_ = std::make_unique<tiktoken::Encoding>();
+        
+        // Read and add each token pair
+        std::string line;
+        int token_id = 5;  // Start after special tokens
+        while (std::getline(vocab_file, line)) {
+            if (!line.empty()) {
+                tiktoken_->add_special_token(line, token_id++);
+            }
+        }
+
         std::cout << "Base vocabulary size before special tokens: " << tiktoken_->get_vocab_size() << std::endl;
         setup_special_tokens();
         std::cout << "Final vocabulary size after special tokens: " << tiktoken_->get_vocab_size() << std::endl;

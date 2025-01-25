@@ -88,48 +88,56 @@ Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int
     return target_distribution;
 }
 
-float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distribution) {
-    // Add debug prints
-    std::cout << "\nComputing loss:"
-              << "\nLogits shape: " << logits.rows() << "x" << logits.cols()
-              << "\nTarget shape: " << target_distribution.rows() << "x" 
-              << target_distribution.cols() << std::endl;
-              
-    if (logits.empty() || target_distribution.empty()) {
-        return 0.0f;
-    }
-
+float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, 
+                              const Tokenizer& tokenizer) {
     float total_loss = 0.0f;
-    const size_t batch_size = logits.rows();
-    const size_t vocab_size = logits.cols();
-
-    // Pre-compute max logits and sums for numerical stability
-    std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
-    std::vector<float> sums(batch_size, 0.0f);
-
-    #pragma omp parallel for reduction(+:total_loss)
-    for (size_t i = 0; i < batch_size; ++i) {
-        // Find max logit for numerical stability
-        for (size_t j = 0; j < vocab_size; ++j) {
-            max_logits[i] = std::max(max_logits[i], logits(i, j));
-        }
-
-        // Compute sum of exp(logits - max_logit)
-        for (size_t j = 0; j < vocab_size; ++j) {
-            sums[i] += std::exp(logits(i, j) - max_logits[i]);
-        }
-
-        // Compute cross entropy loss only for non-zero target probabilities
-        for (size_t j = 0; j < vocab_size; ++j) {
-            if (target_distribution(i, j) > 0.0f) {
-                float log_prob = logits(i, j) - max_logits[i] - std::log(sums[i]);
-                total_loss -= target_distribution(i, j) * log_prob;
+    size_t valid_predictions = 0;
+    
+    for (size_t i = 0; i < logits.rows(); ++i) {
+        // Get predicted token sequence
+        std::vector<int> pred_tokens;
+        float max_logit = -std::numeric_limits<float>::infinity();
+        int pred_token = -1;
+        for (size_t j = 0; j < logits.cols(); ++j) {
+            if (logits(i, j) > max_logit) {
+                max_logit = logits(i, j);
+                pred_token = j;
             }
         }
+        
+        // Only compute loss for valid word completions
+        std::string decoded = tokenizer.decode({pred_token});
+        if (!decoded.empty() && decoded[0] != ' ') {  // Likely a subword
+            valid_predictions++;
+            
+            // Compute cross entropy loss
+            float token_loss = 0.0f;
+            float sum_exp = 0.0f;
+            float max_val = -std::numeric_limits<float>::infinity();
+            
+            // Find max for numerical stability
+            for (size_t j = 0; j < logits.cols(); j++) {
+                max_val = std::max(max_val, logits(i, j));
+            }
+            
+            // Compute softmax denominator
+            for (size_t j = 0; j < logits.cols(); j++) {
+                sum_exp += std::exp(logits(i, j) - max_val);
+            }
+            
+            // Compute loss for this token
+            for (size_t j = 0; j < logits.cols(); j++) {
+                if (target_distribution(i, j) > 0.0f) {
+                    token_loss -= target_distribution(i, j) * 
+                                 (logits(i, j) - max_val - std::log(sum_exp));
+                }
+            }
+            
+            total_loss += token_loss;
+        }
     }
-
-    std::cout << "Batch loss: " << total_loss / batch_size << std::endl;
-    return total_loss / batch_size;
+    
+    return valid_predictions > 0 ? total_loss / valid_predictions : 0.0f;
 }
 
 TransformerConfig Utils::load_config(const std::string& config_path) {
@@ -450,145 +458,63 @@ std::vector<std::pair<std::string, float>> Utils::get_multi_token_predictions(
     return predictions;
 }
 
-void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, Transformer& transformer, int k) {
-    const auto& config = transformer.getConfig();
-    size_t total_beam_width = std::max(config.beam_search.beam_size, static_cast<size_t>(k * 3));
-    size_t num_groups = config.beam_search.num_groups;
-    size_t beams_per_group = config.beam_search.beams_per_group;
-    
-    BeamSearch beam_search(
-        beams_per_group,
-        config.beam_search.length_penalty,
-        config.beam_search.temperature,
-        config.beam_search.diversity_strength,
-        config.beam_search.top_k,
-        config.beam_search.top_p
-    );
+void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, 
+                                Transformer& transformer, int k) {
+    // Add subword analysis
+    std::cout << "\nInput tokenization analysis:\n";
+    std::string test_input = "The weather is";
+    std::vector<int> tokens = tokenizer.encode(test_input);
+    std::cout << "Tokens: ";
+    for (int token : tokens) {
+        std::cout << "'" << tokenizer.decode({token}) << "' ";
+    }
+    std::cout << "\n";
 
-    // Store predictions from each group
-    std::vector<std::vector<BeamSearch::Hypothesis>> group_hypotheses;
-    std::vector<float> initial_logits;
-    initial_logits.reserve(logits.cols());
-    
-    // Get original input
-    std::vector<int> original_input = transformer.get_last_input();
-    std::string original_query = transformer.get_last_query();
-    size_t input_length = original_input.size();
+    // Track subword combinations
+    std::map<std::string, float> complete_words;
+    std::vector<std::pair<float, std::vector<int>>> top_sequences;
 
-    // Run beam search for each group with different initial conditions
-    for (size_t group = 0; group < num_groups; group++) {
-        // Reset and prepare initial logits with group-specific noise
-        initial_logits.clear();
-        for (int j = 0; j < logits.cols(); j++) {
-            float base_logit = logits(logits.rows() - 1, j) / config.beam_search.initial_temperature;
-            // Add group-specific noise to encourage diversity between groups
-            float group_noise = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 
-                              config.beam_search.initial_noise_scale * 
-                              (1.0f + group * 0.5f);  // Increase noise for later groups
-            initial_logits.push_back(base_logit + group_noise);
-        }
+    // Try to build complete words from subword combinations
+    for (size_t i = 0; i < logits.cols(); ++i) {
+        float score = logits(logits.rows() - 1, i);
+        std::string token = tokenizer.decode({static_cast<int>(i)});
         
-        // Create next token function with group-specific noise - add config to capture list
-        auto next_token_fn = [&transformer, &tokenizer, group, &config](const std::vector<int>& tokens) -> std::vector<float> {
-            try {
-                Matrix next_hidden = transformer.forward(tokens, "", tokenizer, true);
-                Matrix next_logits = transformer.get_lm_head()->project_to_vocab(next_hidden);
-                
-                std::vector<float> logits_vec;
-                logits_vec.reserve(next_logits.cols());
-                for (int j = 0; j < next_logits.cols(); j++) {
-                    float logit = next_logits(next_logits.rows() - 1, j);
-                    // Add group-specific noise
-                    float noise = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 
-                                config.beam_search.token_noise_scale * 
-                                (1.0f + group * 0.3f);  // Increase noise for later groups
-                    logits_vec.push_back(logit + noise);
-                }
-                return logits_vec;
-            } catch (const std::exception& e) {
-                std::cerr << "Error in next_token_fn: " << e.what() << std::endl;
-                return std::vector<float>();
-            }
-        };
-
-        // Run beam search for this group
-        const size_t MAX_LENGTH = input_length + 4;
-        auto group_results = beam_search.search(
-            initial_logits, next_token_fn, MAX_LENGTH, tokenizer.get_eos_token_id());
-        group_hypotheses.push_back(group_results);
-    }
-
-    // Clear cache after all groups are done
-    transformer.clear_kv_cache();
-
-    // Merge and process results from all groups
-    std::vector<std::pair<std::string, float>> valid_predictions;
-    std::unordered_set<std::string> used_first_tokens;
-
-    // Process hypotheses from each group
-    for (const auto& group_results : group_hypotheses) {
-        for (const auto& hyp : group_results) {
-            try {
-                if (hyp.tokens.size() <= input_length) continue;
-                
-                // Get generated tokens (excluding input)
-                std::vector<int> generated_tokens(
-                    hyp.tokens.begin() + input_length,
-                    hyp.tokens.end()
-                );
-                
-                // Decode tokens individually and join with spaces
-                std::string decoded;
-                for (size_t i = 0; i < generated_tokens.size(); i++) {
-                    std::string token = tokenizer.decode({generated_tokens[i]});
-                    if (!token.empty()) {
-                        if (!decoded.empty() && token[0] != ' ') {
-                            decoded += " ";
-                        }
-                        decoded += token;
-                    }
-                }
-                
-                if (decoded.empty()) continue;
-                
-                // Add initial space if needed
-                if (decoded[0] != ' ') {
-                    decoded = " " + decoded;
-                }
-                
-                // Get first token for diversity check
-                size_t space_pos = decoded.find(' ', 1);
-                std::string first_token = space_pos == std::string::npos ? 
-                                        decoded.substr(1) : decoded.substr(1, space_pos - 1);
-                
-                // Only add if we haven't seen this first token
-                if (used_first_tokens.find(first_token) == used_first_tokens.end()) {
-                    used_first_tokens.insert(first_token);
-                    valid_predictions.push_back({decoded, hyp.score});
-                    
-                    if (valid_predictions.size() >= k) break;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Error processing hypothesis: " << e.what() << std::endl;
-                continue;
+        // Look ahead for potential next subwords
+        std::vector<int> sequence = {static_cast<int>(i)};
+        std::string current_word = token;
+        
+        // Try combining with next likely tokens
+        Matrix next_hidden = transformer.forward(sequence, "", tokenizer);
+        Matrix next_logits = transformer.get_lm_head()->project_to_vocab(next_hidden);
+        
+        // Get top 5 next tokens
+        std::vector<std::pair<float, int>> next_tokens;
+        for (size_t j = 0; j < next_logits.cols(); ++j) {
+            next_tokens.push_back({next_logits(0, j), j});
+        }
+        std::partial_sort(next_tokens.begin(), next_tokens.begin() + 5, next_tokens.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+            
+        // Try combining with each next token
+        for (size_t j = 0; j < 5; ++j) {
+            std::string combined = current_word + tokenizer.decode({next_tokens[j].first});
+            if (!combined.empty() && combined[0] != ' ') {  // Likely a subword continuation
+                complete_words[combined] = score + next_tokens[j].first;
             }
         }
-        if (valid_predictions.size() >= k) break;
     }
 
-    // Print predictions
-    std::cout << "\nQuery: \"" << original_query << "\"" << std::endl;
-    std::cout << "Top " << k << " predicted sequences:" << std::endl;
-    
-    for (size_t i = 0; i < valid_predictions.size(); i++) {
-        const auto& [prediction, score] = valid_predictions[i];
-        std::cout << i + 1 << ". \"" << prediction << "\" (score=" 
-                 << std::fixed << std::setprecision(4) << score << ")" << std::endl;
+    // Sort and print complete word predictions
+    std::vector<std::pair<float, std::string>> sorted_words;
+    for (const auto& [word, score] : complete_words) {
+        sorted_words.push_back({score, word});
     }
+    std::sort(sorted_words.rbegin(), sorted_words.rend());
 
-    if (valid_predictions.size() < k) {
-        std::cout << "\nWarning: Only found " << valid_predictions.size() 
-                 << " unique predictions." << std::endl;
+    std::cout << "\nTop complete word predictions:\n";
+    for (size_t i = 0; i < std::min(size_t(k), sorted_words.size()); ++i) {
+        std::cout << i + 1 << ". \"" << sorted_words[i].second 
+                  << "\" (score=" << sorted_words[i].first << ")\n";
     }
 }
 
@@ -687,8 +613,8 @@ float Utils::evaluate_validation(
                 last_token_logits(0, i) = logits(logits.rows() - 1, i);
             }
 
-            float loss = compute_batch_loss(last_token_logits, target_distribution);
-            total_loss += loss;
+            float batch_loss = Utils::compute_batch_loss(last_token_logits, target_distribution, tokenizer);
+            total_loss += batch_loss;
 
             // Check if prediction matches target
             if (!target_tokens.empty() && predicted_token == target_tokens.back()) {
@@ -1136,4 +1062,34 @@ void Utils::analyze_training_patterns(const std::vector<std::pair<std::string, s
         }
         std::cout << "\n";
     }
+}
+
+bool is_valid_completion(const std::string& text, const Tokenizer& tokenizer) {
+    // Tokenize and check if it forms valid words
+    std::vector<int> tokens = tokenizer.encode(text);
+    std::string reconstructed = tokenizer.decode(tokens);
+    
+    // Check if reconstruction matches original (indicates valid words)
+    if (reconstructed != text) {
+        return false;
+    }
+    
+    // Check if it follows location pattern
+    std::vector<std::string> words;
+    std::stringstream ss(text);
+    std::string word;
+    while (ss >> word) {
+        words.push_back(word);
+    }
+    
+    // Check for common location endings
+    static const std::vector<std::string> endings = {
+        "lab", "room", "center", "studio", "office", "facility"
+    };
+    
+    if (!words.empty()) {
+        std::string last_word = words.back();
+        return std::find(endings.begin(), endings.end(), last_word) != endings.end();
+    }
+    return false;
 }

@@ -491,6 +491,11 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
     CUDA_CHECK(cudaGetLastError());
     cudaDeviceSynchronize();
     
+    // Clear activations after use
+    if (!training) {
+        m_layer_activations.clear();
+    }
+    
     return hidden_states;
 }
 

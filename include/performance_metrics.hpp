@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
 
 /**
  * @brief Performance monitoring and profiling for transformer operations.
@@ -28,6 +29,21 @@ class PerformanceMetrics {
     // Memory tracking
     size_t peak_memory_usage;        ///< Maximum memory usage observed
     std::vector<size_t> memory_samples; ///< Historical memory usage data
+
+    // Add memory tracking
+    struct MemoryMetrics {
+        size_t peak_memory_usage = 0;
+        size_t current_memory_usage = 0;
+        
+        void track_allocation(size_t bytes) {
+            current_memory_usage += bytes;
+            peak_memory_usage = std::max(peak_memory_usage, current_memory_usage);
+        }
+        
+        void track_deallocation(size_t bytes) {
+            current_memory_usage -= bytes;
+        }
+    };
 
   public:
     /**
