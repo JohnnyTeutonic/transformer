@@ -6,6 +6,17 @@
 #include <utility>
 #include <vector>
 
+#ifndef PATTERN_METRICS_H
+#define PATTERN_METRICS_H
+
+struct PatternMetrics {
+    float pattern_accuracy;
+    float destination_accuracy;
+    std::vector<std::string> common_mistakes;
+};
+
+#endif
+
 class Utils {
   public:
     static float adjust_learning_rate(float current_lr, float loss_ratio, size_t step);
@@ -34,4 +45,8 @@ class Utils {
     static std::vector<std::string>& get_vocabulary(const Tokenizer& tokenizer);
     static std::vector<std::pair<std::string, float>> get_multi_token_predictions(
         const Matrix& logits, const Tokenizer& tokenizer, int beam_width);
+    static PatternMetrics evaluate_pattern_completion(
+        Transformer& transformer,
+        const Tokenizer& tokenizer,
+        const std::vector<std::pair<std::string, std::string>>& validation_data);
 };

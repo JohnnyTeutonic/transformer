@@ -145,6 +145,16 @@ int main(int argc, char* argv[]) {
         int mask_id = tokenizer->get_mask_token_id();  // Should be 4
         std::cout << "mask_id: " << mask_id << std::endl;
         std::cout << "epochs: " << config.num_epochs << std::endl;
+
+        // Add these test patterns after each validation run
+        std::vector<std::string> test_patterns = {
+            "I go to the",
+            "She walks to the",
+            "He drives to the",
+            "They run to the",
+            "We walk to the"
+        };
+
         for (size_t epoch = 0; epoch < config.num_epochs; ++epoch) {
             std::cout << "Epoch " << epoch + 1 << "/" << config.num_epochs << "\n";
             float epoch_loss = 0.0f;
@@ -511,10 +521,18 @@ int main(int argc, char* argv[]) {
                 std::cout << "\nRunning validation after epoch " << (epoch + 1) << "...\n";
                 float validation_loss =
                     Utils::evaluate_validation(transformer, *tokenizer, validation_data);
-
-                // Log validation results
-                std::cout << "Epoch " << (epoch + 1) << " Validation Loss: " << validation_loss
-                          << std::endl;
+                
+                // Add pattern completion evaluation
+                auto pattern_metrics = Utils::evaluate_pattern_completion(transformer, *tokenizer, validation_data);
+                
+                std::cout << "Pattern Completion Metrics:\n"
+                          << "  Pattern Accuracy: " << (pattern_metrics.pattern_accuracy * 100) << "%\n"
+                          << "  Destination Accuracy: " << (pattern_metrics.destination_accuracy * 100) << "%\n"
+                          << "  Common mistakes:\n";
+                
+                for (const auto& mistake : pattern_metrics.common_mistakes) {
+                    std::cout << "    - \"" << mistake << "\"\n";
+                }
             }
         }
 

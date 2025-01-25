@@ -2,15 +2,15 @@
     "model": {
         "vocab_size": 1665,
         "hidden_size": 128,
-        "num_heads": 8,
-        "num_layers": 4,
+        "num_heads": 4,
+        "num_layers": 2,
         "head_dim": 32,
         "intermediate_size": 256,
         "max_seq_length": 32
     },
     "training": {
-        "batch_size": 32,
-        "num_epochs": 20,
+        "batch_size": 16,
+        "num_epochs": 30,
         "dropout_rate": 0.1,
         "weight_decay": 0.01
     },

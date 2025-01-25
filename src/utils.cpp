@@ -13,6 +13,9 @@
 #include <set>
 #include <unordered_set>
 #include "../include/data_augmentation.hpp"
+#include "components.hpp"
+#include <map>
+#include <limits>
 
 bool starts_with(const std::string& str, const std::string& prefix) {
     return str.size() >= prefix.size() && 
@@ -761,4 +764,75 @@ void from_json(const nlohmann::json& j, TransformerConfig::TokenizerConfig& t) {
     j.at("vocab_size").get_to(t.vocab_size);
     j.at("model_path").get_to(t.model_path);
     j.at("special_tokens").get_to(t.special_tokens);
+}
+
+PatternMetrics Utils::evaluate_pattern_completion(
+    Transformer& transformer,
+    const Tokenizer& tokenizer,
+    const std::vector<std::pair<std::string, std::string>>& validation_data) {
+    
+    PatternMetrics metrics{0.0f, 0.0f, {}};
+    size_t total = 0;
+    size_t pattern_correct = 0;
+    size_t destination_correct = 0;
+    std::map<std::string, int> error_counts;
+
+    transformer.set_training(false);
+    
+    for (const auto& [input, target] : validation_data) {
+        if (!input.ends_with(" to the")) continue;  // Skip non-pattern examples
+        
+        std::string processed_input = input;
+        tokenizer.preprocess_text(processed_input);
+        std::vector<int> input_tokens = tokenizer.encode(processed_input);
+        
+        // Get model prediction
+        Matrix hidden = transformer.forward(input_tokens, input, tokenizer);
+        Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden);
+        
+        // Get top prediction
+        int predicted_token = -1;
+        float max_logit = -std::numeric_limits<float>::infinity();
+        for (size_t i = 0; i < logits.cols(); ++i) {
+            if (logits(logits.rows() - 1, i) > max_logit) {
+                max_logit = logits(logits.rows() - 1, i);
+                predicted_token = i;
+            }
+        }
+        
+        std::string prediction = tokenizer.decode({predicted_token});
+        std::string expected = target;
+        
+        // Check if basic pattern is followed
+        if (prediction.length() > 0 && !prediction.starts_with(" ")) {
+            pattern_correct++;
+        } else {
+            error_counts[prediction]++;
+        }
+        
+        // Check if destination matches
+        if (prediction == expected) {
+            destination_correct++;
+        }
+        
+        total++;
+    }
+    
+    transformer.set_training(true);
+    
+    metrics.pattern_accuracy = total > 0 ? static_cast<float>(pattern_correct) / total : 0.0f;
+    metrics.destination_accuracy = total > 0 ? static_cast<float>(destination_correct) / total : 0.0f;
+    
+    // Get top 3 most common mistakes
+    std::vector<std::pair<int, std::string>> sorted_errors;
+    for (const auto& [error, count] : error_counts) {
+        sorted_errors.push_back({count, error});
+    }
+    std::sort(sorted_errors.rbegin(), sorted_errors.rend());
+    
+    for (size_t i = 0; i < std::min(size_t(3), sorted_errors.size()); ++i) {
+        metrics.common_mistakes.push_back(sorted_errors[i].second);
+    }
+    
+    return metrics;
 }
