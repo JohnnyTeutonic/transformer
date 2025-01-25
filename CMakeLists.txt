@@ -3,22 +3,35 @@ project(transformer CUDA CXX)
 
 # Set C++ and CUDA standards
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD 17)
 
 # Find required packages
 find_package(CUDA REQUIRED)
 enable_language(CUDA)
 
-# Set CUDA paths more explicitly
-set(CUDA_TOOLKIT_ROOT_DIR $ENV{CUDA_PATH} CACHE PATH "CUDA Toolkit location")
-set(CUDA_INCLUDE_DIRS ${CUDA_TOOLKIT_ROOT_DIR}/include CACHE PATH "CUDA Include Directory")
+# Set CUDA paths
+if(DEFINED ENV{CUDA_PATH})
+    set(CUDA_TOOLKIT_ROOT_DIR $ENV{CUDA_PATH})
+else()
+    set(CUDA_TOOLKIT_ROOT_DIR "/usr/local/cuda")
+endif()
 
-# Set minimal CUDA flags needed for compilation
+# Set CUDA include paths
+set(CUDA_INCLUDE_DIRS ${CUDA_TOOLKIT_ROOT_DIR}/include)
+
+# Set basic CUDA flags with C++17 support
 set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS}
-    -O3
-    --expt-relaxed-constexpr
-    -gencode arch=compute_60,code=sm_60
+    "-O3"
+    "-std=c++17"
+    "-Xcompiler=-fPIC"
+    "-arch=sm_60"
+    "--use_fast_math"
+    "--expt-relaxed-constexpr"
+    "--extended-lambda"
 )
+
+# Set C++17 for both host and device code
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --std=c++17")
 
 # Include FetchContent for downloading dependencies
 include(FetchContent)
@@ -46,10 +59,9 @@ add_definitions(-DUSE_CUDA)
 # Include directories
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/include/cuda
     ${CMAKE_SOURCE_DIR}/third_party
     ${CUDA_INCLUDE_DIRS}
-    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-    ${JSON_INC_DIR}
 )
 
 # Add CUDA source files
@@ -71,9 +83,9 @@ set(CUDA_SOURCES
 # Set CUDA specific compile options
 foreach(cuda_source ${CUDA_SOURCES})
     set_source_files_properties(${cuda_source} PROPERTIES
+        LANGUAGE CUDA
         CUDA_SOURCE_PROPERTY_FORMAT OBJ
         CUDA_SEPARABLE_COMPILATION ON
-        LANGUAGE CUDA
     )
 endforeach()
 
@@ -82,11 +94,10 @@ cuda_add_library(cuda_kernels STATIC ${CUDA_SOURCES})
 
 # Set include directories for CUDA kernels
 target_include_directories(cuda_kernels
-    PUBLIC
+    PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/include/cuda
     ${CUDA_INCLUDE_DIRS}
-    ${CUDA_TOOLKIT_ROOT_DIR}/include
 )
 
 # Link CUDA libraries (using plain syntax)
@@ -132,6 +143,10 @@ set(SOURCES
     src/vocabulary.cpp
     src/tensor.cpp
     src/optimizer/sam.cpp
+    src/layer_norm.cpp
+    src/embeddings.cpp
+    src/data_augmentation.cpp
+    src/vector.cpp
 )
 
 # Create main library

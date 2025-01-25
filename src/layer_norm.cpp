@@ -120,7 +120,7 @@ Matrix LayerNorm::compute_gradients(const Matrix& grad_output) {
 #ifdef USE_CUDA
         try {
             cuda::layer_norm_backward(grad_output, input_cache_, gamma_, 
-                                    grad_gamma_, grad_beta_, eps_);
+                                    grad_input, eps_);
             return grad_input;
         } catch (const std::runtime_error& e) {
             std::cerr << "CUDA layer norm backward failed, falling back to CPU: " << e.what() << std::endl;

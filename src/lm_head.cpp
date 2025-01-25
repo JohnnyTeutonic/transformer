@@ -10,17 +10,17 @@
 #endif
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
-    : hidden_size_(hidden_size), vocab_size_(vocab_size), projection(hidden_size, vocab_size),
-      bias(vocab_size, 0.0f), token_frequencies(vocab_size, 0.0f), pruning_threshold(1e-6f),
+    : hidden_size_(hidden_size), vocab_size_(vocab_size), weights_(hidden_size, vocab_size),
+      bias_(1, vocab_size, 0.0f), token_frequencies(vocab_size, 0.0f), pruning_threshold(1e-6f),
       active_tokens(vocab_size, 1), training_steps(0)
 {
     // Initialize with smaller scale due to large vocab size
     float scale = std::sqrt(2.0f / hidden_size);  // Scale based on input dim only
-    projection.randomize(-scale, scale);
+    weights_.randomize(-scale, scale);
     
     // Initialize bias to small negative values to encourage sparsity
     for (size_t i = 0; i < vocab_size; i++) {
-        bias[i] = -0.1f;  // Small negative bias
+        bias_(0, i) = -0.1f;  // Small negative bias
     }
     
     active_token_indices.reserve(vocab_size);
@@ -80,9 +80,9 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
     float sum_proj = 0.0f;
     size_t nonzero_proj = 0;
     
-    for (size_t i = 0; i < projection.rows(); i++) {
-        for (size_t j = 0; j < projection.cols(); j++) {
-            float val = projection(i, j);
+    for (size_t i = 0; i < weights_.rows(); i++) {
+        for (size_t j = 0; j < weights_.cols(); j++) {
+            float val = weights_(i, j);
             min_proj = std::min(min_proj, val);
             max_proj = std::max(max_proj, val);
             sum_proj += val;
@@ -93,18 +93,18 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
     std::cout << "Projection Matrix Statistics:\n"
               << "Min proj: " << min_proj << "\n"
               << "Max proj: " << max_proj << "\n"
-              << "Mean proj: " << sum_proj / (projection.rows() * projection.cols()) << "\n"
+              << "Mean proj: " << sum_proj / (weights_.rows() * weights_.cols()) << "\n"
               << "Nonzero proj: " << nonzero_proj << "/" 
-              << (projection.rows() * projection.cols()) << "\n\n";
+              << (weights_.rows() * weights_.cols()) << "\n\n";
     
     // Compute logits
-    Matrix logits = matmul(scaled_hidden, projection);
+    Matrix logits = matmul(scaled_hidden, weights_);
     
     // Add bias
     #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < logits.rows(); ++i) {
         for (size_t j = 0; j < logits.cols(); ++j) {
-            logits(i, j) += bias[j];
+            logits(i, j) += bias_(0, j);
             
             // Apply a very small penalty to extremely rare tokens
             if (token_frequencies[j] < 1e-6) {
@@ -236,7 +236,7 @@ Matrix LanguageModelHead::backward(const Matrix& grad_output, const Matrix& targ
     backward_linear(expanded_grad);
     
     // Scale gradients for hidden states
-    Matrix hidden_grad = matmul(expanded_grad, projection.transpose());
+    Matrix hidden_grad = matmul(expanded_grad, weights_.transpose());
     #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < hidden_grad.rows(); i++) {
         for (size_t j = 0; j < hidden_grad.cols(); j++) {
@@ -263,9 +263,9 @@ void LanguageModelHead::backward_linear(const Matrix& grad_output) {
     }
 
     Matrix grad_proj = matmul(scaled_hidden.transpose(), grad_output);
-    Vector grad_bias(bias.size(), 0.0f);
+    Vector grad_bias(bias_.cols(), 0.0f);
 
-    #pragma omp parallel for collapse(2) reduction(+:grad_bias[:bias.size()])
+    #pragma omp parallel for collapse(2) reduction(+:grad_bias[:bias_.cols()])
     for (size_t i = 0; i < grad_output.rows(); i++) {
         for (size_t j = 0; j < grad_output.cols(); j++) {
             grad_bias[j] += grad_output(i, j);
@@ -287,15 +287,15 @@ void LanguageModelHead::backward_linear(const Matrix& grad_output) {
     float effective_lr = std::min(base_lr, base_lr / (1.0f + grad_norm));
     
     #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < projection.rows(); i++) {
-        for (size_t j = 0; j < projection.cols(); j++) {
-            projection(i, j) -= effective_lr * grad_proj(i, j);
+    for (size_t i = 0; i < weights_.rows(); i++) {
+        for (size_t j = 0; j < weights_.cols(); j++) {
+            weights_(i, j) -= effective_lr * grad_proj(i, j);
         }
     }
 
     #pragma omp parallel for
-    for (size_t i = 0; i < bias.size(); i++) {
-        bias[i] -= effective_lr * grad_bias[i];
+    for (size_t i = 0; i < bias_.cols(); i++) {
+        bias_(0, i) -= effective_lr * grad_bias[i];
     }
 }
 

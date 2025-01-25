@@ -1,47 +1,56 @@
 #include "../../include/cuda/cuda_check.cuh"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include "../../include/cuda/cuda_init.cuh"
 #include <stdexcept>
 #include <string>
 
-cublasHandle_t cublas_handle;
+// Global cuBLAS handle
+cublasHandle_t cublas_handle = nullptr;
+static bool cuda_initialized = false;
+
+namespace cuda {
 
 void initialize_cuda() {
-    // Get number of devices
-    int deviceCount;
-    cudaError_t error = cudaGetDeviceCount(&deviceCount);
-    if (error != cudaSuccess) {
-        throw std::runtime_error("Failed to get CUDA device count: " +
-                                 std::string(cudaGetErrorString(error)));
+    if (cuda_initialized) {
+        return;  // Already initialized
     }
 
-    if (deviceCount == 0) {
-        throw std::runtime_error("No CUDA-capable devices found");
+    try {
+        // Set device
+        CUDA_CHECK(cudaSetDevice(0));
+
+        // Initialize cuBLAS
+        CUBLAS_CHECK(cublasCreate(&cublas_handle));
+        
+        // Set stream
+        cudaStream_t stream;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
+
+        cuda_initialized = true;
+    } catch (const std::exception& e) {
+        cleanup_cuda();  // Clean up on failure
+        throw std::runtime_error(std::string("CUDA initialization failed: ") + e.what());
     }
-
-    // Get device properties
-    cudaDeviceProp deviceProp;
-    CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, 0)); // Use first device
-
-    // Print device info
-    printf("Using CUDA Device %d: %s\n", 0, deviceProp.name);
-
-    // Set device
-    CUDA_CHECK(cudaSetDevice(0));
-
-    // Initialize cuBLAS
-    cublasStatus_t status = cublasCreate(&cublas_handle);
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("Failed to initialize cuBLAS");
-    }
-
-    // Ensure device is ready
-    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void cleanup_cuda() {
+    if (!cuda_initialized) {
+        return;  // Already cleaned up
+    }
+
     if (cublas_handle != nullptr) {
         cublasDestroy(cublas_handle);
+        cublas_handle = nullptr;
     }
+
     cudaDeviceReset();
+    cuda_initialized = false;
 }
+
+bool is_initialized() {
+    return cuda_initialized;
+}
+
+} // namespace cuda

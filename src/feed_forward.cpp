@@ -114,7 +114,7 @@ Matrix FeedForward::forward(const Matrix& input) {
             Matrix output(input.rows(), w2.cols(), output_data, false);
             
             // First matrix multiplication
-            cuda::matmul(input, w1, intermediate);
+            intermediate = cuda::matmul(input, w1);
             printf("First matmul completed\n");
             
             // Apply bias and ReLU using CUDA kernels
@@ -122,7 +122,7 @@ Matrix FeedForward::forward(const Matrix& input) {
             printf("Bias and ReLU applied\n");
             
             // Second matrix multiplication
-            cuda::matmul(intermediate, w2, output);
+            output = cuda::matmul(intermediate, w2);
             printf("Second matmul completed\n");
             
             // Now safe to move the final results
@@ -202,7 +202,7 @@ Matrix FeedForward::forward(const Matrix& input) {
     // Second matrix multiplication
     if (using_cuda) {
 #ifdef USE_CUDA
-        cuda::matmul(intermediate, w2, output);
+        output = cuda::matmul(intermediate, w2);
 #endif
     } else {
         matmul(intermediate, w2, output);
@@ -281,7 +281,7 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         Matrix d_intermediate(grad_output.rows(), w2.rows());  // [batch_size x intermediate_size]
         std::cout << "d_intermediate dims: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
         
-        cuda::matmul(grad_output, w2.transpose(), d_intermediate);
+        d_intermediate = cuda::matmul(grad_output, w2.transpose());
         
         // Compute gradients for GELU activation
         Matrix gelu_grad = intermediate_cache;  // Create copy for in-place modification
@@ -297,7 +297,7 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         // Compute input gradients
         Matrix d_input(input.rows(), input.cols());  // [batch_size x hidden_size]
         std::cout << "d_input dims before matmul: " << d_input.rows() << "x" << d_input.cols() << std::endl;
-        cuda::matmul(d_intermediate, w1.transpose(), d_input);
+        d_input = cuda::matmul(d_intermediate, w1.transpose());
         std::cout << "d_input dims after matmul: " << d_input.rows() << "x" << d_input.cols() << std::endl;
         
         // Verify output dimensions match input dimensions
