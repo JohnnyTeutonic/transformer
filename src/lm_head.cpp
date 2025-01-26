@@ -146,14 +146,21 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
         CUDA_CHECK(cudaMalloc(&d_output_fp16, required_output_fp16_size));
         CUDA_CHECK(cudaMalloc(&d_output, required_output_size));
 
-        // Copy input data to device and convert to FP16
-        CUDA_CHECK(cudaMemcpyAsync(d_projection, hidden_states.data(), 
+        // Allocate temporary buffer for FP32 hidden states
+        float* d_hidden_states_fp32;
+        CUDA_CHECK(cudaMalloc(&d_hidden_states_fp32, required_hidden_size));
+
+        // Copy input data to device
+        CUDA_CHECK(cudaMemcpyAsync(d_hidden_states_fp32, hidden_states.data(), 
                                  required_hidden_size,
                                  cudaMemcpyHostToDevice, compute_stream));
 
         // Convert input to FP16
-        launch_convert_to_fp16(d_hidden_states_fp16, d_projection,
+        launch_convert_to_fp16(d_hidden_states_fp16, d_hidden_states_fp32,
                              batch_size * hidden_size_);
+        
+        // Free temporary buffer
+        CUDA_CHECK(cudaFree(d_hidden_states_fp32));
         
         // Convert projection matrix to FP16
         const int block_size = 256;
