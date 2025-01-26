@@ -6,14 +6,13 @@
 #include <stdexcept>
 #include <string>
 
-// Move handle into cuda namespace
 namespace cuda {
     cublasHandle_t cublas_handle = nullptr;
-}
-
-// Move this inside namespace cuda
-namespace cuda {
     static bool cuda_initialized = false;
+
+    bool is_initialized() {
+        return cuda_initialized;
+    }
 
     void initialize_cuda() {
         if (cuda_initialized) {
@@ -52,10 +51,6 @@ namespace cuda {
         cudaDeviceReset();
         cuda_initialized = false;
     }
-
-    bool is_initialized() {
-        return cuda_initialized;
-    }
 } // namespace cuda
 
 // Keep these outside namespace
@@ -75,6 +70,5 @@ void cleanup_cublas() {
 
 // When shutting down
 void shutdown() {
-    cleanup_cublas();
-    cleanup_cuda();  // Now this should be found since we included cuda_utils.cuh
+    cuda::cleanup_cuda();  // This handles both CUDA and cuBLAS cleanup
 }

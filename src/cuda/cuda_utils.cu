@@ -47,9 +47,9 @@ namespace cuda {
             initialize_cuda();
         }
 
-        // Ensure cuBLAS is initialized
+        // Double check cuBLAS is initialized
         if (cublas_handle == nullptr) {
-            initialize_cuda();  // This will initialize both CUDA and cuBLAS
+            throw std::runtime_error("cuBLAS handle is null after initialization");
         }
         
         printf("GPU matrix multiplication initialized\n");
@@ -58,7 +58,12 @@ namespace cuda {
         const int M = A.rows();
         const int N = B.cols();
         const int K = A.cols();
-        printf("Dimensions: %d, %d, %d\n", M, N, K);
+        printf("Dimensions: M=%d, N=%d, K=%d\n", M, N, K);
+        
+        // Verify dimensions
+        if (A.cols() != B.rows()) {
+            throw std::runtime_error("Matrix dimension mismatch: A.cols() != B.rows()");
+        }
 
         // Use provided output matrix or create new one
         Matrix& C = output ? *output : *(new Matrix(M, N));
@@ -83,42 +88,17 @@ namespace cuda {
         const float alpha = 1.0f;
         const float beta = 0.0f;
         
-        // Perform matrix multiplication with GPU matrices
+        // For row-major matrices A(M,K) and B(K,N), to compute C = A*B in column-major cuBLAS,
+        // we compute C^T = B^T * A^T which is equivalent to computing (A*B)^T
+        // This means we swap M and N, and swap the order of matrices
         CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                                 N, M, K, &alpha,
-                                B_gpu.get_data(), N,
-                                A_gpu.get_data(), K,
+                                B_gpu.get_data(), N,  // Leading dimension is N for column-major B^T
+                                A_gpu.get_data(), K,  // Leading dimension is K for column-major A^T
                                 &beta,
-                                C.get_data(), N));
+                                C.get_data(), N));    // Leading dimension is N for column-major C^T
+        printf("Matrix multiplication completed\n");
 
         return C;
-    }
-}
-
-// Move these outside of any namespace
-namespace {
-    bool cuda_initialized = false;
-}
-
-bool is_initialized() {
-    return cuda_initialized;
-}
-
-bool initialize_cuda() {
-    if (!is_initialized()) {
-        cudaError_t error = cudaSetDevice(0);
-        if (error != cudaSuccess) {
-            // Handle error
-            return false;
-        }
-        cuda_initialized = true;
-    }
-    return true;
-}
-
-void cleanup_cuda() {
-    if (cuda_initialized) {
-        cudaDeviceReset();
-        cuda_initialized = false;
     }
 }

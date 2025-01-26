@@ -283,7 +283,9 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
     // Project output with dimension checks
     Matrix output;
     try {
+        std::cout << "Starting matrix multiplication" << std::endl;
         Matrix temp_grad(reshaped_attention.transpose().rows(), output_proj.cols());
+        std::cout << "Matrix multiplication dimensions: " << temp_grad.rows() << "x" << temp_grad.cols() << std::endl;
         cuda::matmul(reshaped_attention.transpose(), output_proj, &temp_grad);
         output = temp_grad;
         std::cout << "Matrix multiplication successful" << std::endl;

@@ -4,13 +4,9 @@
 // Forward declare Matrix class
 class Matrix;
 
-// Add these declarations at the top
-bool is_initialized();
-bool initialize_cuda();
-void cleanup_cuda();
-
-#ifdef CUDA_AVAILABLE
 namespace cuda {
+    bool is_initialized();
+    void initialize_cuda();
     void cleanup_cuda();
     void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
     
@@ -20,12 +16,6 @@ namespace cuda {
                                 int seq_len, int head_dim, cudaStream_t stream);
     __host__ void launch_softmax(float* scores, int seq_len, cudaStream_t stream);
 }
-#else
-namespace cuda {
-    void cleanup_cuda();
-    void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
-}
-#endif
 
 // Include Matrix definition after forward declarations
 #include "../matrix.hpp"

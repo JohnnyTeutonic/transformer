@@ -343,7 +343,7 @@ int main(int argc, char* argv[]) {
     }
 
 #ifdef CUDA_AVAILABLE
-    cleanup_cuda(); // Cleanup at program end
+    cuda::cleanup_cuda(); // Cleanup at program end
 #endif
     logger.stopLogging();
     std::cout << "exiting main" << std::endl;
