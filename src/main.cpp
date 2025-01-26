@@ -339,23 +339,38 @@ int main(int argc, char* argv[]) {
                           << (config.tokenizer.use_subword ? "subword" : "regular") 
                           << " tokenization:" << std::endl;
                 
-                // Test a simple input
-                std::string test_input = "I go to";
-                std::cout << "\n=== Processing prompt: '" << test_input << "' ===" << std::endl;
-                
-                // Preprocess input
-                std::string processed_input = test_input;
-                tokenizer->preprocess_text(processed_input);
-                std::vector<int> test_tokens = tokenizer->encode(processed_input);
-                
-                // Get model prediction
-                Matrix test_hidden = transformer.forward(test_tokens);
-                Matrix logits = lm_head->project_to_vocab(test_hidden);
-                
-                // For single token prediction, we don't need beam search
-                // Just show the top predictions
-                std::cout << "\nTop Predictions:\n";
-                Utils::print_top_predictions(logits, *tokenizer, 5);
+                // Define multiple test queries
+                std::vector<std::string> test_queries = {
+                    "I go to",
+                    "We drive to the",
+                    "She runs to the",
+                    "The cat sits on the",
+                    "Birds fly in the",
+                    "Fish swim in the",
+                    "People pray in the",
+                    "Students study in the",
+                    "Children play in the",
+                    "The dog sleeps on the"
+                };
+
+                // Process each test query
+                for (const auto& test_input : test_queries) {
+                    std::cout << "\n=== Processing prompt: '" << test_input << "' ===" << std::endl;
+                    
+                    // Preprocess input
+                    std::string processed_input = test_input;
+                    tokenizer->preprocess_text(processed_input);
+                    std::vector<int> test_tokens = tokenizer->encode(processed_input);
+                    
+                    // Get model prediction
+                    Matrix test_hidden = transformer.forward(test_tokens);
+                    Matrix logits = lm_head->project_to_vocab(test_hidden);
+                    
+                    // Show the input query and top predictions
+                    std::cout << "\nInput Query: \"" << test_input << "\"\n";
+                    std::cout << "Top Predictions:\n";
+                    Utils::print_top_predictions(logits, *tokenizer, 5);
+                }
             }
 
             if ((epoch + 1) % 5 == 0) { 
