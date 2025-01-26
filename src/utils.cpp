@@ -587,7 +587,7 @@ float Utils::evaluate_validation(
                 continue;
             }
 
-            Matrix logits = lm_head->forward(output);
+            Matrix logits = lm_head->project_to_vocab(output);
             std::cout << "Logits shape: " << logits.rows() << "x" << logits.cols() << "\n";
 
             // For single token prediction, we don't need beam search

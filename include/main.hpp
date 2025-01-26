@@ -43,3 +43,11 @@ class LanguageModelHead;
 // Declare global variables as extern
 extern std::unique_ptr<Tokenizer> tokenizer;
 extern PerformanceMetrics metrics;
+
+// Update any references to LanguageModelHead to use either BasicLanguageModelHead
+// or OptimizedLanguageModelHead based on configuration
+#ifdef USE_OPTIMIZED_LM_HEAD
+    using ActiveLanguageModelHead = OptimizedLanguageModelHead;
+#else
+    using ActiveLanguageModelHead = BasicLanguageModelHead;
+#endif

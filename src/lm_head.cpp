@@ -9,6 +9,11 @@
 #include <cuda_fp16.h>
 #endif
 
+class LanguageModelHead {
+    // Appears to be a duplicate implementation
+    // Same core functionality: project_to_vocab()
+};
+
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     : hidden_size_(hidden_size), vocab_size_(vocab_size), weights_(hidden_size, vocab_size),
       bias_(1, vocab_size, 0.0f), token_frequencies(vocab_size, 0.0f), pruning_threshold(1e-6f),

@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) {
 
         // Initialize model with updated config
         Transformer transformer(config);
-        auto lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+        auto lm_head = std::make_unique<OptimizedLanguageModelHead>(config.hidden_size, config.vocab_size);
 
         // Setup advanced components
         TensorCache<Matrix> activation_cache(1024, CacheReplacementPolicy::ARC);

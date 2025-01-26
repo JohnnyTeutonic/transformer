@@ -1,6 +1,12 @@
 #include "../include/lm_head.hpp"
 #include "../include/cuda/matrix_ops.cuh"
 
+class LanguageModelHead {
+    // Implementation of language model head with vocab projection
+    // Used for final layer of transformer to project hidden states to vocabulary
+    // Core functionality: project_to_vocab()
+};
+
 LanguageModelHead::LanguageModelHead(unsigned long input_dim, unsigned long vocab_size) 
     : input_dim_(input_dim)
     , vocab_size_(vocab_size)

@@ -128,7 +128,6 @@ set(SOURCES
     src/utils.cpp
     src/tokenizer.cpp
     src/model_saver.cpp
-    src/language_model_head.cpp
     src/components.cpp
     src/vector_ops.cpp
     src/half_precision.cpp
@@ -139,9 +138,7 @@ set(SOURCES
     src/config.cpp
     src/tiktoken_tokenizer.cpp
     src/cache.cpp
-    src/quantization.cpp
     src/optimizer.cpp
-    src/lm_head.cpp
     src/vocabulary.cpp
     src/tensor.cpp
     src/optimizer/sam.cpp
@@ -149,6 +146,14 @@ set(SOURCES
     src/embeddings.cpp
     src/data_augmentation.cpp
     src/vector.cpp
+    src/basic_language_model_head.cpp
+    src/optimized_language_model_head.cpp
+)
+
+# Remove the old files from SOURCES
+list(REMOVE_ITEM SOURCES
+    src/language_model_head.cpp
+    src/basic_language_model_head.cpp
 )
 
 # Create main library
@@ -239,12 +244,3 @@ add_custom_command(TARGET transformer_cpp POST_BUILD
         "${CMAKE_BINARY_DIR}/tiktoken_data/"
     COMMENT "Copying tiktoken data files to build directory"
 )
-
-if(CUDA_FOUND)
-    # Set source file properties to compile with CUDA
-    set_source_files_properties(
-        src/lm_head.cpp
-        PROPERTIES
-        LANGUAGE CUDA
-    )
-endif()

@@ -353,7 +353,7 @@ Transformer::Transformer(const TransformerConfig& config) : config(config) {
     }
     
     final_ln = std::make_unique<LayerNorm>(config.hidden_size);
-    lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+    lm_head = std::make_unique<OptimizedLanguageModelHead>(config.hidden_size, config.vocab_size);
     m_kv_caches.resize(config.num_layers);
 }
 
