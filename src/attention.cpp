@@ -283,7 +283,9 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
     // Project output with dimension checks
     Matrix output;
     try {
-        output = matmul(reshaped_attention, output_proj);
+        Matrix temp_grad(reshaped_attention.transpose().rows(), output_proj.cols());
+        cuda::matmul(reshaped_attention.transpose(), output_proj, &temp_grad);
+        output = temp_grad;
         std::cout << "Matrix multiplication successful" << std::endl;
     } catch (const std::exception& e) {
         std::cout << "Matrix multiplication failed: " << e.what() << std::endl;
@@ -579,19 +581,24 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
     std::cout << "Updating projection gradients..." << std::endl;
     
     // Update query gradients
-    Matrix d_query_hidden = cuda::matmul(d_query, query_proj);
+    Matrix d_query_hidden(d_query.rows(), query_proj.cols());  // Pre-allocate
+    cuda::matmul(d_query, query_proj, &d_query_hidden);
     std::cout << "d_query_hidden dims: " << d_query_hidden.rows() << "x" << d_query_hidden.cols() << std::endl;
 
     // Update key gradients
-    Matrix d_key_hidden = cuda::matmul(d_key, key_proj);
+    Matrix d_key_hidden(d_key.rows(), key_proj.cols());  // Pre-allocate
+    cuda::matmul(d_key, key_proj, &d_key_hidden);
     std::cout << "d_key_hidden dims: " << d_key_hidden.rows() << "x" << d_key_hidden.cols() << std::endl;
 
     // Update value gradients
-    Matrix d_value_hidden = cuda::matmul(d_value, value_proj);
+    Matrix d_value_hidden(d_value.rows(), value_proj.cols());  // Pre-allocate
+    cuda::matmul(d_value, value_proj, &d_value_hidden);
     std::cout << "d_value_hidden dims: " << d_value_hidden.rows() << "x" << d_value_hidden.cols() << std::endl;
 
     // For output projection, we already have grad in hidden dimensions
-    output_proj_grad += matmul(grad.transpose(), input_matrix);  // This one is already correct
+    Matrix temp_grad(grad.transpose().rows(), input_matrix.cols());
+    cuda::matmul(grad.transpose(), input_matrix, &temp_grad);
+    output_proj_grad += temp_grad;
     std::cout << "output_proj_grad dimensions: " << output_proj_grad.rows() << "x" << output_proj_grad.cols() << std::endl;
 
     // Update bias gradients
@@ -1036,7 +1043,8 @@ Matrix MultiHeadAttention::compute_query_gradients(const Matrix& grad, const Mat
 Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matrix& input) {
     int seq_len = input.rows();
     // Use the new return-style matmul
-    Matrix d_key = cuda::matmul(grad, key_proj.transpose());
+    Matrix d_key(grad.rows(), key_proj.cols());
+    cuda::matmul(grad, key_proj.transpose(), &d_key);
     
     std::cout << "compute_key_gradients dimensions:" << std::endl;
     std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
@@ -1049,7 +1057,8 @@ Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matri
 Matrix MultiHeadAttention::compute_value_gradients(const Matrix& grad, const Matrix& input) {
     int seq_len = input.rows();
     // Use the new return-style matmul
-    Matrix d_value = cuda::matmul(grad, value_proj.transpose());
+    Matrix d_value(grad.rows(), value_proj.cols());
+    cuda::matmul(grad, value_proj.transpose(), &d_value);
     
     std::cout << "compute_value_gradients dimensions:" << std::endl;
     std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;

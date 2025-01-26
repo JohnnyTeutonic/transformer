@@ -42,31 +42,55 @@ namespace cuda {
         CUDA_CHECK(cudaGetLastError());
     }
 
-    Matrix gpu_matmul(const Matrix& A, const Matrix& B) {
+    Matrix matmul(const Matrix& A, const Matrix& B, Matrix* output) {
         if (!is_initialized()) {
             initialize_cuda();
         }
+
+        // Ensure cuBLAS is initialized
+        extern cublasHandle_t cublas_handle;
+        if (cublas_handle == nullptr) {
+            if (!init_cublas()) {  // Add namespace qualifier
+                throw std::runtime_error("Failed to initialize cuBLAS");
+            }
+        }
+        
         printf("GPU matrix multiplication initialized\n");
+        
         // Get dimensions
         const int M = A.rows();
         const int N = B.cols();
         const int K = A.cols();
         printf("Dimensions: %d, %d, %d\n", M, N, K);
-        // Create result matrix
-        Matrix C(M, N);
+
+        // Use provided output matrix or create new one
+        Matrix& C = output ? *output : *(new Matrix(M, N));
+
+        // Transfer matrices to GPU if needed and store the GPU matrices
+        Matrix A_gpu = A.is_cuda() ? A : A.to_gpu();
+        Matrix B_gpu = B.is_cuda() ? B : B.to_gpu();
+        if (!C.is_cuda()) {
+            C = C.to_gpu();
+        }
+
+        // Verify GPU pointers after transfer
+        printf("cuBLAS handle: %p\n", (void*)cublas_handle);
+        printf("GPU pointers after transfer - A: %p, B: %p, C: %p\n", 
+               (void*)A_gpu.get_data(), (void*)B_gpu.get_data(), (void*)C.get_data());
+
+        if (!A_gpu.get_data() || !B_gpu.get_data() || !C.get_data()) {
+            throw std::runtime_error("Invalid GPU pointers after transfer");
+        }
 
         // Set scaling factors
         const float alpha = 1.0f;
         const float beta = 0.0f;
-        printf("Scaling factors set\n");
-        // Get the global cuBLAS handle
-        extern cublasHandle_t cublas_handle;
-        printf("cuBLAS handle obtained\n");
-        // Perform matrix multiplication
+        
+        // Perform matrix multiplication with GPU matrices
         CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                                 N, M, K, &alpha,
-                                B.get_data(), N,
-                                A.get_data(), K,
+                                B_gpu.get_data(), N,
+                                A_gpu.get_data(), K,
                                 &beta,
                                 C.get_data(), N));
 

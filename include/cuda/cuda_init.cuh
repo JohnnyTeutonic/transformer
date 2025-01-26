@@ -4,6 +4,7 @@
 
 namespace cuda {
     extern cublasHandle_t cublas_handle;  // Move into cuda namespace
+    bool init_cublas();  // Add this declaration
 }
 
 // Remove or update this conflicting declaration

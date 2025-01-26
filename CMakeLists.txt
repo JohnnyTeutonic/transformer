@@ -1,13 +1,20 @@
-cmake_minimum_required(VERSION 3.10)
-project(transformer CUDA CXX)
+cmake_minimum_required(VERSION 3.18)
+project(transformer_cpp CUDA CXX)
 
 # Set C++ and CUDA standards
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# Find CUDA packages first
+find_package(CUDAToolkit REQUIRED)
+enable_language(CUDA)
+
+# Set CUDA architecture based on your GPU
+set(CMAKE_CUDA_ARCHITECTURES 60 70 75)  # Support multiple architectures
 
 # Find required packages
 find_package(CUDA REQUIRED)
-enable_language(CUDA)
 
 # Set CUDA paths
 if(DEFINED ENV{CUDA_PATH})
@@ -48,11 +55,6 @@ FetchContent_MakeAvailable(json)
 FetchContent_GetProperties(json)
 get_target_property(JSON_INC_DIR nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
 
-# Set CUDA architectures if not specified
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 60)
-endif()
-
 # Add CUDA-specific compile definitions
 add_definitions(-DUSE_CUDA)
 
@@ -61,7 +63,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/include/cuda
     ${CMAKE_SOURCE_DIR}/third_party
-    ${CUDA_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
 )
 
 # Add CUDA source files
@@ -90,29 +92,29 @@ foreach(cuda_source ${CUDA_SOURCES})
 endforeach()
 
 # Create CUDA library
-cuda_add_library(cuda_kernels STATIC ${CUDA_SOURCES})
+add_library(cuda_kernels STATIC ${CUDA_SOURCES})
 
-# Set include directories for CUDA kernels
-target_include_directories(cuda_kernels
-    PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/include/cuda
-    ${CUDA_INCLUDE_DIRS}
-)
-
-# Link CUDA libraries (using plain syntax)
-target_link_libraries(cuda_kernels
-    ${CUDA_LIBRARIES}
-    ${CUDA_CUBLAS_LIBRARIES}
-    ${CUDA_curand_LIBRARY}
-)
-
-# Set CUDA specific properties
+# Set language for cuda_kernels target
 set_target_properties(cuda_kernels PROPERTIES
+    LANGUAGE CUDA
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES}
+)
+
+# Set include directories for CUDA kernels
+target_include_directories(cuda_kernels
+    PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/include/cuda
+    ${CUDAToolkit_INCLUDE_DIRS}
+)
+
+# Link CUDA libraries using modern CMake
+target_link_libraries(cuda_kernels
+    PUBLIC
+    CUDA::cudart
+    CUDA::cublas
 )
 
 # Add source files
@@ -164,16 +166,18 @@ target_include_directories(transformer_lib
 target_link_libraries(transformer_lib 
     PUBLIC
     cuda_kernels
-    ${CUDA_LIBRARIES}
-    ${CUDA_CUBLAS_LIBRARIES}
+    CUDA::cudart
+    CUDA::cublas
     nlohmann_json::nlohmann_json
 )
 
 # Create executable
-add_executable(transformer src/main.cpp)
-target_link_libraries(transformer 
+add_executable(transformer_cpp ${SOURCES})
+target_link_libraries(transformer_cpp 
     PRIVATE
     transformer_lib
+    CUDA::cudart
+    CUDA::cublas
 )
 
 # Optional: Find and link OpenMP
@@ -192,8 +196,18 @@ add_definitions(
     -DCUDA_AVAILABLE
 )
 
+target_compile_definitions(transformer_cpp PRIVATE
+    USE_CUDA
+    CUDA_AVAILABLE
+)
+
+target_compile_definitions(cuda_kernels PRIVATE
+    USE_CUDA
+    CUDA_AVAILABLE
+)
+
 # Installation
-install(TARGETS transformer transformer_lib
+install(TARGETS transformer_cpp transformer_lib
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -214,7 +228,7 @@ else()
 endif()
 
 # Simplified tiktoken data copying
-add_custom_command(TARGET transformer POST_BUILD
+add_custom_command(TARGET transformer_cpp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tiktoken_data"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/tiktoken_data"

@@ -28,29 +28,30 @@ namespace cuda {
         if (A.cols() != B.rows()) {
             throw_runtime_error("Matrix multiplication dimension mismatch");
         }
-
+        printf("Matrix multiplication dimensions verified\n");
         // Initialize CUDA if needed
         if (!is_initialized()) {
             initialize_cuda();
         }
-
+        printf("CUDA initialized\n");
         // Create output matrix with correct dimensions
         Matrix C(A.rows(), B.cols());
 
         // First ensure all matrices are on GPU
+        printf("Ensuring matrices are on GPU\n");
         Matrix A_gpu = A.is_cuda() ? A : A.to_gpu();
         Matrix B_gpu = B.is_cuda() ? B : B.to_gpu();
         Matrix C_gpu(C.rows(), C.cols(), nullptr, true);  // Create GPU matrix
-
+        printf("GPU matrices created\n");
         // Get dimensions
         const int M = A.rows();
         const int N = B.cols();
         const int K = A.cols();
-
+        printf("Dimensions: %d, %d, %d\n", M, N, K);
         // Set scaling factors
         const float alpha = 1.0f;
         const float beta = 0.0f;
-
+        printf("Scaling factors set\n");
         // Get raw pointers
         float* d_A = A_gpu.get_data();
         float* d_B = B_gpu.get_data();
@@ -61,6 +62,7 @@ namespace cuda {
         printf("cuBLAS handle obtained\n");
         // Perform matrix multiplication using cuBLAS
         // Note: cuBLAS uses column-major order, so we compute C = B^T * A^T
+        printf("Performing matrix multiplication\n");
         CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
                                 N, M, K, &alpha,
                                 d_B, N,  // Leading dimension of B is N
