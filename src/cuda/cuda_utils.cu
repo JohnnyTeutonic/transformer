@@ -48,11 +48,8 @@ namespace cuda {
         }
 
         // Ensure cuBLAS is initialized
-        extern cublasHandle_t cublas_handle;
         if (cublas_handle == nullptr) {
-            if (!init_cublas()) {  // Add namespace qualifier
-                throw std::runtime_error("Failed to initialize cuBLAS");
-            }
+            initialize_cuda();  // This will initialize both CUDA and cuBLAS
         }
         
         printf("GPU matrix multiplication initialized\n");

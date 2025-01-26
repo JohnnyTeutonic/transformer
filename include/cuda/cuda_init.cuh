@@ -3,8 +3,9 @@
 #include <cublas_v2.h>
 
 namespace cuda {
-    extern cublasHandle_t cublas_handle;  // Move into cuda namespace
-    bool init_cublas();  // Add this declaration
+    extern cublasHandle_t cublas_handle;
+    void initialize_cuda();
+    void cleanup_cuda();
 }
 
 // Remove or update this conflicting declaration
