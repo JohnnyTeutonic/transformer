@@ -51,8 +51,18 @@ int main(int argc, char* argv[]) {
         tokenizer = std::make_unique<Tokenizer>();
         
         try {
-            tokenizer->initialize();  // Initialize with default encoding
-            std::cout << "Initialized tokenizer. Vocabulary size: " 
+            // Collect all texts for tokenizer training
+            std::vector<std::string> training_texts;
+            for (const auto& [input_str, target_str] : training_pairs) {
+                training_texts.push_back(input_str);
+                training_texts.push_back(target_str);
+            }
+            
+            // Initialize and train the tokenizer
+            tokenizer->initialize();  // Initialize with default settings
+            tokenizer->train_on_data(training_texts);  // Train on our dataset
+            
+            std::cout << "Initialized and trained tokenizer. Vocabulary size: " 
                       << tokenizer->vocab_size() << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
@@ -366,10 +376,12 @@ int main(int argc, char* argv[]) {
                     Matrix test_hidden = transformer.forward(test_tokens);
                     Matrix logits = lm_head->project_to_vocab(test_hidden);
                     
-                    // Show the input query and top predictions
-                    std::cout << "\nInput Query: \"" << test_input << "\"\n";
-                    std::cout << "Top Predictions:\n";
+                    // Show the input query and top predictions with clear separation
+                    std::cout << "\n----------------------------------------\n";
+                    std::cout << "Input Query: \"" << test_input << "\"\n";
+                    std::cout << "----------------------------------------\n";
                     Utils::print_top_predictions(logits, *tokenizer, 5);
+                    std::cout << "----------------------------------------\n";
                 }
             }
 

@@ -7,7 +7,7 @@
 
 class SubwordTokenizer {
 public:
-    SubwordTokenizer(size_t vocab_size = 1000, size_t min_freq = 2);
+    SubwordTokenizer(unsigned long vocab_size = 1000, unsigned long min_freq = 2);
     
     // Training methods
     void train(const std::vector<std::string>& texts);
@@ -38,8 +38,8 @@ private:
     std::vector<std::pair<std::string, std::string>> merge_rules;
     
     // Configuration
-    size_t target_vocab_size;
-    size_t minimum_frequency;
+    unsigned long target_vocab_size;
+    unsigned long minimum_frequency;
     
     // Special token IDs
     const int pad_token_id = 0;

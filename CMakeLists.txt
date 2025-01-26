@@ -86,6 +86,7 @@ set(CORE_SOURCES
     src/config.cpp
     src/tokenizer.cpp
     src/tiktoken_tokenizer.cpp
+    src/subword_tokenizer.cpp
 )
 
 # Neural network components

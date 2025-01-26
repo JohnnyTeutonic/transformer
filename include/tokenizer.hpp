@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include "tiktoken_tokenizer.hpp"
+#include "subword_tokenizer.hpp"
 
 class Tokenizer {
 public:
@@ -27,11 +27,10 @@ public:
     size_t vocab_size() const { return tokenizer_->vocab_size(); }
 
     // Initialize with specific encoding
-    void initialize(const std::string& encoding_name = "custom") {
-        tokenizer_->initialize(encoding_name);
-    }
+    void initialize(const std::string& encoding_name = "custom");
+    void train_on_data(const std::vector<std::string>& texts);
 
-    bool is_initialized() const { return tokenizer_ && tokenizer_->is_initialized(); }
+    bool is_initialized() const { return tokenizer_ != nullptr; }
 
     // Debug helpers
     void print_vocabulary_mappings() const;
@@ -58,9 +57,5 @@ public:
     std::vector<std::string> get_vocabulary_vector() const;
 
 private:
-    std::unique_ptr<TiktokenTokenizer> tokenizer_;
-    
-    // Vocabulary loading/saving helpers
-    static std::unique_ptr<TiktokenTokenizer> load_vocabulary(std::istream& is);
-    void save_vocabulary(std::ostream& os) const;
+    std::unique_ptr<SubwordTokenizer> tokenizer_;
 };
