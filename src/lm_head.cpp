@@ -27,31 +27,42 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     active_token_indices.reserve(vocab_size);
     
 #ifdef USE_CUDA
-    // Initialize cuBLAS handle
-    CUBLAS_CHECK(cublasCreate(&cublas_handle));
-    
-    // Create CUDA stream
-    CUDA_CHECK(cudaStreamCreate(&compute_stream));
-    
-    // Allocate device memory with maximum sizes
-    CUDA_CHECK(cudaMalloc(&d_projection, hidden_size * vocab_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_bias, vocab_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_projection_fp16, hidden_size * vocab_size * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&d_hidden_states_fp16, max_batch_size * hidden_size * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&d_output_fp16, max_batch_size * vocab_size * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&d_output, max_batch_size * vocab_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_active_tokens, vocab_size * sizeof(unsigned char)));
-    CUDA_CHECK(cudaMalloc(&d_active_token_indices, vocab_size * sizeof(int)));
-    
-    // Copy initial data to device
-    CUDA_CHECK(cudaMemcpyAsync(d_projection, projection.data(), 
-                              hidden_size * vocab_size * sizeof(float), 
-                              cudaMemcpyHostToDevice, compute_stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_bias, bias.data(), 
-                              vocab_size * sizeof(float), 
-                              cudaMemcpyHostToDevice, compute_stream));
-    CUDA_CHECK(cudaMemsetAsync(d_active_tokens, 1, vocab_size * sizeof(unsigned char), 
-                              compute_stream));
+    try {
+        // Initialize cuBLAS handle
+        CUBLAS_CHECK(cublasCreate(&cublas_handle));
+        
+        // Create CUDA stream
+        CUDA_CHECK(cudaStreamCreate(&compute_stream));
+        
+        // Allocate device memory for constant-sized resources
+        CUDA_CHECK(cudaMalloc(&d_projection, hidden_size * vocab_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_bias, vocab_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_projection_fp16, hidden_size * vocab_size * sizeof(half)));
+        CUDA_CHECK(cudaMalloc(&d_active_tokens, vocab_size * sizeof(unsigned char)));
+        CUDA_CHECK(cudaMalloc(&d_active_token_indices, vocab_size * sizeof(int)));
+        
+        // Initialize d_hidden_states_fp16, d_output_fp16, and d_output to nullptr
+        // They will be allocated dynamically in project_to_vocab based on batch size
+        d_hidden_states_fp16 = nullptr;
+        d_output_fp16 = nullptr;
+        d_output = nullptr;
+        
+        // Copy initial data to device
+        CUDA_CHECK(cudaMemcpyAsync(d_projection, projection.data(), 
+                                 hidden_size * vocab_size * sizeof(float), 
+                                 cudaMemcpyHostToDevice, compute_stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_bias, bias.data(), 
+                                 vocab_size * sizeof(float), 
+                                 cudaMemcpyHostToDevice, compute_stream));
+        CUDA_CHECK(cudaMemsetAsync(d_active_tokens, 1, vocab_size * sizeof(unsigned char), 
+                                 compute_stream));
+                                 
+        // Synchronize to ensure initialization is complete
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+    } catch (const std::exception& e) {
+        std::cerr << "CUDA initialization failed: " << e.what() << std::endl;
+        throw;
+    }
 #endif
 }
 
@@ -110,10 +121,6 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
     this->hidden_states = hidden_states;
     size_t batch_size = hidden_states.rows();
     
-    if (batch_size > max_batch_size) {
-        throw std::runtime_error("Batch size exceeds maximum allocated size");
-    }
-    
     // Update active tokens based on frequency
     if (training_steps % PRUNE_INTERVAL == 0) {
         update_active_tokens();
@@ -123,12 +130,28 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
 
 #ifdef USE_CUDA
     try {
+        // Reallocate device memory if needed
+        size_t required_hidden_size = batch_size * hidden_size_ * sizeof(float);
+        size_t required_output_size = batch_size * vocab_size_ * sizeof(float);
+        size_t required_fp16_size = batch_size * hidden_size_ * sizeof(half);
+        size_t required_output_fp16_size = batch_size * vocab_size_ * sizeof(half);
+        
+        // Free existing allocations
+        if (d_hidden_states_fp16) cudaFree(d_hidden_states_fp16);
+        if (d_output_fp16) cudaFree(d_output_fp16);
+        if (d_output) cudaFree(d_output);
+        
+        // Allocate new memory with required sizes
+        CUDA_CHECK(cudaMalloc(&d_hidden_states_fp16, required_fp16_size));
+        CUDA_CHECK(cudaMalloc(&d_output_fp16, required_output_fp16_size));
+        CUDA_CHECK(cudaMalloc(&d_output, required_output_size));
+
         // Copy input data to device and convert to FP16
         CUDA_CHECK(cudaMemcpyAsync(d_projection, hidden_states.data(), 
-                                 batch_size * hidden_size_ * sizeof(float),
+                                 required_hidden_size,
                                  cudaMemcpyHostToDevice, compute_stream));
 
-        // Convert input to FP16 (first copy to device, then convert)
+        // Convert input to FP16
         launch_convert_to_fp16(d_hidden_states_fp16, d_projection,
                              batch_size * hidden_size_);
         
@@ -164,7 +187,7 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
         
         // Copy result back to host asynchronously
         CUDA_CHECK(cudaMemcpyAsync(logits.data(), d_output,
-                                 batch_size * vocab_size_ * sizeof(float),
+                                 required_output_size,
                                  cudaMemcpyDeviceToHost, compute_stream));
         
         // Make sure all operations are complete
