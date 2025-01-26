@@ -27,7 +27,7 @@ public:
     size_t vocab_size() const { return tokenizer_->vocab_size(); }
 
     // Initialize with specific encoding
-    void initialize(const std::string& encoding_name = "cl100k_base") {
+    void initialize(const std::string& encoding_name = "custom") {
         tokenizer_->initialize(encoding_name);
     }
 

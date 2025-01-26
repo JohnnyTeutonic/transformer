@@ -25,7 +25,7 @@ public:
     size_t vocab_size() const;
 
     // Initialize with model type
-    void initialize(const std::string& encoding_name = "cl100k_base");
+    void initialize(const std::string& encoding_name = "custom");
 
     bool is_initialized() const { return tiktoken_ != nullptr; }
 

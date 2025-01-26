@@ -45,13 +45,24 @@ class LanguageModelHead {
     float* h_projection = nullptr;
     float* h_bias = nullptr;
 
-    // Device memory buffers
+    // Device memory buffers - these will be allocated dynamically based on batch size
     float* d_projection = nullptr;  // Device copy of projection matrix
     float* d_bias = nullptr;       // Device copy of bias
     half* d_projection_fp16 = nullptr;  // FP16 version of projection
     half* d_hidden_states_fp16 = nullptr;  // FP16 version of input
     half* d_output_fp16 = nullptr;  // FP16 intermediate output
     float* d_output = nullptr;      // Final FP32 output
+
+    // Device memory for active tokens and indices
+    unsigned char* d_active_tokens = nullptr;
+    int* d_active_token_indices = nullptr;
+    std::vector<int> active_token_indices;
+
+#ifdef USE_CUDA
+    // CUDA streams and synchronization
+    cudaStream_t compute_stream;
+    cublasHandle_t cublas_handle;
+#endif
 
     /**
      * @brief Computes gradients for the linear projection.
@@ -69,23 +80,10 @@ class LanguageModelHead {
     void update_active_tokens();
 
 #ifdef USE_CUDA
-    // CUDA streams and synchronization
-    cudaStream_t compute_stream;
-
-    // Device memory for active tokens and indices
-    unsigned char* d_active_tokens = nullptr;
-    int* d_active_token_indices = nullptr;
-    std::vector<int> active_token_indices;
-
-    // Maximum batch size for memory allocation
-    static constexpr size_t max_batch_size = 4096;  // Adjust based on your needs
-
     // CUDA kernel launchers
     __host__ void launch_convert_to_fp16(half* output, const float* input, size_t size);
     __host__ void launch_convert_and_expand_vocab(
         float* output, const half* input, size_t batch_size, size_t vocab_size, size_t active_vocab_size);
-
-    cublasHandle_t cublas_handle;
 #endif
 
   public:
