@@ -1,7 +1,6 @@
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include "../../include/cuda/backward_ops.cuh"
-#include "../../include/cuda/cuda_check.cuh"
+#include "cuda/cuda_check.cuh"
+#include "cuda/backward_ops.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
 
 namespace cuda {

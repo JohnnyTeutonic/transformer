@@ -1,6 +1,5 @@
 #pragma once
 #include "cuda_utils.cuh"
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <memory>
 #include <mutex>

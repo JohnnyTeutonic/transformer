@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+# Set the output name for the executable
+set(CMAKE_RUNTIME_OUTPUT_NAME "transformer")
+
 # Find CUDA packages first
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
@@ -114,7 +117,6 @@ target_include_directories(cuda_kernels
 target_link_libraries(cuda_kernels
     PUBLIC
     CUDA::cudart
-    CUDA::cublas
 )
 
 # Add source files
@@ -172,17 +174,16 @@ target_link_libraries(transformer_lib
     PUBLIC
     cuda_kernels
     CUDA::cudart
-    CUDA::cublas
     nlohmann_json::nlohmann_json
 )
 
 # Create executable
-add_executable(transformer_cpp ${SOURCES})
-target_link_libraries(transformer_cpp 
-    PRIVATE
+add_executable(transformer ${SOURCES})
+target_link_libraries(transformer PRIVATE
     transformer_lib
     CUDA::cudart
-    CUDA::cublas
+    OpenMP::OpenMP_CXX
+    ${CMAKE_THREAD_LIBS_INIT}
 )
 
 # Optional: Find and link OpenMP
@@ -201,7 +202,7 @@ add_definitions(
     -DCUDA_AVAILABLE
 )
 
-target_compile_definitions(transformer_cpp PRIVATE
+target_compile_definitions(transformer PRIVATE
     USE_CUDA
     CUDA_AVAILABLE
 )
@@ -209,18 +210,6 @@ target_compile_definitions(transformer_cpp PRIVATE
 target_compile_definitions(cuda_kernels PRIVATE
     USE_CUDA
     CUDA_AVAILABLE
-)
-
-# Installation
-install(TARGETS transformer_cpp transformer_lib
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-
-install(DIRECTORY include/
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cuh"
 )
 
 # Optional dependencies
@@ -232,15 +221,14 @@ else()
     message(WARNING "tcmalloc not found, continuing without it")
 endif()
 
-# Simplified tiktoken data copying
-add_custom_command(TARGET transformer_cpp POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tiktoken_data"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/tiktoken_data"
-        "${CMAKE_BINARY_DIR}/tiktoken_data"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/cl100k_base.vocab.json"
-        "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/cl100k_base.merges.json"
-        "${CMAKE_BINARY_DIR}/tiktoken_data/"
-    COMMENT "Copying tiktoken data files to build directory"
+# Installation
+install(TARGETS transformer transformer_lib
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+
+install(DIRECTORY include/
+    DESTINATION include
+    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cuh"
 )

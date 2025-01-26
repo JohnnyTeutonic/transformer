@@ -1,15 +1,11 @@
 #include "transformer.hpp"
-#include "cuda/cublas_check.cuh"
 #include "cuda/cuda_check.cuh"
 #include "logger.hpp"
 #include "half_precision.hpp"
-#include <cublas_v2.h>
 #include <fstream>
 #include <iostream>
 #include <omp.h>
 #include <stdexcept>
-
-extern cublasHandle_t cublas_handle;
 
 // TransformerLayer implementation
 TransformerLayer::TransformerLayer(const TransformerConfig& config_, size_t idx)

@@ -199,11 +199,24 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
                                  const std::optional<KVCache>& kv_cache) {
     std::cout << "\n=== MultiHeadAttention::forward START ===" << std::endl;
     
-    // Project input to query, key, and value using matmul function instead of member function
-    std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
-    Matrix query = matmul(input, query_proj);
-    Matrix key = matmul(input, key_proj);
-    Matrix value = matmul(input, value_proj);
+    // Project input to query, key, and value
+    Matrix query(input.rows(), query_proj.cols());
+    if (!cuda::customMatrixMultiply(input, query_proj, query)) {
+        printf("Query projection failed\n");
+        return Matrix(0, 0);
+    }
+    
+    Matrix key(input.rows(), key_proj.cols());
+    if (!cuda::customMatrixMultiply(input, key_proj, key)) {
+        printf("Key projection failed\n");
+        return Matrix(0, 0);
+    }
+    
+    Matrix value(input.rows(), value_proj.cols());
+    if (!cuda::customMatrixMultiply(input, value_proj, value)) {
+        printf("Value projection failed\n");
+        return Matrix(0, 0);
+    }
     
     std::cout << "After projections:" << std::endl;
     std::cout << "Query: " << query.rows() << "x" << query.cols() << std::endl;
@@ -264,15 +277,23 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
     if (reshaped_attention.cols() != output_proj.rows()) {
         std::cout << "Dimension mismatch detected!" << std::endl;
         std::cout << "Attempting to reshape attention output..." << std::endl;
-        // We need to reshape it to match output_proj dimensions
-        Matrix temp(reshaped_attention.rows(), output_proj.rows(), 0.0f);  // Create 64x64 matrix
-        // Copy the data we have (64x16) into the larger matrix
-        for (size_t i = 0; i < reshaped_attention.rows(); ++i) {
-            for (size_t j = 0; j < reshaped_attention.cols(); ++j) {
-                temp(i, j) = reshaped_attention(i, j);
+        // Create the reshaped matrix directly on GPU if the source is on GPU
+        Matrix temp(reshaped_attention.rows(), output_proj.rows(), reshaped_attention.is_cuda());
+        if (reshaped_attention.is_cuda()) {
+            // Use CUDA kernel to perform the reshape
+            if (!cuda::customMatrixReshape(reshaped_attention, temp)) {
+                throw std::runtime_error("Reshape operation failed");
             }
+        } else {
+            // If on CPU, do the reshape then transfer
+            for (size_t i = 0; i < reshaped_attention.rows(); ++i) {
+                for (size_t j = 0; j < reshaped_attention.cols(); ++j) {
+                    temp(i, j) = reshaped_attention(i, j);
+                }
+            }
+            temp = temp.to_gpu();
         }
-        reshaped_attention = temp;
+        reshaped_attention = std::move(temp);
         std::cout << "Reshaped attention_output to: " << reshaped_attention.rows() << "x" << reshaped_attention.cols() << std::endl;
     }
     
@@ -284,9 +305,35 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
     Matrix output;
     try {
         std::cout << "Starting matrix multiplication" << std::endl;
-        Matrix temp_grad(reshaped_attention.transpose().rows(), output_proj.cols());
+        
+        // Initialize the transposed matrix directly where it's needed
+        Matrix transposed_attention = reshaped_attention.is_cuda() 
+            ? Matrix(reshaped_attention.cols(), reshaped_attention.rows(), true)  // Create on GPU
+            : Matrix(reshaped_attention.cols(), reshaped_attention.rows());       // Create on CPU
+        
+        std::cout << "transposed_attention dimensions: " << transposed_attention.rows() << "x" << transposed_attention.cols() << std::endl;
+        
+        if (reshaped_attention.is_cuda()) {
+            std::cout << "Transposing on GPU" << std::endl;
+            if (!cuda::customMatrixTranspose(reshaped_attention, transposed_attention)) {
+                throw std::runtime_error("Transpose operation failed");
+            }
+        } else {
+            std::cout << "Transposing on CPU" << std::endl;
+            transposed_attention = reshaped_attention.transpose();
+            std::cout << "Moving to GPU" << std::endl;
+            transposed_attention = transposed_attention.to_gpu();
+        }
+        
+        // Create output matrix with correct dimensions
+        std::cout << "Creating output matrix" << std::endl;
+        Matrix temp_grad(transposed_attention.rows(), output_proj.cols(), true);  // Create directly on GPU
         std::cout << "Matrix multiplication dimensions: " << temp_grad.rows() << "x" << temp_grad.cols() << std::endl;
-        cuda::matmul(reshaped_attention.transpose(), output_proj, &temp_grad);
+        
+        if (!cuda::customMatrixMultiply(transposed_attention, output_proj, temp_grad)) {
+            std::cout << "Matrix multiplication failed\n";
+            throw std::runtime_error("Matrix multiplication failed");
+        }
         output = temp_grad;
         std::cout << "Matrix multiplication successful" << std::endl;
     } catch (const std::exception& e) {
@@ -493,7 +540,12 @@ Matrix MultiHeadAttention::standard_attention(const Matrix& Q, const Matrix& K, 
         }
 
         // Compute attention scores with numerical stability
-        Matrix scores = matmul(Q_head, K_head.transpose());
+        Matrix K_head_t = K_head.transpose();
+        Matrix scores(Q_head.rows(), K_head.cols());
+        if (!cuda::customMatrixMultiply(Q_head, K_head_t, scores)) {
+            printf("Head %zu attention score computation failed\n", h);
+            return Matrix(0, 0);
+        }
         scores *= scale;
 
         // Apply mask and numerical stability improvements
@@ -583,23 +635,35 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
     std::cout << "Updating projection gradients..." << std::endl;
     
     // Update query gradients
-    Matrix d_query_hidden(d_query.rows(), query_proj.cols());  // Pre-allocate
-    cuda::matmul(d_query, query_proj, &d_query_hidden);
+    Matrix d_query_hidden(d_query.rows(), query_proj.cols());
+    if (!cuda::customMatrixMultiply(d_query, query_proj, d_query_hidden)) {
+        printf("Query gradient update failed\n");
+        throw std::runtime_error("Query gradient update failed");
+    }
     std::cout << "d_query_hidden dims: " << d_query_hidden.rows() << "x" << d_query_hidden.cols() << std::endl;
 
     // Update key gradients
-    Matrix d_key_hidden(d_key.rows(), key_proj.cols());  // Pre-allocate
-    cuda::matmul(d_key, key_proj, &d_key_hidden);
+    Matrix d_key_hidden(d_key.rows(), key_proj.cols());
+    if (!cuda::customMatrixMultiply(d_key, key_proj, d_key_hidden)) {
+        printf("Key gradient update failed\n");
+        throw std::runtime_error("Key gradient update failed");
+    }
     std::cout << "d_key_hidden dims: " << d_key_hidden.rows() << "x" << d_key_hidden.cols() << std::endl;
 
     // Update value gradients
-    Matrix d_value_hidden(d_value.rows(), value_proj.cols());  // Pre-allocate
-    cuda::matmul(d_value, value_proj, &d_value_hidden);
+    Matrix d_value_hidden(d_value.rows(), value_proj.cols());
+    if (!cuda::customMatrixMultiply(d_value, value_proj, d_value_hidden)) {
+        printf("Value gradient update failed\n");
+        throw std::runtime_error("Value gradient update failed");
+    }
     std::cout << "d_value_hidden dims: " << d_value_hidden.rows() << "x" << d_value_hidden.cols() << std::endl;
 
     // For output projection, we already have grad in hidden dimensions
     Matrix temp_grad(grad.transpose().rows(), input_matrix.cols());
-    cuda::matmul(grad.transpose(), input_matrix, &temp_grad);
+    if (!cuda::customMatrixMultiply(grad.transpose(), input_matrix, temp_grad)) {
+        printf("Output projection gradient update failed\n");
+        throw std::runtime_error("Output projection gradient update failed");
+    }
     output_proj_grad += temp_grad;
     std::cout << "output_proj_grad dimensions: " << output_proj_grad.rows() << "x" << output_proj_grad.cols() << std::endl;
 
@@ -841,7 +905,12 @@ Tensor MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
         }
 
         // Compute scores for this block
-        Matrix scores = matmul(Q_block, K.transpose());
+        Matrix K_t = K.transpose();
+        Matrix scores(Q_block.rows(), K.cols());
+        if (!cuda::customMatrixMultiply(Q_block, K_t, scores)) {
+            printf("Block %zu score computation failed\n", start_idx / BLOCK_SIZE);
+            return Tensor(Matrix(0, 0), std::vector<unsigned long>{0, 0, 0, 0});
+        }
         scores *= scale_factor;
 
         // Apply mask for this block if provided
@@ -1027,45 +1096,45 @@ void MultiHeadAttention::apply_stable_softmax(Matrix& x) const {
 }
 
 Matrix MultiHeadAttention::compute_query_gradients(const Matrix& grad, const Matrix& input) {
-    // Should produce (seq_len x seq_len) for attention scores
     int seq_len = input.rows();
-    Matrix d_query(seq_len, seq_len);  // Attention scores dimensions
+    Matrix d_query(seq_len, seq_len);
     
-    // First compute attention score gradients
-    cuda::compute_attention_scores(grad, input, d_query, 1.0f / std::sqrt(float(input.cols())), num_heads);
+    if (!cuda::customMatrixMultiply(grad, input, d_query)) {
+        printf("Query gradient computation failed\n");
+        return Matrix(0, 0);
+    }
     
-    std::cout << "compute_query_gradients dimensions:" << std::endl;
-    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
-    std::cout << "input: " << input.rows() << "x" << input.cols() << std::endl;
-    std::cout << "d_query: " << d_query.rows() << "x" << d_query.cols() << std::endl;
-
+    // Scale the gradients
+    float scale = 1.0f / std::sqrt(float(input.cols()));
+    for (size_t i = 0; i < d_query.rows(); ++i) {
+        for (size_t j = 0; j < d_query.cols(); ++j) {
+            d_query(i, j) *= scale;
+        }
+    }
+    
     return d_query;
 }
 
 Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matrix& input) {
-    int seq_len = input.rows();
-    // Use the new return-style matmul
     Matrix d_key(grad.rows(), key_proj.cols());
-    cuda::matmul(grad, key_proj.transpose(), &d_key);
+    Matrix key_proj_t = key_proj.transpose();
     
-    std::cout << "compute_key_gradients dimensions:" << std::endl;
-    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
-    std::cout << "key_proj: " << key_proj.rows() << "x" << key_proj.cols() << std::endl;
-    std::cout << "d_key: " << d_key.rows() << "x" << d_key.cols() << std::endl;
+    if (!cuda::customMatrixMultiply(grad, key_proj_t, d_key)) {
+        printf("Key gradient computation failed\n");
+        return Matrix(0, 0);
+    }
     
     return d_key;
 }
 
 Matrix MultiHeadAttention::compute_value_gradients(const Matrix& grad, const Matrix& input) {
-    int seq_len = input.rows();
-    // Use the new return-style matmul
     Matrix d_value(grad.rows(), value_proj.cols());
-    cuda::matmul(grad, value_proj.transpose(), &d_value);
+    Matrix value_proj_t = value_proj.transpose();
     
-    std::cout << "compute_value_gradients dimensions:" << std::endl;
-    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
-    std::cout << "value_proj: " << value_proj.rows() << "x" << value_proj.cols() << std::endl;
-    std::cout << "d_value: " << d_value.rows() << "x" << d_value.cols() << std::endl;
+    if (!cuda::customMatrixMultiply(grad, value_proj_t, d_value)) {
+        printf("Value gradient computation failed\n");
+        return Matrix(0, 0);
+    }
     
     return d_value;
 }

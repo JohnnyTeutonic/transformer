@@ -1,6 +1,6 @@
-#include "../include/cuda/attention_kernels.cuh"
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include "cuda/cuda_check.cuh"
+#include "cuda/attention_kernels.cuh"
 
 __global__ void attention_scores_kernel(const float* Q, const float* K, float* scores,
                                         const float scale, int seq_len, int head_dim) {

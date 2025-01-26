@@ -29,18 +29,10 @@ OptimizedLanguageModelHead::OptimizedLanguageModelHead(size_t hidden_size, size_
 }
 
 OptimizedLanguageModelHead::~OptimizedLanguageModelHead() {
-#ifdef USE_CUDA
-    if (cublas_handle) cublasDestroy(cublas_handle);
-    if (d_projection) cudaFree(d_projection);
-    if (d_bias) cudaFree(d_bias);
-    if (d_projection_fp16) cudaFree(d_projection_fp16);
-    if (d_hidden_states_fp16) cudaFree(d_hidden_states_fp16);
-    if (d_output_fp16) cudaFree(d_output_fp16);
-    if (d_output) cudaFree(d_output);
-    if (d_active_tokens) cudaFree(d_active_tokens);
-    if (d_active_token_indices) cudaFree(d_active_token_indices);
-    if (compute_stream) cudaStreamDestroy(compute_stream);
-#endif
+    // Cleanup CUDA resources
+    if (is_cuda_) {
+        cuda::cleanup_cuda();
+    }
 }
 
 Matrix OptimizedLanguageModelHead::project_to_vocab(const Matrix& input) {

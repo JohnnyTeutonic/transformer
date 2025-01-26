@@ -1,4 +1,3 @@
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include "../../include/cuda/attention_ops.cuh"
 #include "../../include/cuda/cuda_check.cuh"
@@ -42,10 +41,10 @@ namespace cuda {
 
             dim3 block(16, 16);
             dim3 grid((seq_len + block.x - 1) / block.x, (seq_len + block.y - 1) / block.y);
-            
+            printf("Launching kernel\n");
             attention_scores_kernel<<<grid, block>>>(d_Q, d_K, d_scores,
                 scale, seq_len, head_dim);
-                
+            printf("Kernel launched successfully\n");
             // Check for kernel launch errors
             cudaError_t err = cudaGetLastError();
             if (err != cudaSuccess) {

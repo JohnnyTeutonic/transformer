@@ -1,6 +1,9 @@
 #pragma once
 #include "matrix.hpp"
 #include <vector>
+#ifdef USE_CUDA
+#include <cuda_fp16.h>  // For half type
+#endif
 
 class LanguageModelHead {
 public:
@@ -54,12 +57,12 @@ private:
 
 #ifdef USE_CUDA
     // CUDA-specific members
-    cublasHandle_t cublas_handle{nullptr};
+    bool is_cuda_{false};
     float* d_projection{nullptr};
     float* d_bias{nullptr};
-    half* d_projection_fp16{nullptr};
-    half* d_hidden_states_fp16{nullptr};
-    half* d_output_fp16{nullptr};
+    __half* d_projection_fp16{nullptr};
+    __half* d_hidden_states_fp16{nullptr};
+    __half* d_output_fp16{nullptr};
     float* d_output{nullptr};
     unsigned char* d_active_tokens{nullptr};
     int* d_active_token_indices{nullptr};

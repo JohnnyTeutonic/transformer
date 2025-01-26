@@ -1,8 +1,8 @@
 // Include Matrix definition first
 #include "../../include/matrix.hpp"
+#include <stdexcept>
 
 #ifdef USE_CUDA
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
@@ -28,48 +28,45 @@ namespace cuda {
         if (A.cols() != B.rows()) {
             throw_runtime_error("Matrix multiplication dimension mismatch");
         }
-        printf("Matrix multiplication dimensions verified\n");
+        if (A.rows() == 0 || A.cols() == 0 || B.rows() == 0 || B.cols() == 0) {
+            throw_runtime_error("Matrix multiplication with zero dimensions");
+        }
+        printf("Matrix multiplication dimensions verified: (%zu x %zu) * (%zu x %zu)\n", 
+               A.rows(), A.cols(), B.rows(), B.cols());
+        
         // Initialize CUDA if needed
         if (!is_initialized()) {
             initialize_cuda();
         }
         printf("CUDA initialized\n");
+        
         // Create output matrix with correct dimensions
         Matrix C(A.rows(), B.cols());
+        if (C.rows() == 0 || C.cols() == 0) {
+            throw_runtime_error("Output matrix has zero dimensions");
+        }
 
         // First ensure all matrices are on GPU
         printf("Ensuring matrices are on GPU\n");
         Matrix A_gpu = A.is_cuda() ? A : A.to_gpu();
         Matrix B_gpu = B.is_cuda() ? B : B.to_gpu();
         Matrix C_gpu(C.rows(), C.cols(), nullptr, true);  // Create GPU matrix
-        printf("GPU matrices created\n");
-        // Get dimensions
-        const int M = A.rows();
-        const int N = B.cols();
-        const int K = A.cols();
-        printf("Dimensions: %d, %d, %d\n", M, N, K);
-        // Set scaling factors
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        printf("Scaling factors set\n");
-        // Get raw pointers
-        float* d_A = A_gpu.get_data();
-        float* d_B = B_gpu.get_data();
-        float* d_C = C_gpu.get_data();
+        
+        // Verify GPU matrices
+        if (!A_gpu.is_cuda() || !B_gpu.is_cuda() || !C_gpu.is_cuda()) {
+            throw_runtime_error("Failed to move matrices to GPU");
+        }
+        if (!A_gpu.get_data() || !B_gpu.get_data() || !C_gpu.get_data()) {
+            throw_runtime_error("Null GPU data pointers");
+        }
+        printf("GPU matrices created and verified\n");
 
-        // Get the global cuBLAS handle
-        extern cublasHandle_t cublas_handle;
-        printf("cuBLAS handle obtained\n");
-        // Perform matrix multiplication using cuBLAS
-        // Note: cuBLAS uses column-major order, so we compute C = B^T * A^T
-        printf("Performing matrix multiplication\n");
-        CUBLAS_CHECK(cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                N, M, K, &alpha,
-                                d_B, N,  // Leading dimension of B is N
-                                d_A, K,  // Leading dimension of A is K
-                                &beta,
-                                d_C, N));  // Leading dimension of C is N
+        // Use our custom matrix multiplication
+        if (!customMatrixMultiply(A_gpu, B_gpu, C_gpu)) {
+            throw_runtime_error("Matrix multiplication failed");
+        }
         printf("Matrix multiplication completed\n");
+        
         return C_gpu;
     }
 
@@ -78,12 +75,22 @@ namespace cuda {
             x = x.to_gpu();
         }
         
+        if (!x.is_cuda() || !x.get_data()) {
+            throw_runtime_error("Failed to prepare matrix for GELU");
+        }
+        
         dim3 block(256);
         dim3 grid((x.size() + block.x - 1) / block.x);
         
         gelu_forward_kernel<<<grid, block>>>(x.get_data(), x.size());
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
+        cudaError_t error = cudaGetLastError();
+        if (error != cudaSuccess) {
+            throw_runtime_error(cudaGetErrorString(error));
+        }
+        error = cudaDeviceSynchronize();
+        if (error != cudaSuccess) {
+            throw_runtime_error(cudaGetErrorString(error));
+        }
     }
 }
 
@@ -92,6 +99,8 @@ __global__ void gelu_forward_kernel(float* x, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float val = x[idx];
+        // Clamp input to avoid numerical instability
+        val = max(-20.0f, min(20.0f, val));
         float cdf = 0.5f * (1.0f + tanhf(0.797884f * (val + 0.044715f * val * val * val)));
         x[idx] = val * cdf;
     }

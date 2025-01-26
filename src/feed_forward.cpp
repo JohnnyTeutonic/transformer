@@ -11,6 +11,7 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <unordered_map>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -32,10 +33,23 @@ void matmul(const Matrix& a, const Matrix& b, Matrix& c) {
 
 FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dropout)
     : w1(hidden_size, intermediate_size), w2(intermediate_size, hidden_size), b1(intermediate_size),
-      b2(hidden_size), dropout_prob(dropout), intermediate_cache(1, intermediate_size),
-      // Initialize gradients with same dimensions as their parameters
+      b2(hidden_size), dropout_prob(dropout),
+      // Don't initialize intermediate_cache with fixed size
       dW1_(hidden_size, intermediate_size), dW2_(intermediate_size, hidden_size),
       db1_(intermediate_size), db2_(hidden_size) {
+
+    // Validate dimensions
+    if (hidden_size == 0) {
+        throw std::runtime_error("Hidden size cannot be zero");
+    }
+    if (intermediate_size == 0) {
+        throw std::runtime_error("Intermediate size cannot be zero");
+    }
+
+    std::cout << "Initializing FeedForward with dimensions:" << std::endl;
+    std::cout << "Hidden size: " << hidden_size << std::endl;
+    std::cout << "Intermediate size: " << intermediate_size << std::endl;
+    std::cout << "Dropout probability: " << dropout_prob << std::endl;
 
     // Initialize weights with Xavier/Glorot initialization
     std::random_device rd;
@@ -60,11 +74,11 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
         }
     }
 
-    // Initialize biases to zero
+    // Initialize biases to small non-zero values to prevent dead neurons
     for (size_t i = 0; i < b1.size(); ++i)
-        b1[i] = 0.0f;
+        b1[i] = 0.01f;  // Small positive bias
     for (size_t i = 0; i < b2.size(); ++i)
-        b2[i] = 0.0f;
+        b2[i] = 0.01f;  // Small positive bias
 
     // Initialize gradients to zero
     for (size_t i = 0; i < dW1_.rows(); ++i) {
@@ -83,158 +97,225 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
         db1_[i] = 0.0f;
     for (size_t i = 0; i < db2_.size(); ++i)
         db2_[i] = 0.0f;
+
+    // Verify initialization
+    std::cout << "Verifying matrix dimensions after initialization:" << std::endl;
+    std::cout << "W1: " << w1.rows() << "x" << w1.cols() << std::endl;
+    std::cout << "W2: " << w2.rows() << "x" << w2.cols() << std::endl;
+    std::cout << "b1: " << b1.size() << std::endl;
+    std::cout << "b2: " << b2.size() << std::endl;
 }
 
-Matrix FeedForward::forward(const Matrix& input) {
-    std::cout << "\n=== FeedForward::forward START ===" << std::endl;
-    std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
-    
-    // Declare matrices outside of conditional blocks
-    Matrix intermediate, output;
-    bool using_cuda = false;
-    
-#ifdef USE_CUDA
-    // Try to initialize CUDA first
-    cudaError_t err = cudaFree(0);  // Simple CUDA runtime test
-    if (err == cudaSuccess) {
-        printf("Using CUDA\n");
-        auto& memory_mgr = cuda::MemoryManager::get_instance();
-        printf("Memory manager instance obtained\n");
+Matrix FeedForward::forward(const Matrix& x, bool training) {
+    try {
+        // Check input dimensions
+        if (x.rows() == 0) {
+            throw std::runtime_error("Input matrix has zero rows. Expected positive number of rows, got 0");
+        }
+        if (x.cols() == 0) {
+            throw std::runtime_error("Input matrix has zero columns. Expected " + 
+                                   std::to_string(w1.rows()) + " columns, got 0");
+        }
+        if (x.cols() != w1.rows()) {
+            throw std::runtime_error("Input dimension mismatch. Expected " + 
+                                   std::to_string(w1.rows()) + " columns, got " + 
+                                   std::to_string(x.cols()));
+        }
+
+        // Print detailed dimensions for debugging
+        std::cout << "\nFeed Forward Dimensions:" << std::endl;
+        std::cout << "Input: " << x.rows() << "x" << x.cols() << std::endl;
+        std::cout << "W1: " << w1.rows() << "x" << w1.cols() << std::endl;
+        std::cout << "W2: " << w2.rows() << "x" << w2.cols() << std::endl;
+        std::cout << "b1: " << b1.size() << std::endl;
+        std::cout << "b2: " << b2.size() << std::endl;
+
+        // Verify weight matrix dimensions
+        if (w1.rows() == 0 || w1.cols() == 0) {
+            throw std::runtime_error("W1 has invalid dimensions: " + 
+                                   std::to_string(w1.rows()) + "x" + 
+                                   std::to_string(w1.cols()));
+        }
+        if (w2.rows() == 0 || w2.cols() == 0) {
+            throw std::runtime_error("W2 has invalid dimensions: " + 
+                                   std::to_string(w2.rows()) + "x" + 
+                                   std::to_string(w2.cols()));
+        }
+        if (w2.rows() != w1.cols()) {
+            throw std::runtime_error("Weight matrices dimension mismatch: W1 cols (" + 
+                                   std::to_string(w1.cols()) + ") != W2 rows (" + 
+                                   std::to_string(w2.rows()) + ")");
+        }
+
+        // Debug input
+        std::cout << "\nFeed Forward Input Stats:" << std::endl;
+        float min_x = std::numeric_limits<float>::max();
+        float max_x = -std::numeric_limits<float>::max();
+        float sum_x = 0.0f;
+        size_t nonzero = 0;
+        for (size_t i = 0; i < x.rows(); ++i) {
+            for (size_t j = 0; j < x.cols(); ++j) {
+                float val = x(i, j);
+                if (!std::isfinite(val)) {
+                    throw std::runtime_error("Non-finite input value detected at (" + 
+                                           std::to_string(i) + "," + std::to_string(j) + 
+                                           "): " + std::to_string(val));
+                }
+                min_x = std::min(min_x, val);
+                max_x = std::max(max_x, val);
+                sum_x += val;
+                if (val != 0.0f) nonzero++;
+            }
+        }
+        std::cout << "Input - Min: " << min_x << " Max: " << max_x 
+                  << " Mean: " << (sum_x / (x.rows() * x.cols()))
+                  << " Nonzero: " << nonzero << "/" << (x.rows() * x.cols()) << std::endl;
+
+        // Cache input for backward pass if training
+        if (training) {
+            input_cache_ = x;
+        }
+
+        // First linear transformation
+        Matrix intermediate(x.rows(), w1.cols());
         
-        try {
-            // Allocate memory for intermediate and output matrices
-            printf("Allocating memory for intermediate and output matrices\n");
-            size_t intermediate_size = input.rows() * w1.cols();
-            size_t output_size = input.rows() * w2.cols();
-            printf("Intermediate size: %zu, Output size: %zu\n", intermediate_size, output_size);
-            float* intermediate_data = memory_mgr.get_device_memory(intermediate_size);
-            float* output_data = memory_mgr.get_device_memory(output_size);
-            printf("Memory allocated for intermediate and output matrices\n");
-            // Create Matrix objects that wrap the device memory
-            Matrix intermediate(input.rows(), w1.cols(), intermediate_data, false);  // false means don't take ownership
-            Matrix output(input.rows(), w2.cols(), output_data, false);
-            printf("Matrix objects created\n");
-            // First matrix multiplication
-            cuda::matmul(input, w1, &intermediate);  // Changed back to matmul
-            printf("First matmul completed\n");
-            
-            // Apply bias and ReLU using CUDA kernels
-            cuda::FFNOps::add_bias_and_relu(intermediate, b1.data(), b1.size());
-            printf("Bias and ReLU applied\n");
-            
-            // Second matrix multiplication
-            cuda::matmul(intermediate, w2, &output);
-            printf("Second matmul completed\n");
-            
-            // Now safe to move the final results
-            intermediate = std::move(intermediate);
-            output = std::move(output);
-            printf("Final results moved\n");
-            using_cuda = true;
-            printf("CUDA computations completed successfully\n");
-        } catch (const std::exception& e) {
-            std::cerr << "Error in CUDA memory allocation: " << e.what() << std::endl;
-            std::cout << "Falling back to CPU implementation" << std::endl;
+        // Verify intermediate dimensions
+        if (intermediate.rows() == 0 || intermediate.cols() == 0) {
+            throw std::runtime_error("Intermediate matrix has zero dimensions: " + 
+                                   std::to_string(intermediate.rows()) + "x" + 
+                                   std::to_string(intermediate.cols()));
         }
-    } else {
-        std::cout << "CUDA not available, falling back to CPU implementation" << std::endl;
-    }
-#endif
+        
+        if (x.is_cuda() && w1.is_cuda()) {
+            #ifdef USE_CUDA
+            if (!cuda::customMatrixMultiply(x, w1, intermediate)) {
+                throw std::runtime_error("CUDA matrix multiplication failed for first layer");
+            }
+            #endif
+        } else {
+            matmul(x, w1, intermediate);
+        }
+        
+        // Debug after first multiplication
+        std::cout << "\nAfter First Matrix Multiplication:" << std::endl;
+        float min_inter = std::numeric_limits<float>::max();
+        float max_inter = -std::numeric_limits<float>::max();
+        float sum_inter = 0.0f;
+        nonzero = 0;
+        for (size_t i = 0; i < intermediate.rows(); ++i) {
+            for (size_t j = 0; j < intermediate.cols(); ++j) {
+                float val = intermediate(i, j);
+                if (!std::isfinite(val)) {
+                    throw std::runtime_error("Non-finite value after first matrix multiply at (" + 
+                                           std::to_string(i) + "," + std::to_string(j) + 
+                                           "): " + std::to_string(val));
+                }
+                min_inter = std::min(min_inter, val);
+                max_inter = std::max(max_inter, val);
+                sum_inter += val;
+                if (val != 0.0f) nonzero++;
+            }
+        }
+        std::cout << "Intermediate - Min: " << min_inter << " Max: " << max_inter 
+                  << " Mean: " << (sum_inter / (intermediate.rows() * intermediate.cols()))
+                  << " Nonzero: " << nonzero << "/" << (intermediate.rows() * intermediate.cols()) << std::endl;
+        
+        // Add bias with bounds checking
+        for (size_t i = 0; i < intermediate.rows(); ++i) {
+            for (size_t j = 0; j < intermediate.cols(); ++j) {
+                float val = intermediate(i, j) + b1[j];
+                if (!std::isfinite(val)) {
+                    throw std::runtime_error("Non-finite value after bias at (" + 
+                                           std::to_string(i) + "," + std::to_string(j) + 
+                                           "): " + std::to_string(val));
+                }
+                intermediate(i, j) = val;
+            }
+        }
 
-    // If CUDA failed or isn't available, use CPU implementation
-    if (!using_cuda) {
-        intermediate = Matrix(input.rows(), w1.cols());
-        output = Matrix(input.rows(), w2.cols());
-        std::cout << "Using CPU" << std::endl;
-        matmul(input, w1, intermediate);
-    }
+        // Apply GELU activation with bounds checking
+        const float sqrt_2_over_pi = std::sqrt(2.0f / M_PI);
+        for (size_t i = 0; i < intermediate.rows(); ++i) {
+            for (size_t j = 0; j < intermediate.cols(); ++j) {
+                float x_val = intermediate(i, j);
+                // Clamp input to avoid numerical instability, but use wider range
+                x_val = std::max(-20.0f, std::min(20.0f, x_val));
+                float gelu = x_val * 0.5f * (1.0f + std::erf(x_val / std::sqrt(2.0f)));
+                if (!std::isfinite(gelu)) {
+                    throw std::runtime_error("Non-finite value after GELU at (" + 
+                                           std::to_string(i) + "," + std::to_string(j) + 
+                                           "): " + std::to_string(gelu));
+                }
+                intermediate(i, j) = gelu;
+            }
+        }
 
-    // Debug intermediate values before ReLU
-    float min_pre_relu = std::numeric_limits<float>::infinity();
-    float max_pre_relu = -std::numeric_limits<float>::infinity();
-    float sum_pre_relu = 0.0f;
-    size_t nonzero_pre_relu = 0;
-    std::cout << "Intermediate matrix: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
-    for (size_t i = 0; i < intermediate.rows(); ++i) {
-        for (size_t j = 0; j < intermediate.cols(); ++j) {
-            float val = intermediate(i, j) + b1[j];
-            min_pre_relu = std::min(min_pre_relu, val);
-            max_pre_relu = std::max(max_pre_relu, val);
-            sum_pre_relu += val;
-            if (std::abs(val) > 1e-6) nonzero_pre_relu++;
+        // Cache intermediate values for backward pass if training
+        if (training) {
+            intermediate_cache = intermediate;
         }
-    }
-    
-    std::cout << "Before ReLU:" << std::endl;
-    std::cout << "Value range: [" << min_pre_relu << ", " << max_pre_relu << "]" << std::endl;
-    std::cout << "Mean: " << sum_pre_relu / (intermediate.rows() * intermediate.cols()) << std::endl;
-    std::cout << "Nonzero: " << nonzero_pre_relu << "/" 
-              << (intermediate.rows() * intermediate.cols()) << std::endl;
-    
-    // Add bias and apply activation
-    for (size_t i = 0; i < intermediate.rows(); ++i) {
-        for (size_t j = 0; j < intermediate.cols(); ++j) {
-            intermediate(i, j) += b1[j];
-            intermediate(i, j) = std::max(0.0f, intermediate(i, j)); // ReLU activation
-        }
-    }
-    
-    // Debug intermediate values after ReLU
-    float min_post_relu = std::numeric_limits<float>::infinity();
-    float max_post_relu = -std::numeric_limits<float>::infinity();
-    float sum_post_relu = 0.0f;
-    size_t nonzero_post_relu = 0;
-    
-    for (size_t i = 0; i < intermediate.rows(); ++i) {
-        for (size_t j = 0; j < intermediate.cols(); ++j) {
-            float val = intermediate(i, j);
-            min_post_relu = std::min(min_post_relu, val);
-            max_post_relu = std::max(max_post_relu, val);
-            sum_post_relu += val;
-            if (std::abs(val) > 1e-6) nonzero_post_relu++;
-        }
-    }
-    
-    std::cout << "After ReLU:" << std::endl;
-    std::cout << "Value range: [" << min_post_relu << ", " << max_post_relu << "]" << std::endl;
-    std::cout << "Mean: " << sum_post_relu / (intermediate.rows() * intermediate.cols()) << std::endl;
-    std::cout << "Nonzero: " << nonzero_post_relu << "/" 
-              << (intermediate.rows() * intermediate.cols()) << std::endl;
 
-    // Second matrix multiplication
-    if (using_cuda) {
-#ifdef USE_CUDA
-        cuda::matmul(intermediate, w2, &output);
-#endif
-    } else {
-        matmul(intermediate, w2, output);
-    }
-    
-    // Add bias and debug final output
-    float min_output = std::numeric_limits<float>::infinity();
-    float max_output = -std::numeric_limits<float>::infinity();
-    float sum_output = 0.0f;
-    size_t nonzero_output = 0;
-    
-    for (size_t i = 0; i < output.rows(); ++i) {
-        for (size_t j = 0; j < output.cols(); ++j) {
-            output(i, j) += b2[j];
-            float val = output(i, j);
-            min_output = std::min(min_output, val);
-            max_output = std::max(max_output, val);
-            sum_output += val;
-            if (std::abs(val) > 1e-6) nonzero_output++;
+        // Second linear transformation
+        Matrix output(intermediate.rows(), w2.cols());
+        
+        // Verify output dimensions
+        if (output.rows() == 0 || output.cols() == 0) {
+            throw std::runtime_error("Output matrix has zero dimensions: " + 
+                                   std::to_string(output.rows()) + "x" + 
+                                   std::to_string(output.cols()));
         }
+        
+        if (intermediate.is_cuda() && w2.is_cuda()) {
+            #ifdef USE_CUDA
+            if (!cuda::customMatrixMultiply(intermediate, w2, output)) {
+                throw std::runtime_error("CUDA matrix multiplication failed for second layer");
+            }
+            #endif
+        } else {
+            matmul(intermediate, w2, output);
+        }
+
+        // Debug final output
+        std::cout << "\nFinal Output Stats:" << std::endl;
+        float min_out = std::numeric_limits<float>::max();
+        float max_out = -std::numeric_limits<float>::max();
+        float sum_out = 0.0f;
+        nonzero = 0;
+        for (size_t i = 0; i < output.rows(); ++i) {
+            for (size_t j = 0; j < output.cols(); ++j) {
+                float val = output(i, j);
+                if (!std::isfinite(val)) {
+                    throw std::runtime_error("Non-finite value in output at (" + 
+                                           std::to_string(i) + "," + std::to_string(j) + 
+                                           "): " + std::to_string(val));
+                }
+                min_out = std::min(min_out, val);
+                max_out = std::max(max_out, val);
+                sum_out += val;
+                if (val != 0.0f) nonzero++;
+            }
+        }
+        std::cout << "Output - Min: " << min_out << " Max: " << max_out 
+                  << " Mean: " << (sum_out / (output.rows() * output.cols()))
+                  << " Nonzero: " << nonzero << "/" << (output.rows() * output.cols()) << std::endl;
+
+        // Add bias with bounds checking
+        for (size_t i = 0; i < output.rows(); ++i) {
+            for (size_t j = 0; j < output.cols(); ++j) {
+                float val = output(i, j) + b2[j];
+                if (!std::isfinite(val)) {
+                    throw std::runtime_error("Non-finite value after final bias at (" + 
+                                           std::to_string(i) + "," + std::to_string(j) + 
+                                           "): " + std::to_string(val));
+                }
+                output(i, j) = val;
+            }
+        }
+
+        return output;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Error in feed forward pass: " + std::string(e.what()));
     }
-    
-    std::cout << "Final output:" << std::endl;
-    std::cout << "Value range: [" << min_output << ", " << max_output << "]" << std::endl;
-    std::cout << "Mean: " << sum_output / (output.rows() * output.cols()) << std::endl;
-    std::cout << "Nonzero: " << nonzero_output << "/" 
-              << (output.rows() * output.cols()) << std::endl;
-    
-    std::cout << "=== FeedForward::forward END ===\n" << std::endl;
-    return output;
 }
 
 void FeedForward::save(std::ostream& os) const {
@@ -283,7 +364,10 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         Matrix d_intermediate(grad_output.rows(), w2.rows());  // [batch_size x intermediate_size]
         std::cout << "d_intermediate dims: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
         
-        cuda::matmul(grad_output, w2.transpose(), &d_intermediate);
+        Matrix w2_transposed = w2.transpose();
+        if (!cuda::customMatrixMultiply(grad_output, w2_transposed, d_intermediate)) {
+            throw std::runtime_error("Matrix multiplication failed");
+        }
         
         // Compute gradients for GELU activation
         Matrix gelu_grad = intermediate_cache;  // Create copy for in-place modification
@@ -299,7 +383,10 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         // Compute input gradients
         Matrix d_input(input.rows(), input.cols());  // [batch_size x hidden_size]
         std::cout << "d_input dims before matmul: " << d_input.rows() << "x" << d_input.cols() << std::endl;
-        cuda::matmul(d_intermediate, w1.transpose(), &d_input);
+        Matrix w1_transposed = w1.transpose();
+        if (!cuda::customMatrixMultiply(d_intermediate, w1_transposed, d_input)) {
+            throw std::runtime_error("Matrix multiplication failed");
+        }
         std::cout << "d_input dims after matmul: " << d_input.rows() << "x" << d_input.cols() << std::endl;
         
         // Verify output dimensions match input dimensions

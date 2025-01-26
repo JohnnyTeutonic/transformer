@@ -5,16 +5,21 @@
 class Matrix;
 
 namespace cuda {
+    // CUDA initialization and cleanup
     bool is_initialized();
     void initialize_cuda();
     void cleanup_cuda();
-    void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
-    
-    // Add CUDA host device specifier for Matrix operations
-    __host__ Matrix matmul(const Matrix& A, const Matrix& B, Matrix* output = nullptr);
-    __host__ void launch_attention_scores(const float* Q, const float* K, float* scores, float scale,
-                                int seq_len, int head_dim, cudaStream_t stream);
-    __host__ void launch_softmax(float* scores, int seq_len, cudaStream_t stream);
+
+    // Matrix operations
+    __host__ bool customMatrixMultiply(const Matrix& A, const Matrix& B, Matrix& C);
+    __host__ bool customMatrixTranspose(const Matrix& input, Matrix& output);
+    __host__ bool customMatrixReshape(const Matrix& input, Matrix& output);
+    __host__ void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
+
+    // Constants for optimized matrix operations
+    constexpr int TILE_SIZE = 32;      // Tile size for matrix operations
+    constexpr int BLOCK_ROWS = 8;      // Number of rows per thread block
+    constexpr int WARP_SIZE = 32;      // Size of a warp
 }
 
 // Include Matrix definition after forward declarations

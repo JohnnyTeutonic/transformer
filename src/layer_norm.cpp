@@ -36,6 +36,24 @@ Matrix LayerNorm::forward(const Matrix& input) {
     std::cout << "\n=== LayerNorm::forward START ===" << std::endl;
     std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
     
+    // Validate input dimensions
+    if (input.rows() == 0) {
+        throw std::runtime_error("LayerNorm received input with zero rows");
+    }
+    if (input.cols() != hidden_size_) {
+        throw std::runtime_error("LayerNorm input has wrong number of columns. Expected " + 
+                               std::to_string(hidden_size_) + ", got " + 
+                               std::to_string(input.cols()));
+    }
+    
+    // Validate gamma and beta dimensions
+    if (gamma_.cols() != hidden_size_ || beta_.cols() != hidden_size_) {
+        throw std::runtime_error("LayerNorm parameters have wrong dimensions. Expected " + 
+                               std::to_string(hidden_size_) + " columns, got gamma: " + 
+                               std::to_string(gamma_.cols()) + ", beta: " + 
+                               std::to_string(beta_.cols()));
+    }
+    
     Matrix output(input.rows(), input.cols());
     
     // Track statistics for debugging
@@ -51,7 +69,13 @@ Matrix LayerNorm::forward(const Matrix& input) {
         // Calculate mean
         float mean = 0.0f;
         for (size_t j = 0; j < input.cols(); ++j) {
-            mean += input(i, j);
+            float val = input(i, j);
+            if (!std::isfinite(val)) {
+                throw std::runtime_error("Non-finite input value at position (" + 
+                                       std::to_string(i) + "," + std::to_string(j) + 
+                                       "): " + std::to_string(val));
+            }
+            mean += val;
         }
         mean /= input.cols();
         min_mean = std::min(min_mean, mean);
@@ -69,11 +93,22 @@ Matrix LayerNorm::forward(const Matrix& input) {
         
         // Normalize and apply scale and shift
         float std_dev = std::sqrt(var + eps_);
+        if (std_dev == 0.0f) {
+            throw std::runtime_error("Zero standard deviation in LayerNorm at row " + 
+                                   std::to_string(i));
+        }
+        
         for (size_t j = 0; j < input.cols(); ++j) {
             float normalized = (input(i, j) - mean) / std_dev;
-            output(i, j) = gamma_(0, j) * normalized + beta_(0, j);
-            min_norm = std::min(min_norm, output(i, j));
-            max_norm = std::max(max_norm, output(i, j));
+            float val = gamma_(0, j) * normalized + beta_(0, j);
+            if (!std::isfinite(val)) {
+                throw std::runtime_error("Non-finite output value at position (" + 
+                                       std::to_string(i) + "," + std::to_string(j) + 
+                                       "): " + std::to_string(val));
+            }
+            output(i, j) = val;
+            min_norm = std::min(min_norm, val);
+            max_norm = std::max(max_norm, val);
         }
     }
     

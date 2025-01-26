@@ -45,11 +45,11 @@ class Matrix {
     size_t cols_;                    ///< Number of columns
     std::tuple<size_t, size_t> shape_; ///< Matrix shape as (rows, cols)
     bool owns_data_ = true;          ///< Whether this matrix owns its data or views external data
+    bool is_cuda_ = false;           ///< Whether this matrix is using CUDA memory
 
 #ifdef USE_CUDA
     float* gpu_data_ = nullptr;      ///< Matrix data storage on GPU
     bool is_on_gpu_ = false;         ///< Whether the data is currently on GPU
-    bool is_cuda_ = false;
 #endif
 
   public:
@@ -60,7 +60,11 @@ class Matrix {
      * @brief Check if matrix is using CUDA memory
      * @return true if matrix is using CUDA memory
      */
+#ifdef USE_CUDA
     bool is_cuda() const { return is_cuda_; }
+#else
+    bool is_cuda() const { return false; }
+#endif
 
     /**
      * @brief Default constructor.
@@ -443,11 +447,41 @@ class Matrix {
      */
     Matrix to_gpu() const {
         #ifdef USE_CUDA
+        printf("\n=== Starting Matrix GPU Transfer ===\n");
+        printf("Source matrix: %zux%zu\n", rows_, cols_);
+        printf("Current location: %s\n", is_cuda_ ? "GPU" : "CPU");
+        
+        if (is_cuda_) {
+            printf("Matrix already on GPU, returning copy\n");
+            return *this;
+        }
+        
         float* gpu_ptr;
         size_t total_size = rows_ * cols_ * sizeof(float);
-        cudaMalloc(&gpu_ptr, total_size);
-        cudaMemcpy(gpu_ptr, data_.data(), total_size, cudaMemcpyHostToDevice);
-        return Matrix(rows_, cols_, gpu_ptr, false);  // false indicates GPU ownership
+        printf("Allocating GPU memory: %zu bytes\n", total_size);
+        
+        // Check allocation
+        cudaError_t err = cudaMalloc(&gpu_ptr, total_size);
+        if (err != cudaSuccess) {
+            printf("CUDA malloc failed: %s\n", cudaGetErrorString(err));
+            throw std::runtime_error("GPU memory allocation failed");
+        }
+        printf("GPU memory allocated at: %p\n", static_cast<const void*>(gpu_ptr));
+
+        // Check memory transfer
+        printf("Transferring data to GPU...\n");
+        err = cudaMemcpy(gpu_ptr, data_.data(), total_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            printf("CUDA memcpy failed: %s\n", cudaGetErrorString(err));
+            cudaFree(gpu_ptr);  // Clean up allocated memory
+            throw std::runtime_error("GPU memory transfer failed");
+        }
+        printf("Data transfer complete\n");
+
+        printf("Creating new GPU Matrix\n");
+        Matrix gpu_matrix(rows_, cols_, gpu_ptr, false);  // false indicates GPU ownership
+        printf("=== GPU Transfer Complete ===\n\n");
+        return gpu_matrix;
         #else
         throw std::runtime_error("CUDA support not enabled");
         #endif

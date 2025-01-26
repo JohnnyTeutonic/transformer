@@ -68,9 +68,10 @@ class FeedForward {
     /**
      * @brief Performs the forward pass through the feed-forward network.
      * @param input Input tensor of shape [batch_size, seq_len, input_size]
+     * @param training Whether the model is in training mode
      * @return Output tensor of shape [batch_size, seq_len, hidden_size]
      */
-    Matrix forward(const Matrix& input);
+    Matrix forward(const Matrix& input, bool training = true);
 
     /**
      * @brief Performs the backward pass to compute gradients.

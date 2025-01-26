@@ -4,33 +4,80 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 
 TiktokenTokenizer::TiktokenTokenizer() = default;
 
 void TiktokenTokenizer::initialize(const std::string& encoding_name) {
     try {
-        std::cout << "Initializing custom GPT-2 tokenizer" << std::endl;
+        std::cout << "Initializing GPT-2 tokenizer" << std::endl;
         
-        // Load vocabulary file
-        std::filesystem::path vocab_path = "../build/tiktoken_data/gpt2.vocab";
+        // Print current working directory
+        std::cout << "Current working directory: " << std::filesystem::current_path() << std::endl;
+        
+        // Get the executable path and derive the project root
+        std::filesystem::path exe_path = std::filesystem::current_path();
+        std::filesystem::path project_root = exe_path.parent_path();  // Go up from build dir
+        
+        // Load vocabulary file using absolute paths
+        std::filesystem::path vocab_path = project_root / "scripts" / "tiktoken_data" / "gpt2.vocab.json";
+        std::filesystem::path merges_path = project_root / "scripts" / "tiktoken_data" / "gpt2.merges.json";
+        
+        // Print absolute paths
+        std::cout << "Absolute vocab path: " << vocab_path << std::endl;
+        std::cout << "Absolute merges path: " << merges_path << std::endl;
+        
         if (!std::filesystem::exists(vocab_path)) {
             throw std::runtime_error("GPT-2 vocabulary file not found at: " + vocab_path.string());
         }
+        if (!std::filesystem::exists(merges_path)) {
+            throw std::runtime_error("GPT-2 merges file not found at: " + merges_path.string());
+        }
 
+        // Create a custom encoding using the vocabulary and merges files
+        tiktoken_ = std::make_unique<tiktoken::Encoding>();
+        
+        // Load vocabulary
         std::ifstream vocab_file(vocab_path);
         if (!vocab_file.is_open()) {
             throw std::runtime_error("Failed to open vocabulary file: " + vocab_path.string());
         }
 
-        // Create a custom encoding using the vocabulary file
-        tiktoken_ = std::make_unique<tiktoken::Encoding>();
+        // Parse JSON vocabulary
+        nlohmann::json vocab_json;
+        vocab_file >> vocab_json;
         
-        // Read and add each token pair
-        std::string line;
-        int token_id = 5;  // Start after special tokens
-        while (std::getline(vocab_file, line)) {
-            if (!line.empty()) {
-                tiktoken_->add_special_token(line, token_id++);
+        // Add tokens from vocabulary
+        for (const auto& [token, id] : vocab_json.items()) {
+            tiktoken_->add_special_token(token, id);
+        }
+
+        // Load merges
+        std::ifstream merges_file(merges_path);
+        if (!merges_file.is_open()) {
+            throw std::runtime_error("Failed to open merges file: " + merges_path.string());
+        }
+
+        // Parse JSON merges
+        nlohmann::json merges_json;
+        merges_file >> merges_json;
+        
+        // Process merges
+        std::vector<std::string> tokens;
+        for (const auto& merge_str : merges_json) {
+            if (merge_str.is_string()) {
+                std::string merge = merge_str.get<std::string>();
+                // Split the merge rule
+                size_t space_pos = merge.find(' ');
+                if (space_pos != std::string::npos) {
+                    std::string first = merge.substr(0, space_pos);
+                    std::string second = merge.substr(space_pos + 1);
+                    // Add both parts as individual tokens if they're not already in vocab
+                    tiktoken_->add_special_token(first, tiktoken_->get_vocab_size());
+                    tiktoken_->add_special_token(second, tiktoken_->get_vocab_size());
+                    // Add the merged token
+                    tiktoken_->add_special_token(first + second, tiktoken_->get_vocab_size());
+                }
             }
         }
 
