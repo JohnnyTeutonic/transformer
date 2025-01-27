@@ -6,11 +6,17 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "tiktoken_tokenizer.hpp"
+#include "utils/hash_utils.hpp"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
+#endif
+
+#ifdef USE_OPENMP
+#include <omp.h>
 #endif
 
 /**
@@ -24,6 +30,7 @@
  * - Adam optimizer integration
  * - Dropout regularization
  */
+
 class LanguageModelHead {
   private:
     Matrix projection;                    ///< Projection matrix to vocabulary space
@@ -34,6 +41,10 @@ class LanguageModelHead {
     Matrix hidden_states;                ///< Cached hidden states for backward pass
     Matrix hidden_states_;               ///< Cached hidden states for forward pass
     std::vector<float> token_frequencies; ///< Tracked frequencies of token usage
+    std::shared_ptr<TiktokenTokenizer> tokenizer_;  // Add tokenizer member
+    std::unordered_map<std::pair<std::string, std::string>, int, pair_hash> bpe_merge_frequencies;
+    const int merge_threshold = 5;  // Minimum frequency for a merge to be considered common
+    std::vector<int> prev_tokens;  // Store previous tokens for BPE context
 
     // Vocabulary pruning
     static constexpr size_t PRUNE_INTERVAL = 100;  // Update active tokens every N steps
@@ -94,8 +105,10 @@ class LanguageModelHead {
      * @brief Constructs a language model head.
      * @param hidden_size Size of input hidden states
      * @param vocab_size Size of the vocabulary
+     * @param tokenizer Shared pointer to the tokenizer
      */
-    LanguageModelHead(size_t hidden_size, size_t vocab_size);
+    LanguageModelHead(size_t hidden_size, size_t vocab_size, 
+                     std::shared_ptr<TiktokenTokenizer> tokenizer);
 
     ~LanguageModelHead();  // Just declare it here
 
@@ -204,15 +217,10 @@ class LanguageModelHead {
     /**
      * @brief Loads a model head from a stream.
      * @param is Input stream to load from
+     * @param tokenizer Shared pointer to the tokenizer
      * @return Unique pointer to loaded model head
      */
-    static std::unique_ptr<LanguageModelHead> load(std::istream& is) {
-        auto lm_head = std::make_unique<LanguageModelHead>(0, 0); // Temporary sizes
-        lm_head->projection = Matrix::load(is);
-        lm_head->bias = Vector::load(is);
-        is.read(reinterpret_cast<char*>(&lm_head->dropout_prob), sizeof(lm_head->dropout_prob));
-        return lm_head;
-    }
+    static std::unique_ptr<LanguageModelHead> load(std::istream& is, std::shared_ptr<TiktokenTokenizer> tokenizer);
 
     /**
      * @brief Gets references to trainable parameters.
@@ -259,4 +267,10 @@ class LanguageModelHead {
      * @param min_frequency_threshold Minimum frequency threshold for keeping tokens
      */
     void prune_vocabulary(float min_frequency_threshold = 1e-5);
+
+    // Add getter for tokenizer
+    std::shared_ptr<TiktokenTokenizer> get_tokenizer() const { return tokenizer_; }
+
+    // Add this declaration
+    bool is_common_merge(const std::string& token1, const std::string& token2);
 };

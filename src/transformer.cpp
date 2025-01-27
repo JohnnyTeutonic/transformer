@@ -339,7 +339,8 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
 }
 
 // Transformer implementation
-Transformer::Transformer(const TransformerConfig& config) : config(config) {
+Transformer::Transformer(const TransformerConfig& config, std::shared_ptr<TiktokenTokenizer> tokenizer)
+    : config(config) {
     // Initialize dropout with config probability
     dropout = std::make_unique<Dropout>(config.dropout_prob);
 
@@ -367,8 +368,12 @@ Transformer::Transformer(const TransformerConfig& config) : config(config) {
     // Initialize final layer normalization
     final_ln = std::make_unique<LayerNorm>(config.hidden_size);
 
-    // Initialize the language model head with bounded values
-    lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+    // Initialize the language model head with bounded values and tokenizer
+    lm_head = std::make_unique<LanguageModelHead>(
+        config.hidden_size,
+        config.vocab_size,
+        tokenizer
+    );
 }
 
 Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const Tokenizer& tokenizer, bool use_cache) {
@@ -746,8 +751,9 @@ void Transformer::load(std::istream& is) {
         // Load final layer norm
         final_ln->load(is);
 
-        // Load language model head
-        lm_head->load(is);
+        // Load language model head - pass the tokenizer from the existing lm_head
+        auto tokenizer = lm_head->get_tokenizer();  // Add this getter to LanguageModelHead
+        lm_head = LanguageModelHead::load(is, tokenizer);
 
     } catch (const std::exception& e) {
         throw std::runtime_error("Error loading transformer: " + std::string(e.what()));

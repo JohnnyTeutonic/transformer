@@ -185,16 +185,16 @@ class TransformerLayer {
  */
 class Transformer {
   private:
-    TransformerConfig config;                          ///< Model configuration parameters
-    std::unique_ptr<TokenEmbedding> token_embedding;   ///< Token embedding layer
-    std::unique_ptr<PositionalEncoding> pos_encoding;  ///< Positional encoding layer
-    std::vector<std::unique_ptr<TransformerLayer>> layers;  ///< Stack of transformer layers
-    std::unique_ptr<LayerNorm> final_ln;              ///< Final layer normalization
-    std::unique_ptr<LanguageModelHead> lm_head;       ///< Output layer for token prediction
-    std::unique_ptr<Dropout> dropout;                 ///< Dropout layer
-    bool cuda_initialized = false;                    ///< Whether CUDA has been initialized
-    std::vector<int> last_input_tokens_;             ///< Store the last input tokens
-    std::string last_input_query_;                   ///< Store the original input query
+    const TransformerConfig& config;
+    std::unique_ptr<TokenEmbedding> token_embedding;
+    std::unique_ptr<PositionalEncoding> pos_encoding;
+    std::vector<std::unique_ptr<TransformerLayer>> layers;
+    std::unique_ptr<LayerNorm> final_ln;
+    std::unique_ptr<LanguageModelHead> lm_head;
+    std::unique_ptr<Dropout> dropout;
+    bool cuda_initialized = false;
+    std::vector<int> last_input_tokens_;
+    std::string last_input_query_;
 
     // Cached states for backward pass
     Matrix hidden_states;
@@ -240,7 +240,7 @@ class Transformer {
      * @brief Constructs a transformer model with the given configuration.
      * @param config Configuration parameters for the transformer
      */
-    explicit Transformer(const TransformerConfig& config);
+    Transformer(const TransformerConfig& config, std::shared_ptr<TiktokenTokenizer> tokenizer);
 
     /**
      * @brief Performs the forward pass through the transformer.

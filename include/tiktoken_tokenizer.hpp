@@ -1,40 +1,32 @@
 #pragma once
-#include <string>
-#include <vector>
-#include <memory>
-#include <unordered_map>
+#include "tokenizer.hpp"
 #include "tiktoken/tiktoken/tiktoken.hpp"
 #include "token_constants.hpp"
+#include "utils/hash_utils.hpp"  // Already has pair_hash definition
 
-class TiktokenTokenizer {
+class TiktokenTokenizer : public Tokenizer {
 public:
     TiktokenTokenizer();
-    ~TiktokenTokenizer() = default;
+    ~TiktokenTokenizer() override = default;
 
-    // Core tokenization methods
-    std::vector<int> encode(const std::string& text) const;
-    std::string decode(const std::vector<int>& tokens) const;
+    // Debug logging control
+    static void set_debug_logging(bool enable);
 
-    // Special token getters - using our constants
-    int get_pad_token_id() const { return tokens::PAD_ID; }
-    int get_unk_token_id() const { return tokens::UNK_ID; }
-    int get_bos_token_id() const { return tokens::BOS_ID; }
-    int get_eos_token_id() const { return tokens::EOS_ID; }
-    int get_mask_token_id() const { return tokens::MASK_ID; }
-
-    // Vocabulary size
-    size_t vocab_size() const;
-
-    // Initialize with model type
+    // Implement all pure virtual functions
+    std::vector<int> encode(const std::string& text) const override;
+    std::string decode(const std::vector<int>& tokens) const override;
+    void preprocess_text(std::string& text) const override;
+    bool is_special_token(int token_id) const override;
+    int get_pad_token_id() const override { return tokens::PAD_ID; }
+    int get_unk_token_id() const override { return tokens::UNK_ID; }
+    int get_bos_token_id() const override { return tokens::BOS_ID; }
+    int get_eos_token_id() const override { return tokens::EOS_ID; }
+    int get_mask_token_id() const override { return tokens::MASK_ID; }
+    size_t vocab_size() const override;
+    bool is_initialized() const override { return tiktoken_ != nullptr; }
     void initialize(const std::string& encoding_name = "cl100k_base");
-
-    bool is_initialized() const { return tiktoken_ != nullptr; }
-
-    void set_vocab_size(size_t size) {
-        target_vocab_size = size;
-    }
-
-    static void set_debug_logging(bool enable);  // Add static method to control logging
+    void initialize() override { initialize("gpt2"); }
+    void print_vocabulary_mappings() const override;
 
 private:
     std::unique_ptr<tiktoken::Encoding> tiktoken_;
@@ -53,6 +45,16 @@ private:
     // Helper to build frequency-based vocabulary
     void build_vocabulary_from_frequencies();
 
+    // Validation helper functions
+    void validate_tokenization();
+    void track_bpe_merges(const std::string& text);
+
     size_t target_vocab_size = 7000;  // Keep the reduced vocabulary size
     static bool debug_logging_;  // Add static debug flag
+
+    // Change from static to instance member
+    std::unordered_map<std::pair<std::string, std::string>, int, pair_hash> bpe_merges;
+
+protected:
+    void save_vocabulary(std::ostream& os) const override;
 }; 

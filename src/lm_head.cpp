@@ -11,10 +11,11 @@
 #include <cuda_fp16.h>
 #endif
 
-LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
+LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size, 
+                                   std::shared_ptr<TiktokenTokenizer> tokenizer)
     : hidden_size_(hidden_size), vocab_size_(vocab_size), projection(hidden_size, vocab_size),
       bias(vocab_size, 0.0f), token_frequencies(vocab_size, 0.0f), pruning_threshold(1e-6f),
-      active_tokens(vocab_size, 1), training_steps(0)
+      active_tokens(vocab_size, 1), training_steps(0), tokenizer_(tokenizer)
 {
     // Initialize with smaller scale due to large vocab size
     float scale = std::sqrt(2.0f / hidden_size);  // Scale based on input dim only
@@ -82,15 +83,54 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
     float sum_proj = 0.0f;
     size_t nonzero_proj = 0;
     
+    // First pass - get min, max, sum
+    #pragma omp parallel for collapse(2) reduction(min:min_proj) reduction(max:max_proj) reduction(+:sum_proj)
     for (size_t i = 0; i < projection.rows(); i++) {
         for (size_t j = 0; j < projection.cols(); j++) {
             float val = projection(i, j);
             min_proj = std::min(min_proj, val);
             max_proj = std::max(max_proj, val);
             sum_proj += val;
-            if (std::abs(val) > 1e-6) nonzero_proj++;
         }
     }
+
+    // Second pass - count non-zero elements with progress bar
+    const int bar_width = 50;
+    const size_t total_elements = projection.rows() * projection.cols();
+    size_t last_nonzero_count = 0;  // Track last reported non-zero count
+    
+    std::cout << "\nCounting non-zero projections:\n" << std::flush;
+    
+    #pragma omp parallel for collapse(2) reduction(+:nonzero_proj) ordered
+    for (size_t i = 0; i < projection.rows(); i++) {
+        for (size_t j = 0; j < projection.cols(); j++) {
+            float val = projection(i, j);
+            if (std::abs(val) > 1e-6) {
+                nonzero_proj++;
+                #pragma omp ordered
+                {
+                    // Update progress bar when we find new non-zero elements
+                    if (nonzero_proj % 10000 == 0 || nonzero_proj > last_nonzero_count) {
+                        float progress = float(nonzero_proj) / 6442179;  // Expected non-zero count
+                        int pos = bar_width * progress;
+                        
+                        std::cout << "\r[";
+                        for (int k = 0; k < bar_width; ++k) {
+                            if (k < pos) std::cout << "=";
+                            else if (k == pos) std::cout << ">";
+                            else std::cout << " ";
+                        }
+                        std::cout << "] " << std::fixed << std::setprecision(1) 
+                                 << (progress * 100.0) << "% "
+                                 << "(" << nonzero_proj << " non-zero elements found)" 
+                                 << std::flush;
+                        last_nonzero_count = nonzero_proj;
+                    }
+                }
+            }
+        }
+    }
+    std::cout << std::endl << std::endl;  // Add extra newlines for spacing
     
     std::cout << "Projection Matrix Statistics:\n"
               << "Min proj: " << min_proj << "\n"
@@ -102,27 +142,35 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
     // Compute logits
     Matrix logits = matmul(scaled_hidden, projection);
     
-    // Add bias and compute logits
+    // Add bias and compute logits with improved BPE handling
     #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < logits.rows(); ++i) {
         for (size_t j = 0; j < logits.cols(); ++j) {
             logits(i, j) += bias[j];
             
-            // Apply more balanced penalties for special tokens
-            if (j == static_cast<size_t>(tokens::UNK_ID)) {
-                // Reduced penalty for UNK token
-                logits(i, j) -= 8.0f;
-            } else if (token_frequencies[j] < 1e-6) {
-                // Reduced penalty for rare tokens
-                logits(i, j) -= 4.0f;
-            } else if (token_frequencies[j] < 1e-4) {
-                // Minimal penalty for uncommon tokens
-                logits(i, j) -= 2.0f;
+            std::string token = tokenizer_->decode({static_cast<int>(j)});
+            
+            // Handle BPE-specific cases
+            if (token.find("Ġ") == std::string::npos && j != 0) {
+                // This is a continuation piece from BPE
+                if (i > 0) {
+                    // Look at previous token to check if this is a valid merge
+                    int prev_token = prev_tokens[i-1];
+                    std::string prev = tokenizer_->decode({prev_token});
+                    
+                    // If this isn't a common merge, penalize it
+                    if (!is_common_merge(prev, token)) {
+                        logits(i, j) -= 4.0f;
+                    }
+                } else {
+                    // Penalize starting with a continuation piece
+                    logits(i, j) -= 6.0f;
+                }
             }
             
-            // Add small bonus for common tokens
-            if (token_frequencies[j] > 1e-2) {
-                logits(i, j) += 1.0f;
+            // Additional penalties for special/rare tokens
+            if (j == static_cast<size_t>(tokens::UNK_ID)) {
+                logits(i, j) -= 8.0f;
             }
         }
     }
@@ -158,9 +206,9 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
     float sum_logits = 0.0f;
     size_t active_logits = 0;
     
-    const int bar_width = 50;
-    const size_t total_elements = logits.rows() * logits.cols();
-    size_t processed_elements = 0;
+    const int logits_bar_width = 50;
+    const size_t logits_total = logits.rows() * logits.cols();
+    size_t logits_processed = 0;
     
     std::cout << "\nCounting active logits:\n" << std::flush;
     
@@ -172,29 +220,29 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
             sum_logits += val;
             if (val > 1e-6) active_logits++;
             
-            processed_elements++;
+            logits_processed++;
             
             // Update progress bar every 1000 elements for smoother display
-            if (processed_elements % 1000 == 0 || processed_elements == total_elements) {
-                float progress = float(processed_elements) / total_elements;
-                int pos = bar_width * progress;
+            if (logits_processed % 1000 == 0 || logits_processed == logits_total) {
+                float progress = float(logits_processed) / logits_total;
+                int pos = logits_bar_width * progress;
                 
                 std::cout << "\r[";
-                for (int k = 0; k < bar_width; ++k) {
+                for (int k = 0; k < logits_bar_width; ++k) {
                     if (k < pos) std::cout << "=";
                     else if (k == pos) std::cout << ">";
                     else std::cout << " ";
                 }
                 std::cout << "] " << std::fixed << std::setprecision(1) 
                          << (progress * 100.0) << "% "
-                         << "(" << processed_elements << "/" << total_elements << ")" 
+                         << "(" << logits_processed << "/" << logits_total << ")" 
                          << std::flush;
             }
         }
     }
     std::cout << std::endl << std::endl;  // Add extra newline for spacing
     
-    float mean_logit = sum_logits / total_elements;
+    float mean_logit = sum_logits / logits_total;
     float range = max_logit - min_logit;
     
     std::cout << "Logit Statistics in forward_impl:\n"
@@ -202,7 +250,7 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
               << "Max logit: " << max_logit << "\n"
               << "Mean logit: " << mean_logit << "\n"
               << "Range: " << range << "\n"
-              << "Active logits: " << active_logits << "/" << total_elements << "\n\n";
+              << "Active logits: " << active_logits << "/" << logits_total << "\n\n";
     
     return logits;
 }
@@ -332,9 +380,11 @@ void LanguageModelHead::backward_linear(const Matrix& grad_output) {
     Matrix grad_proj = matmul(scaled_hidden.transpose(), grad_output);
     Vector grad_bias(bias.size(), 0.0f);
 
-    #pragma omp parallel for collapse(2) reduction(+:grad_bias[:bias.size()])
+    // First compute grad_bias without reduction
+    #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < grad_output.rows(); i++) {
         for (size_t j = 0; j < grad_output.cols(); j++) {
+            #pragma omp atomic
             grad_bias[j] += grad_output(i, j);
         }
     }
@@ -367,6 +417,22 @@ void LanguageModelHead::backward_linear(const Matrix& grad_output) {
 }
 
 void LanguageModelHead::update_token_frequencies(const std::vector<int>& tokens) {
+    // Add debug logging
+    if (training_steps % 100 == 0) {  // Log every 100 steps
+        std::cout << "\nToken frequency update at step " << training_steps << ":\n";
+        std::cout << "Most frequent tokens:\n";
+        std::vector<std::pair<float, size_t>> freq_pairs;
+        for (size_t i = 0; i < token_frequencies.size(); i++) {
+            freq_pairs.push_back({token_frequencies[i], i});
+        }
+        std::partial_sort(freq_pairs.begin(), freq_pairs.begin() + 10, freq_pairs.end(),
+                         std::greater<>());
+        for (int i = 0; i < 10; i++) {
+            std::cout << "  Token " << freq_pairs[i].second << ": " 
+                     << freq_pairs[i].first << "\n";
+        }
+    }
+    
     // Reset frequencies periodically to prevent over-accumulation
     if (training_steps % 1000 == 0) {  // Reset every 1000 steps
         std::fill(token_frequencies.begin(), token_frequencies.end(), 0.0f);
@@ -429,6 +495,13 @@ void LanguageModelHead::update_active_tokens() {
     }
 }
 
+bool LanguageModelHead::is_common_merge(const std::string& token1, const std::string& token2) {
+    // Check if this pair appears frequently in training data
+    auto merge_pair = std::make_pair(token1, token2);
+    auto it = bpe_merge_frequencies.find(merge_pair);
+    return it != bpe_merge_frequencies.end() && it->second > merge_threshold;
+}
+
 #ifdef USE_CUDA
 // Add the new GPU kernel for FP16 conversion
 __global__ void convert_projection_to_fp16_kernel(
@@ -457,4 +530,26 @@ LanguageModelHead::~LanguageModelHead() {
     if (d_active_token_indices) cudaFree(d_active_token_indices);
     if (compute_stream) cudaStreamDestroy(compute_stream);
 #endif
+}
+
+std::unique_ptr<LanguageModelHead> LanguageModelHead::load(std::istream& is, std::shared_ptr<TiktokenTokenizer> tokenizer) {
+    // First load all the data
+    auto projection = Matrix::load(is);
+    auto bias = Vector::load(is);
+    float dropout_prob;
+    is.read(reinterpret_cast<char*>(&dropout_prob), sizeof(dropout_prob));
+    
+    // Create the object with proper parameters
+    auto lm_head = std::unique_ptr<LanguageModelHead>(new LanguageModelHead(
+        projection.cols(),  // hidden_size
+        bias.size(),       // vocab_size (use bias size instead of projection rows)
+        tokenizer
+    ));
+    
+    // Move the loaded data into the object
+    lm_head->projection = std::move(projection);
+    lm_head->bias = std::move(bias);
+    lm_head->dropout_prob = dropout_prob;
+    
+    return lm_head;
 } 

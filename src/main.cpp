@@ -5,7 +5,7 @@
 #include "../include/tokenizer.hpp"
 
 // Add necessary forward declarations and structures
-std::unique_ptr<Tokenizer> tokenizer;
+std::shared_ptr<TiktokenTokenizer> tokenizer;
 PerformanceMetrics metrics; // Single definition of the global metrics variable
 
 // Configuration constants
@@ -49,24 +49,26 @@ int main(int argc, char* argv[]) {
 
         // Initialize tokenizer with config
         std::cout << "Initializing tiktoken with encoding: gpt2" << std::endl;
-        tokenizer = std::make_unique<Tokenizer>("gpt2");
-        
-        try {
-            tokenizer->initialize();  // Initialize with default encoding
-            std::cout << "Initialized tokenizer. Vocabulary size: " 
-                      << tokenizer->vocab_size() << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
-            return 1;
+        tokenizer = std::make_shared<TiktokenTokenizer>();  // Create shared tokenizer
+        auto* tiktoken_ptr = dynamic_cast<TiktokenTokenizer*>(tokenizer.get());
+        if (!tiktoken_ptr) {
+            throw std::runtime_error("Failed to cast tokenizer to TiktokenTokenizer");
         }
+        tiktoken_ptr->initialize("gpt2");
 
         // Update vocabulary size in config based on tokenizer
         config.vocab_size = tokenizer->vocab_size();
         std::cout << "Using vocabulary size: " << config.vocab_size << std::endl;
 
-        // Initialize model with updated config
-        Transformer transformer(config);
-        auto lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+        // Create transformer with the tokenizer
+        Transformer transformer(config, tokenizer);  // tokenizer is already a shared_ptr<TiktokenTokenizer>
+
+        // Use the same tokenizer for lm_head
+        auto lm_head = std::make_unique<LanguageModelHead>(
+            config.hidden_size, 
+            config.vocab_size, 
+            tokenizer  // Use the same shared_ptr
+        );
 
         // Setup advanced components
         TensorCache<Matrix> activation_cache(1024, CacheReplacementPolicy::ARC);
