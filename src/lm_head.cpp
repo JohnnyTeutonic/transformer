@@ -5,6 +5,7 @@
 #include <iostream>
 #include <algorithm>
 #include <random>
+#include <atomic>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -81,7 +82,6 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
     float min_proj = std::numeric_limits<float>::infinity();
     float max_proj = -std::numeric_limits<float>::infinity();
     float sum_proj = 0.0f;
-    size_t nonzero_proj = 0;
     
     // First pass - get min, max, sum
     #pragma omp parallel for collapse(2) reduction(min:min_proj) reduction(max:max_proj) reduction(+:sum_proj)
@@ -94,45 +94,19 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
         }
     }
 
-    // Second pass - count non-zero elements with progress bar
-    const int bar_width = 50;
-    const size_t total_elements = projection.rows() * projection.cols();
-    size_t last_nonzero_count = 0;  // Track last reported non-zero count
-    
-    std::cout << "\nCounting non-zero projections:\n" << std::flush;
-    
-    #pragma omp parallel for collapse(2) reduction(+:nonzero_proj) ordered
+    // Second pass - count non-zero elements
+    size_t nonzero_proj = 0;
+    #pragma omp parallel for collapse(2) reduction(+:nonzero_proj)
     for (size_t i = 0; i < projection.rows(); i++) {
         for (size_t j = 0; j < projection.cols(); j++) {
             float val = projection(i, j);
             if (std::abs(val) > 1e-6) {
                 nonzero_proj++;
-                #pragma omp ordered
-                {
-                    // Update progress bar when we find new non-zero elements
-                    if (nonzero_proj % 10000 == 0 || nonzero_proj > last_nonzero_count) {
-                        float progress = float(nonzero_proj) / 6442179;  // Expected non-zero count
-                        int pos = bar_width * progress;
-                        
-                        std::cout << "\r[";
-                        for (int k = 0; k < bar_width; ++k) {
-                            if (k < pos) std::cout << "=";
-                            else if (k == pos) std::cout << ">";
-                            else std::cout << " ";
-                        }
-                        std::cout << "] " << std::fixed << std::setprecision(1) 
-                                 << (progress * 100.0) << "% "
-                                 << "(" << nonzero_proj << " non-zero elements found)" 
-                                 << std::flush;
-                        last_nonzero_count = nonzero_proj;
-                    }
-                }
             }
         }
     }
-    std::cout << std::endl << std::endl;  // Add extra newlines for spacing
     
-    std::cout << "Projection Matrix Statistics:\n"
+    std::cout << "\nProjection Matrix Statistics:\n"
               << "Min proj: " << min_proj << "\n"
               << "Max proj: " << max_proj << "\n"
               << "Mean proj: " << sum_proj / (projection.rows() * projection.cols()) << "\n"
@@ -553,3 +527,4 @@ std::unique_ptr<LanguageModelHead> LanguageModelHead::load(std::istream& is, std
     
     return lm_head;
 } 
+
