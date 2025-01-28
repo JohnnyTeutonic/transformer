@@ -295,6 +295,11 @@ std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
         throw std::runtime_error("Could not open training data file: " + file_path.string());
     }
 
+    // Create separate vectors for different types of training data
+    std::vector<std::pair<std::string, std::string>> noun_phrases;
+    std::vector<std::pair<std::string, std::string>> verb_phrases;
+    std::vector<std::pair<std::string, std::string>> adjective_phrases;
+    
     std::string line;
     std::unordered_map<std::string, int> token_frequency;
     size_t total_tokens = 0;
@@ -305,25 +310,61 @@ std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
         if (delimiter_pos != std::string::npos) {
             std::string input = line.substr(0, delimiter_pos);
             std::string output = line.substr(delimiter_pos + 1);
-            training_pairs.emplace_back(input, output);
             
-            // Count tokens in both input and output
+            // Categorize based on the last word of the output
+            std::istringstream iss(output);
+            std::string last_word;
+            std::string word;
+            while (iss >> word) {
+                last_word = word;
+            }
+            
+            auto pair = std::make_pair(input, output);
+            
+            // Simple heuristic: check last word for categorization
+            if (output.find("lab") != std::string::npos || 
+                output.find("room") != std::string::npos || 
+                output.find("center") != std::string::npos) {
+                noun_phrases.push_back(pair);
+            } else if (last_word.find("ing") != std::string::npos || 
+                      last_word == "run" || last_word == "walk" || 
+                      last_word == "talk") {
+                verb_phrases.push_back(pair);
+            } else {
+                adjective_phrases.push_back(pair);
+            }
+            
+            // Count tokens for statistics
             for (const auto& text : {input, output}) {
-                std::istringstream iss(text);
-                std::string word;
-                while (iss >> word) {
-                    token_frequency[word]++;
+                std::istringstream token_iss(text);
+                std::string token;
+                while (token_iss >> token) {
+                    token_frequency[token]++;
                     total_tokens++;
                 }
             }
         }
     }
     
+    // Shuffle each category independently
+    auto rng = std::default_random_engine(std::random_device{}());
+    std::shuffle(noun_phrases.begin(), noun_phrases.end(), rng);
+    std::shuffle(verb_phrases.begin(), verb_phrases.end(), rng);
+    std::shuffle(adjective_phrases.begin(), adjective_phrases.end(), rng);
+    
+    // Combine all categories
+    training_pairs.insert(training_pairs.end(), noun_phrases.begin(), noun_phrases.end());
+    training_pairs.insert(training_pairs.end(), verb_phrases.begin(), verb_phrases.end());
+    training_pairs.insert(training_pairs.end(), adjective_phrases.begin(), adjective_phrases.end());
+    
     unique_tokens = token_frequency.size();
     std::cout << "\nTraining Data Statistics:" << std::endl;
     std::cout << "Total tokens: " << total_tokens << std::endl;
     std::cout << "Unique tokens: " << unique_tokens << std::endl;
     std::cout << "Token/sample ratio: " << (float)total_tokens / training_pairs.size() << std::endl;
+    std::cout << "Noun phrases: " << noun_phrases.size() << std::endl;
+    std::cout << "Verb phrases: " << verb_phrases.size() << std::endl;
+    std::cout << "Adjective phrases: " << adjective_phrases.size() << std::endl;
 
     // Apply data augmentation
     DataAugmentation augmenter(0.3f, 0.3f);
@@ -555,15 +596,15 @@ void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokeniz
     for (const auto& group_results : group_hypotheses) {
         for (const auto& hyp : group_results) {
             try {
-                if (hyp.tokens.size() <= input_length) continue;
+                if (hyp.sequence.size() <= input_length) continue;
                 
-                std::vector<int> generated_tokens(
-                    hyp.tokens.begin() + input_length,
-                    hyp.tokens.end()
+                std::vector<int> generated_sequence(
+                    hyp.sequence.begin() + input_length,
+                    hyp.sequence.end()
                 );
                 
                 // Decode tokens
-                std::string decoded = tokenizer.decode(generated_tokens);
+                std::string decoded = tokenizer.decode(generated_sequence);
                 
                 // Add initial space if needed
                 if (!decoded.empty() && decoded[0] != ' ') {

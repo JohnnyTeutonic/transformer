@@ -3,6 +3,7 @@
 #include "../include/cuda/cuda_check.cuh"
 #include "../include/logger.hpp"
 #include "../include/half_precision.hpp"
+#include "../include/beam_search.hpp"
 #include <cublas_v2.h>
 #include <fstream>
 #include <iostream>
@@ -562,7 +563,7 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
             throw;
         }
     }
-
+    std::cout << "prior hidden_states.rows(): " << hidden_states.rows() << std::endl;
     // Final normalization
     hidden_states = final_ln->forward(hidden_states);
     
@@ -571,7 +572,7 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
     float max_final = -std::numeric_limits<float>::infinity();
     float sum_final = 0.0f;
     size_t nonzero_final = 0;
-    
+    std::cout << "hidden_states.rows(): " << hidden_states.rows() << std::endl;
     for (size_t i = 0; i < hidden_states.rows(); i++) {
         for (size_t j = 0; j < hidden_states.cols(); j++) {
             float val = hidden_states(i, j);
@@ -588,12 +589,73 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
               << "Mean final: " << sum_final / (hidden_states.rows() * hidden_states.cols()) << "\n"
               << "Nonzero final: " << nonzero_final << "/" 
               << (hidden_states.rows() * hidden_states.cols()) << "\n\n";
-    
+    std::cout << "hidden_states.cols(): " << hidden_states.cols() << std::endl;
+    std::cout << "config.hidden_size: " << config.hidden_size << std::endl;
     // Single sync point at the end
     CUDA_CHECK(cudaGetLastError());
     cudaDeviceSynchronize();
+    std::cout << "=== Transformer::forward END ===" << std::endl;
     
-    return hidden_states;
+    // Verify hidden states dimensions
+    if (hidden_states.cols() != config.hidden_size) {
+        throw std::runtime_error("Hidden states dimension mismatch: " + std::to_string(hidden_states.cols()) + 
+                               " != " + std::to_string(config.hidden_size) + 
+                               ". This indicates a problem in the transformer layers.");
+    }
+
+    // Get logits from the language model head
+    std::cout << "=== CUDA LanguageModelHead::project_to_vocab START ===" << std::endl;
+    Matrix logits = lm_head->project_to_vocab(hidden_states);
+    std::cout << "=== CUDA LanguageModelHead::project_to_vocab END ===" << std::endl;
+    // If we're in inference mode, perform beam search
+    if (!training) {
+        // Convert last row of logits to vector for beam search
+        std::vector<float> last_token_logits(logits.cols());
+        for (size_t i = 0; i < logits.cols(); i++) {
+            last_token_logits[i] = logits(logits.rows() - 1, i);
+        }
+
+        // Create beam search instance
+        BeamSearch beam_search(config, 10, 0.6f, 0.3f, 0.0f, 0, 0.9f);
+
+        // Create next token function for beam search
+        auto next_token_fn = [this, &tokenizer](const std::vector<int>& sequence) -> std::vector<float> {
+            Matrix next_hidden = this->forward(sequence, "", tokenizer, true);
+            
+            // Verify hidden state dimensions before projection
+            if (next_hidden.cols() != config.hidden_size) {
+                std::cout << "Warning: Hidden states have incorrect shape [" << next_hidden.rows() 
+                          << ", " << next_hidden.cols() << "], expected cols=" 
+                          << config.hidden_size << std::endl;
+                if (next_hidden.rows() == config.hidden_size) {
+                    std::cout << "Transposing hidden states to correct dimensions" << std::endl;
+                    next_hidden = next_hidden.transpose();
+                }
+            }
+            
+            Matrix next_logits = lm_head->project_to_vocab(next_hidden);
+            std::vector<float> logits_vec(next_logits.cols());
+            for (size_t i = 0; i < next_logits.cols(); i++) {
+                logits_vec[i] = next_logits(next_logits.rows() - 1, i);
+            }
+            return logits_vec;
+        };
+
+        // Perform beam search
+        auto hypotheses = beam_search.search(last_token_logits, next_token_fn, 3, tokenizer.get_eos_token_id());
+
+        // Print decoded sequences
+        std::cout << "\nDecoded predictions:\n";
+        for (size_t i = 0; i < hypotheses.size(); i++) {
+            std::string decoded = tokenizer.decode(hypotheses[i].sequence);
+            float penalized_score = beam_search.apply_length_penalty(hypotheses[i].score, hypotheses[i].sequence.size());
+            std::cout << i + 1 << ". " << decoded << " (score: " << std::fixed << std::setprecision(4) 
+                      << penalized_score << ")\n";
+        }
+        std::cout << std::endl;
+    }
+
+    return logits;
 }
 
 void Transformer::clear_kv_cache() {

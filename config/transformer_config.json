@@ -1,12 +1,12 @@
 {
     "model": {
         "vocab_size": 7000,
-        "hidden_size": 128,
-        "num_heads": 8,
-        "num_layers": 4,
-        "head_dim": 32,
-        "intermediate_size": 256,
-        "max_seq_length": 32
+        "hidden_size": 64,
+        "num_heads": 4,
+        "num_layers": 2,
+        "head_dim": 16,
+        "intermediate_size": 128,
+        "max_seq_length": 8
     },
     "training": {
         "batch_size": 32,
@@ -34,18 +34,18 @@
     },
     "beam_search": {
         "use_beam_search": true,
-        "beam_size": 10,
-        "beams_per_group": 4,
-        "num_groups": 3,
-        "length_penalty": 1.5,
-        "temperature": 2.5,
-        "initial_temperature": 3.0,
-        "diversity_strength": 4.0,
-        "top_k": 100,
-        "top_p": 0.98,
-        "max_length": 4,
-        "initial_noise_scale": 0.8,
-        "token_noise_scale": 0.1
+        "beam_size": 6,
+        "beams_per_group": 2,
+        "num_groups": 2,
+        "length_penalty": 1.0,
+        "temperature": 0.7,
+        "initial_temperature": 0.9,
+        "diversity_strength": 1.2,
+        "top_k": 40,
+        "top_p": 0.9,
+        "max_length": 3,
+        "initial_noise_scale": 0.2,
+        "token_noise_scale": 0.05
     },
     "load_from_checkpoint": false,
     "checkpoint_to_load": "",

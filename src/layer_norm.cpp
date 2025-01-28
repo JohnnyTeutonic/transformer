@@ -61,7 +61,7 @@ Matrix LayerNorm::forward(const Matrix& input) {
                     output(i, j) = gamma_(0, j) * (input(i, j) - mean) / std + beta_(0, j);
                 }
             }
-            std::cout << "Output shape: " << output.rows() << "x" << output.cols() << std::endl;
+            std::cout << "Output shape after layer norm: " << output.rows() << "x" << output.cols() << std::endl;
             output_cache_ = output;  // Store for backward pass
             return output;
 #ifdef USE_CUDA

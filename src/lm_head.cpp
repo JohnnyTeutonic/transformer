@@ -110,11 +110,40 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
-    // Apply layer normalization first
-    Matrix normalized = layer_norm->forward(hidden_states);
+    std::cout << "=== LanguageModelHead::forward START ===" << std::endl;
+    std::cout << "Input hidden states shape: [" << hidden_states.rows() << ", " << hidden_states.cols() << "]" << std::endl;
     
-    // Project to vocabulary size using projection matrix directly
+    // Check if hidden states need to be transposed
+    Matrix working_hidden_states = hidden_states;
+    if (working_hidden_states.cols() == vocab_size_ && working_hidden_states.rows() != hidden_size_) {
+        std::cout << "Hidden states appear to be transposed, fixing dimensions..." << std::endl;
+        working_hidden_states = working_hidden_states.transpose();
+    }
+    
+    // Verify dimensions after potential transpose
+    if (working_hidden_states.cols() != hidden_size_) {
+        throw std::runtime_error("Hidden states dimension mismatch after transpose check: got " + 
+                               std::to_string(working_hidden_states.cols()) + 
+                               ", expected " + std::to_string(hidden_size_));
+    }
+    
+    // Apply layer normalization first
+    Matrix normalized = layer_norm->forward(working_hidden_states);
+    std::cout << "After layer norm shape: [" << normalized.rows() << ", " << normalized.cols() << "]" << std::endl;
+    
+    // Ensure dimensions are correct before multiplication
+    if (normalized.cols() != projection.rows()) {
+        throw std::runtime_error("Matrix dimension mismatch in forward: normalized.cols()=" + 
+                               std::to_string(normalized.cols()) + " != projection.rows()=" + 
+                               std::to_string(projection.rows()));
+    }
+    
+    // Project to vocabulary size using projection matrix
+    // normalized: [batch_size, hidden_size]
+    // projection: [hidden_size, vocab_size]
+    // result: [batch_size, vocab_size]
     Matrix logits = matmul(normalized, projection);
+    std::cout << "After projection shape: [" << logits.rows() << ", " << logits.cols() << "]" << std::endl;
     
     // Add bias terms
     for (size_t i = 0; i < logits.rows(); ++i) {
@@ -134,6 +163,9 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     // Apply format-specific biasing
     bias_completion_format(logits);
     
+    std::cout << "Final logits shape: [" << logits.rows() << ", " << logits.cols() << "]" << std::endl;
+    std::cout << "=== LanguageModelHead::forward END ===" << std::endl;
+    
     return logits;
 }
 
@@ -142,8 +174,18 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
         // Ensure UNK token is never active
         active_tokens[tokens::UNK_ID] = 0;  // Explicitly deactivate UNK token
         
+        // Debug dimensions before matrix multiplication
+        std::cout << "=== LanguageModelHead::forward_impl START ===" << std::endl;
+        std::cout << "Hidden states shape: [" << hidden_states.rows() << ", " << hidden_states.cols() << "]" << std::endl;
+        std::cout << "Projection shape: [" << projection.rows() << ", " << projection.cols() << "]" << std::endl;
+        
         // Project hidden states to vocabulary space
-        Matrix logits = matmul(hidden_states, projection);  // Using standalone matmul function
+        // hidden_states: [batch_size, hidden_size]
+        // projection: [hidden_size, vocab_size]
+        // result: [batch_size, vocab_size]
+        Matrix logits = matmul(hidden_states, projection);
+        
+        std::cout << "Output logits shape: [" << logits.rows() << ", " << logits.cols() << "]" << std::endl;
         
         // Add bias
         for (size_t i = 0; i < logits.rows(); ++i) {
@@ -158,21 +200,37 @@ Matrix LanguageModelHead::forward_impl(const Matrix& hidden_states) {
         
         return logits;
     } catch (const std::exception& e) {
-        throw std::runtime_error("LMHead forward failed: " + std::string(e.what()));
+        throw std::runtime_error("LMHead forward_impl failed: " + std::string(e.what()));
     }
 }
 
 Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
     this->hidden_states = hidden_states;
-    size_t total_size = hidden_states.rows();
+    size_t batch_size = hidden_states.rows();
     size_t hidden_dim = hidden_states.cols();
     
-    if (hidden_dim != hidden_size_) {
-        throw std::runtime_error("Hidden dimension mismatch: " + std::to_string(hidden_dim) +
-                               " != " + std::to_string(hidden_size_));
+    std::cout << "=== LanguageModelHead::project_to_vocab START ===" << std::endl;
+    std::cout << "Input shape: [" << batch_size << ", " << hidden_dim << "]" << std::endl;
+    std::cout << "Expected hidden size: " << hidden_size_ << std::endl;
+    std::cout << "Projection matrix shape: [" << projection.rows() << ", " << projection.cols() << "]" << std::endl;
+    
+    // Check if matrix needs to be transposed
+    Matrix working_states = hidden_states;
+    if (hidden_dim == vocab_size_ && batch_size != vocab_size_) {
+        std::cout << "Input appears to be transposed, fixing dimensions..." << std::endl;
+        working_states = hidden_states.transpose();
+        batch_size = working_states.rows();
+        hidden_dim = working_states.cols();
     }
     
-    return forward_impl(hidden_states);
+    // Verify dimensions after potential transpose
+    if (hidden_dim != hidden_size_) {
+        throw std::runtime_error("Hidden dimension mismatch after transpose check: got " + 
+                               std::to_string(hidden_dim) + ", expected " + 
+                               std::to_string(hidden_size_));
+    }
+    
+    return forward_impl(working_states);
 }
 
 Matrix LanguageModelHead::backward(const Matrix& grad_output, const Matrix& target_distribution) {
