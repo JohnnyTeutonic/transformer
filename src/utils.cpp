@@ -14,6 +14,18 @@
 #include <unordered_set>
 #include "../include/data_augmentation.hpp"
 
+std::string Utils::get_current_time() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t time = std::chrono::system_clock::to_time_t(now);
+    
+    // Convert to string and remove newline
+    std::string time_str = std::ctime(&time);
+    if (!time_str.empty() && time_str[time_str.length()-1] == '\n') {
+        time_str = time_str.substr(0, time_str.length()-1);
+    }
+    return time_str;
+}
+
 bool starts_with(const std::string& str, const std::string& prefix) {
     return str.size() >= prefix.size() && 
            str.compare(0, prefix.size(), prefix) == 0;
@@ -227,27 +239,26 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
 
         // Parse beam search settings
         if (j.contains("beam_search")) {
-            auto& beam = j["beam_search"];
-            config.beam_search.use_beam_search = beam.value("use_beam_search", true);
-            config.beam_search.beam_size = beam["beam_size"];
+            const auto& beam = j["beam_search"];
+            config.beam_search.use_beam_search = beam.value("use_beam_search", false);
+            config.beam_search.beam_size = beam.value("beam_size", 5);
             config.beam_search.beams_per_group = beam.value("beams_per_group", 4);
             config.beam_search.num_groups = beam.value("num_groups", 3);
-            config.beam_search.length_penalty = beam["length_penalty"];
-            config.beam_search.temperature = beam["temperature"];
-            config.beam_search.top_p = beam["top_p"];
-            config.beam_search.max_length = beam["max_length"];
+            config.beam_search.length_penalty = beam.value("length_penalty", 1.5f);
+            config.beam_search.temperature = beam.value("temperature", 1.0f);
+            config.beam_search.top_p = beam.value("top_p", 0.9f);
+            config.beam_search.max_length = beam.value("max_length", 20);
             config.beam_search.initial_temperature = beam.value("initial_temperature", 3.0f);
             config.beam_search.initial_noise_scale = beam.value("initial_noise_scale", 0.8f);
             config.beam_search.diversity_strength = beam.value("diversity_strength", 4.0f);
             config.beam_search.top_k = beam.value("top_k", 100);
             config.beam_search.token_noise_scale = beam.value("token_noise_scale", 0.1f);
         } else {
-            // Default values if not specified
-            config.beam_search.use_beam_search = true;
+            config.beam_search.use_beam_search = false;
             config.beam_search.beam_size = 5;
             config.beam_search.beams_per_group = 4;
             config.beam_search.num_groups = 3;
-            config.beam_search.length_penalty = 0.6f;
+            config.beam_search.length_penalty = 1.5f;
             config.beam_search.temperature = 1.0f;
             config.beam_search.top_p = 0.9f;
             config.beam_search.max_length = 20;
@@ -462,146 +473,94 @@ std::vector<std::pair<std::string, float>> Utils::get_multi_token_predictions(
 }
 
 void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, Transformer& transformer, int k) {
-    const auto& config = transformer.getConfig();
-    size_t total_beam_width = std::max(config.beam_search.beam_size, static_cast<size_t>(k * 3));
-    size_t num_groups = config.beam_search.num_groups;
-    size_t beams_per_group = config.beam_search.beams_per_group;
+    // Debug information
+    std::cout << "\nDebug: Matrix dimensions: " << logits.rows() << "x" << logits.cols() << std::endl;
     
-    BeamSearch beam_search(
-        beams_per_group,
-        config.beam_search.length_penalty,
-        config.beam_search.temperature,
-        config.beam_search.diversity_strength,
-        config.beam_search.top_k,
-        config.beam_search.top_p
-    );
+    if (logits.rows() == 0 || logits.cols() == 0) {
+        std::cout << "Error: Empty logits matrix" << std::endl;
+        return;
+    }
 
-    // Store predictions from each group
-    std::vector<std::vector<BeamSearch::Hypothesis>> group_hypotheses;
-    std::vector<float> initial_logits;
-    initial_logits.reserve(logits.cols());
+    std::cout << "\nTop " << k << " predictions:" << std::endl;
     
-    // Get original input
-    std::vector<int> original_input = transformer.get_last_input();
-    std::string original_query = transformer.get_last_query();
-    size_t input_length = original_input.size();
-
-    // Convert logits to probabilities with temperature scaling and normalization
-    float temperature = config.beam_search.temperature;
-    float max_logit = -std::numeric_limits<float>::infinity();
+    // Get the last row of logits (predictions for the next token)
+    std::vector<std::pair<float, int>> token_probs;
+    const int last_pos = logits.rows() - 1;
     
-    // Find max logit for numerical stability
-    for (int j = 0; j < logits.cols(); j++) {
-        max_logit = std::max(max_logit, logits(logits.rows() - 1, j));
+    // Debug: Print some logit values
+    std::cout << "Debug: First few logits from last position:" << std::endl;
+    for (int j = 0; j < std::min(5, static_cast<int>(logits.cols())); j++) {
+        std::cout << "logit[" << j << "] = " << logits(last_pos, j) << std::endl;
     }
     
-    // Compute softmax with temperature scaling
+    // Convert logits to probabilities
+    float max_logit = -std::numeric_limits<float>::infinity();
+    for (int j = 0; j < logits.cols(); j++) {
+        max_logit = std::max(max_logit, logits(last_pos, j));
+    }
+    std::cout << "Debug: max_logit = " << max_logit << std::endl;
+    
     float sum_exp = 0.0f;
     for (int j = 0; j < logits.cols(); j++) {
-        float scaled_logit = (logits(logits.rows() - 1, j) - max_logit) / temperature;
-        initial_logits.push_back(scaled_logit);
-        sum_exp += std::exp(scaled_logit);
+        float prob = std::exp(logits(last_pos, j) - max_logit);
+        sum_exp += prob;
+        token_probs.push_back({prob, j});
+    }
+    std::cout << "Debug: sum_exp = " << sum_exp << std::endl;
+    
+    // Normalize probabilities
+    for (auto& pair : token_probs) {
+        pair.first /= sum_exp;
     }
     
-    // Normalize to get proper probabilities
-    for (float& logit : initial_logits) {
-        logit = std::exp(logit) / sum_exp;
-        logit = std::log(std::max(logit, 1e-10f));  // Convert back to log space for beam search
+    // Sort by probability
+    std::sort(token_probs.begin(), token_probs.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    
+    // Debug: Print top raw probabilities before filtering
+    std::cout << "Debug: Top 5 raw probabilities:" << std::endl;
+    for (size_t i = 0; i < std::min(size_t(5), token_probs.size()); i++) {
+        std::cout << "prob[" << i << "] = " << token_probs[i].first 
+                 << ", token_id = " << token_probs[i].second << std::endl;
     }
-
-    // Function to get next token predictions with proper scaling
-    auto next_token_fn = [&transformer, &tokenizer, temperature](const std::vector<int>& tokens) {
-        Matrix hidden = transformer.forward(tokens, "", tokenizer);
-        Matrix next_logits = transformer.get_lm_head()->project_to_vocab(hidden);
-        std::vector<float> logits_vec;
-        logits_vec.reserve(next_logits.cols());
+    
+    // Print top k predictions
+    int shown = 0;
+    for (size_t i = 0; i < token_probs.size() && shown < k; i++) {
+        int token_id = token_probs[i].second;
+        float prob = token_probs[i].first;
         
-        // Apply same temperature scaling and normalization
-        float max_val = -std::numeric_limits<float>::infinity();
-        for (int j = 0; j < next_logits.cols(); j++) {
-            max_val = std::max(max_val, next_logits(next_logits.rows() - 1, j));
+        // Debug: Print token info
+        std::cout << "Debug: Processing token_id " << token_id 
+                 << ", is_special = " << tokenizer.is_special_token(token_id) << std::endl;
+        
+        // Skip special tokens
+        if (tokenizer.is_special_token(token_id)) {
+            std::cout << "Debug: Skipping special token " << token_id << std::endl;
+            continue;
         }
         
-        float sum = 0.0f;
-        for (int j = 0; j < next_logits.cols(); j++) {
-            float scaled_logit = (next_logits(next_logits.rows() - 1, j) - max_val) / temperature;
-            logits_vec.push_back(scaled_logit);
-            sum += std::exp(scaled_logit);
-        }
+        // Decode token
+        std::vector<int> token_seq = {token_id};
+        std::string decoded = tokenizer.decode(token_seq);
         
-        for (float& logit : logits_vec) {
-            logit = std::exp(logit) / sum;
-            logit = std::log(std::max(logit, 1e-10f));
-        }
+        std::cout << "Debug: Decoded '" << decoded << "'" << std::endl;
         
-        return logits_vec;
-    };
-
-    // Get predictions for each group
-    for (size_t group = 0; group < num_groups; group++) {
-        const size_t MAX_LENGTH = input_length + 4;
-        auto group_results = beam_search.search(
-            initial_logits, next_token_fn, MAX_LENGTH, tokenizer.get_eos_token_id());
-        group_hypotheses.push_back(group_results);
-    }
-
-    transformer.clear_kv_cache();
-
-    // Store all predictions
-    std::vector<std::pair<std::string, float>> predictions;
-    std::unordered_set<std::string> used_predictions;
-
-    // Process hypotheses from each group
-    for (const auto& group_results : group_hypotheses) {
-        for (const auto& hyp : group_results) {
-            try {
-                if (hyp.tokens.size() <= input_length) continue;
-                
-                std::vector<int> generated_tokens(
-                    hyp.tokens.begin() + input_length,
-                    hyp.tokens.end()
-                );
-                
-                // Decode tokens
-                std::string decoded = tokenizer.decode(generated_tokens);
-                
-                // Add initial space if needed
-                if (!decoded.empty() && decoded[0] != ' ') {
-                    decoded = " " + decoded;
-                }
-                
-                // Only add unique predictions
-                if (used_predictions.find(decoded) == used_predictions.end()) {
-                    used_predictions.insert(decoded);
-                    predictions.push_back({decoded, hyp.score});
-                    
-                    // Break if we have enough predictions
-                    if (predictions.size() >= k) break;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Error processing hypothesis: " << e.what() << std::endl;
-                continue;
+        if (!decoded.empty()) {
+            // Add space prefix if needed
+            if (decoded[0] != ' ') {
+                decoded = " " + decoded;
             }
+            std::cout << (shown + 1) << ". \"" << decoded << "\" (prob="
+                      << std::fixed << std::setprecision(4) << prob << ")" << std::endl;
+            shown++;
         }
-        if (predictions.size() >= k) break;
     }
-
-    // Sort predictions by score
-    std::sort(predictions.begin(), predictions.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-
-    // Print predictions
-    std::cout << "\nQuery: \"" << original_query << "\"" << std::endl;
     
-    std::cout << "\nTop " << k << " predictions:" << std::endl;
-    for (size_t i = 0; i < std::min(predictions.size(), static_cast<size_t>(k)); i++) {
-        const auto& [prediction, score] = predictions[i];
-        std::cout << i + 1 << ". \"" << prediction << "\" (score=" 
-                 << std::fixed << std::setprecision(4) << score << ")" << std::endl;
+    if (shown == 0) {
+        std::cout << "No valid predictions found." << std::endl;
     }
-    if (predictions.empty()) {
-        std::cout << "No predictions found." << std::endl;
-    }
+    std::cout << std::endl;
 }
 
 float Utils::evaluate_validation(

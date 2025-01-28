@@ -1,6 +1,6 @@
 {
     "model": {
-        "vocab_size": 7000,
+        "vocab_size": 1665,
         "hidden_size": 128,
         "num_heads": 8,
         "num_layers": 4,
@@ -33,18 +33,18 @@
         "checkpoint_frequency": 5
     },
     "beam_search": {
-        "use_beam_search": true,
-        "beam_size": 10,
+        "use_beam_search": false,
+        "beam_size": 5,
         "beams_per_group": 4,
         "num_groups": 3,
         "length_penalty": 1.5,
-        "temperature": 2.5,
+        "temperature": 1.0,
+        "top_p": 0.9,
+        "max_length": 20,
         "initial_temperature": 3.0,
+        "initial_noise_scale": 0.8,
         "diversity_strength": 4.0,
         "top_k": 100,
-        "top_p": 0.98,
-        "max_length": 4,
-        "initial_noise_scale": 0.8,
         "token_noise_scale": 0.1
     },
     "load_from_checkpoint": false,

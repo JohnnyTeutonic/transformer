@@ -4,6 +4,7 @@
 #include <random>
 #include "../include/tokenizer.hpp"
 #include "../include/utils.hpp"  // Add include for Utils
+#include "text_analysis.cpp"  // Include the new analyzer
 
 // Add necessary forward declarations and structures
 std::unique_ptr<Tokenizer> tokenizer;
@@ -101,6 +102,15 @@ void train_epoch(Transformer& model, const std::vector<std::pair<std::string, st
 }
 
 int main(int argc, char* argv[]) {
+    // Initialize logging
+    std::ofstream log_file("build/transformer.log");
+    log_file << "=== Logging started at " << Utils::get_current_time() << std::endl;
+    log_file << "===" << std::endl;
+
+    // Analyze adjective phrases
+    auto phrases = AdjectivePhraseAnalyzer::extractAdjectivePhrases("data/training_pairs.txt");
+    AdjectivePhraseAnalyzer::analyzeAndLogPhrases(phrases, log_file);
+
     std::cout << "entering main" << std::endl;
     Logger& logger = Logger::getInstance();
     logger.startLogging();
@@ -482,51 +492,29 @@ int main(int argc, char* argv[]) {
                 metrics.stop_timer("batch_processing");
 
                 // Make predictions after each batch
-                    std::string test_input = "I go to";
-                    std::string processed_input = test_input;
-                    std::cout << "Processing input: " << processed_input << std::endl;
+                std::cout << "\n=== Batch " << batch + 1 << " Predictions ===\n";
+                
+                // Test a few different prompts
+                std::vector<std::string> test_prompts = {
+                    "I go to",
+                    "The weather is",
+                    "She likes to"
+                };
+                
+                transformer.set_training(false);  // Set to evaluation mode
+                for (const auto& prompt : test_prompts) {
+                    std::string processed_input = prompt;
                     tokenizer->preprocess_text(processed_input);
-                    std::cout << "Tokenizing input: " << processed_input << std::endl;
                     std::vector<int> test_tokens = tokenizer->encode(processed_input);
-                    std::cout << "Encoded tokens: " << test_tokens.size() << std::endl;
                     
-                    // Get model prediction (in evaluation mode)
-                    transformer.set_training(false);
-                    std::cout << "Setting training mode to false" << std::endl;
-                    Matrix test_hidden = transformer.forward(test_tokens, test_input, *tokenizer);
-                    std::cout << "Forward pass completed" << std::endl;
+                    Matrix test_hidden = transformer.forward(test_tokens, prompt, *tokenizer);
                     Matrix pred_logits = lm_head->project_to_vocab(test_hidden);
-                    std::cout << "Projected to vocab" << std::endl;
-                    transformer.set_training(true);  // Set back to training mode
-                    std::cout << "Setting training mode to true" << std::endl;
                     
-                    // Show the top predictions
-                    std::cout << "\n=== Batch " << batch + 1 << " Predictions for '" << test_input << "' ===\n";
+                    std::cout << "\n=== Predictions for '" << prompt << "' ===\n";
                     Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
-                    std::cout << "================================================\n";
-
-                    // Test additional queries
-                    std::vector<std::string> additional_queries = {
-                        "The weather is",
-                        "I want to",
-                        "The cat",
-                        "She likes to"
-                    };
-
-                    for (const auto& query : additional_queries) {
-                        processed_input = query;
-                        tokenizer->preprocess_text(processed_input);
-                        test_tokens = tokenizer->encode(processed_input);
-                        
-                        transformer.set_training(false);
-                        test_hidden = transformer.forward(test_tokens, query, *tokenizer);
-                        pred_logits = lm_head->project_to_vocab(test_hidden);
-                        transformer.set_training(true);
-                        
-                        std::cout << "\n=== Batch " << batch + 1 << " Predictions for '" << query << "' ===\n";
-                        Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
-                        std::cout << "================================================\n";
                 }
+                transformer.set_training(true);  // Set back to training mode
+                std::cout << "================================================\n";
 
                 // Print progress and metrics every 10 batches
                 if ((batch + 1) % 10 == 0 || batch + 1 == total_batches) {
@@ -587,13 +575,14 @@ int main(int argc, char* argv[]) {
                 std::vector<int> test_tokens = tokenizer->encode(processed_input);
                 
                 // Get model prediction
-                Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-                Matrix logits = lm_head->project_to_vocab(test_hidden);
+                Matrix test_hidden = transformer.forward(test_tokens, test_input, *tokenizer);
+                Matrix pred_logits = lm_head->project_to_vocab(test_hidden);
+                transformer.set_training(true);
                 
-                // For single token prediction, we don't need beam search
-                // Just show the top predictions
-                std::cout << "\nTop Predictions:\n";
-                Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
+                // Show the top predictions
+                std::cout << "\n=== Predictions for '" << test_input << "' ===\n";
+                Utils::print_top_predictions(pred_logits, *tokenizer, transformer, 5);
+                std::cout << "================================================\n";
             }
 
             if ((epoch + 1) % 5 == 0) { 

@@ -18,7 +18,7 @@ TransformerConfig::TransformerConfig(size_t vocab_size, size_t max_seq_length, s
           2                    // checkpoint_frequency
       },
       beam_search{
-          true,   // use_beam_search
+          false,  // use_beam_search
           5,      // beam_size
           4,      // beams_per_group
           3,      // num_groups

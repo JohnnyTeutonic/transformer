@@ -57,7 +57,7 @@ class TransformerConfig {
 
     // Beam search parameters
     struct BeamSearchConfig {
-        bool use_beam_search = true;
+        bool use_beam_search = false;  // Changed to false to use direct prediction by default
         size_t beam_size = 5;
         size_t beams_per_group = 4;
         size_t num_groups = 3;
