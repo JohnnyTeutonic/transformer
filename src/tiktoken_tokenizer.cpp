@@ -15,10 +15,41 @@
 struct TiktokenTokenizer::Impl {
     bool initialized_ = false;
     std::unordered_map<std::string, int> vocab;
-    size_t vocab_size_ = 32000; // Default GPT-2 vocab size
+    size_t vocab_size_ = 0;  // Initialize to 0, will be set during initialization
+    std::unordered_map<std::string, int> token_to_id_;
+    std::unordered_map<int, std::string> id_to_token_;
 
-    void initialize(const std::string& encoding_name) {
-        // TODO: Implement actual tiktoken initialization
+    void initialize(const std::string& encoding_name, size_t vocab_size) {
+        // vocab_size_ should already be set
+        if (vocab_size_ != vocab_size) {
+            throw std::runtime_error("Vocabulary size mismatch in initialization");
+        }
+        
+        // Build basic token mappings
+        for (size_t i = 0; i < vocab_size_; i++) {
+            // Create a string representation for each token ID
+            std::string token = "<" + std::to_string(i) + ">";
+            token_to_id_[token] = i;
+            id_to_token_[i] = token;
+        }
+
+        // Add special tokens
+        token_to_id_["<pad>"] = tokens::PAD_ID;
+        token_to_id_["<unk>"] = tokens::UNK_ID;
+        token_to_id_["<s>"] = tokens::BOS_ID;
+        token_to_id_["</s>"] = tokens::EOS_ID;
+        token_to_id_["<mask>"] = tokens::MASK_ID;
+        token_to_id_["|"] = tokens::SEP_ID;
+
+        // Add reverse mappings for special tokens
+        id_to_token_[tokens::PAD_ID] = "<pad>";
+        id_to_token_[tokens::UNK_ID] = "<unk>";
+        id_to_token_[tokens::BOS_ID] = "<s>";
+        id_to_token_[tokens::EOS_ID] = "</s>";
+        id_to_token_[tokens::MASK_ID] = "<mask>";
+        id_to_token_[tokens::SEP_ID] = "|";
+
+        std::cout << "Initialized tokenizer with " << token_to_id_.size() << " tokens" << std::endl;
         initialized_ = true;
     }
 
@@ -44,7 +75,7 @@ struct TiktokenTokenizer::Impl {
 
 TiktokenTokenizer::TiktokenTokenizer(const std::string& encoding_name)
     : pimpl_(std::make_unique<Impl>()) {
-    initialize(encoding_name);
+    // Don't initialize here, wait for explicit initialize call
 }
 
 TiktokenTokenizer::~TiktokenTokenizer() = default;
@@ -52,7 +83,15 @@ TiktokenTokenizer::~TiktokenTokenizer() = default;
 void TiktokenTokenizer::initialize(const std::string& encoding_name) {
     if (initialized_) return;
     
-    pimpl_->initialize(encoding_name);
+    // Use the base class's vocab_size_
+    std::cout << "Initializing tokenizer with vocab size: " << BaseTokenizer::get_vocab_size() << std::endl;
+    if (BaseTokenizer::get_vocab_size() == 0) {
+        throw std::runtime_error("Vocabulary size must be set before initialization");
+    }
+    
+    // Initialize implementation with the vocab size from base class
+    pimpl_->vocab_size_ = BaseTokenizer::get_vocab_size();
+    pimpl_->initialize(encoding_name, pimpl_->vocab_size_);
     initialized_ = true;
     initialize_token_categories();
 }
@@ -102,7 +141,7 @@ void TiktokenTokenizer::save(std::ostream& os) const {
     os.write(reinterpret_cast<const char*>(&vocab_size), sizeof(vocab_size));
     
     // Write vocabulary
-    for (const auto& [token, id] : token_to_id_) {
+    for (const auto& [token, id] : pimpl_->token_to_id_) {
         uint32_t token_length = static_cast<uint32_t>(token.length());
         os.write(reinterpret_cast<const char*>(&token_length), sizeof(token_length));
         os.write(token.c_str(), token_length);
@@ -356,7 +395,7 @@ std::vector<int> TiktokenTokenizer::tokenize_text(const std::string& text) const
         int best_token = tokens::UNK_ID;
         
         // Try to match the longest token possible
-        for (const auto& [token, id] : token_to_id_) {
+        for (const auto& [token, id] : pimpl_->token_to_id_) {
             if (token.length() > remaining.length()) continue;
             
             if (remaining.substr(0, token.length()) == token) {
@@ -388,8 +427,8 @@ std::string TiktokenTokenizer::decode_token(int token_id) const {
         throw std::runtime_error("Tokenizer not initialized");
     }
     
-    auto it = id_to_token_.find(token_id);
-    if (it != id_to_token_.end()) {
+    auto it = pimpl_->id_to_token_.find(token_id);
+    if (it != pimpl_->id_to_token_.end()) {
         return it->second;
     }
     

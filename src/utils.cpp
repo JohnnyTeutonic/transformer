@@ -233,12 +233,14 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
 
         // Parse model settings
         auto& model = j["model"];
-        config.vocab_size = model["vocab_size"];
+        // Set a default vocab size that will be overridden later
+        config.vocab_size = 0;  // Will be set by actual vocabulary count
         config.hidden_size = model["hidden_size"];
         config.num_heads = model["num_heads"];
         config.num_layers = model["num_layers"];
         config.head_dim = model["head_dim"];
         config.intermediate_size = model["intermediate_size"];
+        config.max_seq_length = model["max_seq_length"];
 
         // Parse training settings
         auto& training = j["training"];

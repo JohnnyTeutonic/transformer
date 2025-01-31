@@ -1,6 +1,5 @@
 {
     "model": {
-        "vocab_size": 7000,
         "hidden_size": 128,
         "num_heads": 8,
         "num_layers": 4,
@@ -59,7 +58,7 @@
         }
     },
     "beam_search": {
-        "use_beam_search": true,
+        "use_beam_search": false,
         "beam_size": 10,
         "beams_per_group": 4,
         "num_groups": 3,
@@ -75,7 +74,6 @@
     },
     "tokenizer": {
         "use_subword": false,
-        "vocab_size": 1665,
         "model_path": "model/tokenizer.model",
         "special_tokens": ["<unk>", "<s>", "</s>", "<pad>", "<mask>"]
     },

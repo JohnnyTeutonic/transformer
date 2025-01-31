@@ -25,7 +25,7 @@ struct BeamSearchConfig {
 
 struct TokenizerConfig {
     bool use_subword = true;
-    size_t vocab_size = 32000;
+    size_t vocab_size = 0;  // Will be set by actual vocabulary count
     std::string model_path = "model/tokenizer.model";
     std::vector<std::string> special_tokens = {"<pad>", "", " ", "</s>", "<mask>"};
 };
@@ -58,7 +58,7 @@ struct TokenPredictionConfig {
  */
 struct TransformerConfig {
     // Architecture parameters
-    size_t vocab_size;
+    size_t vocab_size = 0;  // Will be set by actual vocabulary count
     size_t hidden_size;
     size_t num_heads;
     size_t num_layers;

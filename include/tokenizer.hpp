@@ -23,7 +23,7 @@ public:
     std::vector<int> encode(const std::string& text) const;
     std::string decode(const std::vector<int>& tokens) const;
     size_t vocab_size() const;
-
+    size_t vocab_size_;
     // Virtual methods with default implementations
     virtual void preprocess_text(std::string& text) const;
     virtual bool is_special_token(int token_id) const;
@@ -35,7 +35,8 @@ public:
     virtual int get_eos_token_id() const { return 3; }
     virtual int get_mask_token_id() const { return 4; }
     virtual int get_sep_token_id() const { return 5; }
-
+    virtual size_t get_vocab_size() const {};
+    virtual void set_vocab_size(size_t size) {};
     // Token type checking methods
     virtual bool is_verb(const std::string& token) const;
     virtual bool is_adjective(const std::string& token) const;

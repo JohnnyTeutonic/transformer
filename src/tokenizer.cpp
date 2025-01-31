@@ -126,7 +126,7 @@ std::unique_ptr<TiktokenTokenizer> Tokenizer::load_vocabulary(std::istream& is) 
     auto tokenizer = std::make_unique<TiktokenTokenizer>();
 
     // Initialize with encoding name
-    tokenizer->initialize("cl100k_base");
+    tokenizer->initialize("gpt2");
 
     // Read vocabulary size (for compatibility with file format)
     uint32_t vocab_size;
@@ -145,7 +145,6 @@ std::unique_ptr<TiktokenTokenizer> Tokenizer::load_vocabulary(std::istream& is) 
 
     return tokenizer;
 }
-
 void Tokenizer::print_vocabulary_mappings() const {
     if (!tokenizer_ || !tokenizer_->is_initialized()) {
         std::cerr << "Warning: Attempting to print mappings before tokenizer initialization" << std::endl;
@@ -283,8 +282,10 @@ bool Tokenizer::is_verb(const std::string& token) const {
 
 void Tokenizer::initialize(const std::string& encoding_name) {
     auto tiktoken = std::make_unique<TiktokenTokenizer>();
+    tiktoken->set_vocab_size(vocab_size_);  // Pass the vocab size from base class
     tiktoken->initialize(encoding_name);
     tokenizer_ = std::move(tiktoken);
+    vocab_size_ = tokenizer_->vocab_size();
 }
 
 // Add constructor implementation

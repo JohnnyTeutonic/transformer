@@ -19,15 +19,15 @@ constexpr size_t MIN_ACTIVE_TOKENS = 1000;  // Reasonable default value
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     : hidden_size_(hidden_size), vocab_size_(vocab_size), 
-      projection(vocab_size, hidden_size),  // [vocab_size x hidden_size] = [2492 x 128]
-      bias(vocab_size, 0.0f),  // [vocab_size] = [2492]
+      projection(hidden_size, vocab_size),  // [hidden_size x vocab_size] for correct matrix multiplication
+      bias(vocab_size, 0.0f),  // [vocab_size] = [32000]
       token_frequencies(vocab_size, 0.0f),
       pruning_threshold(1e-6f),
       active_tokens(vocab_size, 1),
       training_steps(0),
       is_training_(false),
-      m_proj(vocab_size, hidden_size, 0.0f),  // Match projection dimensions
-      v_proj(vocab_size, hidden_size, 0.0f),  // Match projection dimensions
+      m_proj(hidden_size, vocab_size, 0.0f),  // Match projection dimensions
+      v_proj(hidden_size, vocab_size, 0.0f),  // Match projection dimensions
       m_bias(vocab_size, 0.0f),
       v_bias(vocab_size, 0.0f),
       t(0),
@@ -56,7 +56,7 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     std::cout << "- Hidden size: " << hidden_size << std::endl;
     std::cout << "- Vocab size: " << vocab_size << std::endl;
     std::cout << "- Projection matrix: " << projection.rows() << "x" << projection.cols() << std::endl;
-    std::cout << "- Projection matrix shape: [vocab_size x hidden_size] = [" << vocab_size << " x " << hidden_size << "]" << std::endl;
+    std::cout << "- Projection matrix shape: [hidden_size x vocab_size] = [" << hidden_size << " x " << vocab_size << "]" << std::endl;
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
@@ -69,16 +69,11 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
             std::to_string(hidden_size_) + " but got " + std::to_string(hidden_states.cols()));
     }
     
-    // Use cached transposed projection matrix if available, otherwise create and cache it
-    static Matrix projection_t;
-    static bool is_cached = false;
-    if (!is_cached) {
-        projection_t = projection.transpose();
-        is_cached = true;
-    }
-    
-    // Compute logits using cached transposed matrix
-    Matrix logits = matmul(hidden_states, projection_t);
+    // Compute logits directly using the projection matrix (no need for transpose)
+    // hidden_states: [batch_size x hidden_size]
+    // projection: [hidden_size x vocab_size]
+    // result: [batch_size x vocab_size]
+    Matrix logits = matmul(hidden_states, projection);
     
     // Add bias term
     for (size_t i = 0; i < logits.rows(); i++) {

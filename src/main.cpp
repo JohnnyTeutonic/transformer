@@ -7,6 +7,7 @@
 #include "../include/phrase_analysis.hpp"
 #include "../include/training/training.hpp"  // Include unified training header
 #include "../include/hyperparameter_tuner.hpp"
+#include "../include/vocab_counter.hpp"  // Add vocab counter header
 
 // Add necessary forward declarations and structures
 std::unique_ptr<Tokenizer> tokenizer;
@@ -522,7 +523,7 @@ int main(int argc, char* argv[]) {
         Utils::initialize_random();
 
         // Load configuration
-        std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
+        static std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
         std::filesystem::path config_path = exe_path / "config" / "transformer_config.json";
         TransformerConfig config = Utils::load_config(config_path.string());
 
@@ -562,18 +563,27 @@ int main(int argc, char* argv[]) {
         auto training_pairs = Utils::create_training_data();
         std::cout << "Loaded " << training_pairs.size() << " training pairs" << std::endl;
 
+        // Count vocabulary from training data
+        size_t actual_vocab_size = VocabularyCounter::count_vocabulary(
+            exe_path.string() + "/data/training_pairs.txt",
+            exe_path.string() + "/data/validation_pairs.txt"
+        );
+        std::cout << "Actual vocabulary size from data: " << actual_vocab_size << std::endl;
+
+        // Set the vocabulary size in config before initializing anything
+        config.vocab_size = actual_vocab_size;
+
         // Initialize tokenizer with config
         std::cout << "Initializing tiktoken with encoding: gpt2" << std::endl;
         tokenizer = std::make_unique<Tokenizer>("gpt2");
         
+        
         try {
-            tokenizer->initialize("cl100k_base");  // Or whatever default encoding you want to use
+            tokenizer->initialize("gpt2");
+        // Set the vocabulary size before initialization
+            tokenizer->set_vocab_size(actual_vocab_size);
             std::cout << "Initialized tokenizer. Vocabulary size: " 
                       << tokenizer->vocab_size() << std::endl;
-                      
-            // Update config vocabulary size to match tokenizer
-            config.vocab_size = tokenizer->vocab_size();
-            std::cout << "Updated config vocabulary size to: " << config.vocab_size << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
             return 1;
@@ -813,7 +823,7 @@ int main(int argc, char* argv[]) {
 
                 // Create target distribution for entire batch using only valid sequences
                 Matrix target_distribution = Utils::create_batch_target_distribution(
-                    valid_target_batch, *tokenizer, config.vocab_size, max_seq_len);
+                    valid_target_batch, *tokenizer, actual_vocab_size, max_seq_len);
 
                 // Process the batch as a single sequence
                 std::vector<int> flattened_batch;

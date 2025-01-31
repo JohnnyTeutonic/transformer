@@ -36,7 +36,7 @@ public:
     int get_sep_token_id() const { return tokens::SEP_ID; }
 
     // Configuration
-    void set_vocab_size(size_t size) { target_vocab_size = size; }
+    void set_vocab_size(size_t size) { vocab_size_ = size; }
     static void set_debug_logging(bool enable) { debug_logging_ = enable; }
     static constexpr const char* SEP_TOKEN = "|";
 
@@ -54,20 +54,10 @@ private:
     std::unique_ptr<Impl> pimpl_;
     bool initialized_ = false;
     std::vector<bool> filtered_tokens_;
-    std::unordered_map<int, int> old_to_new_id_;
-    std::unordered_map<int, int> new_to_old_id_;
-    std::unordered_map<std::string, size_t> token_frequencies_;
-    std::unordered_map<std::string, int> token_to_id_;
-    std::unordered_map<int, std::string> id_to_token_;
-    size_t target_vocab_size = 2500;
+    size_t vocab_size_ = 0;  // Initialize to 0, will be set by actual count
     static bool debug_logging_;
-    size_t vocab_size_;
 
-    // Private helpers
-    void setup_special_tokens();
-    int convert_to_new_id(int old_id) const;
-    int convert_to_old_id(int new_id) const;
-    void build_vocabulary_from_frequencies();
+    // Helper functions
     std::vector<int> tokenize_text(const std::string& text) const;
     std::string decode_token(int token_id) const;
 }; 

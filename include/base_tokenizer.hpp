@@ -17,4 +17,11 @@ public:
     virtual int get_bos_token_id() const = 0;
     virtual int get_eos_token_id() const = 0;
     virtual int get_mask_token_id() const = 0;
+
+    // Configuration
+    virtual void set_vocab_size(size_t size) { vocab_size_ = size; }
+    size_t get_vocab_size() const { return vocab_size_; }
+
+protected:
+    size_t vocab_size_ = 0;
 }; 
