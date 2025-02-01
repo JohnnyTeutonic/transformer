@@ -153,6 +153,10 @@ public:
     const Parameters& parameters() const { return params_; }
     const Gradients& param_gradients() const { return grads_; }
 
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    Matrix forward_cuda(const Matrix& input);
+#endif
+
 private:
     size_t hidden_size_;
     float eps_;

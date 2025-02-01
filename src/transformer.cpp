@@ -101,12 +101,11 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
                                  const std::optional<KVCache>& kv_cache) {
     std::cout << "=== TransformerLayer::forward START ===" << std::endl;
 
-#ifdef USE_CUDA
     // Layer norm before attention using CUDA
+#ifdef USE_CUDA
     Matrix normalized;
     if (cuda::is_available()) {
-        normalized = cuda::layer_norm(input, attention_ln->get_gamma(), attention_ln->get_beta(), 
-                                    config.layer_norm_epsilon);
+        normalized = attention_ln->forward_cuda(input);
     } else {
         normalized = attention_ln->forward(input);
     }
@@ -140,8 +139,7 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
 #ifdef USE_CUDA
     Matrix norm1;
     if (cuda::is_available()) {
-        norm1 = cuda::layer_norm(residual, ffn_ln->get_gamma(), ffn_ln->get_beta(), 
-                               config.layer_norm_epsilon);
+        norm1 = ffn_ln->forward_cuda(residual);
     } else {
         norm1 = ffn_ln->forward(residual);
     }
@@ -173,8 +171,7 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
     // Final layer norm with CUDA
 #ifdef USE_CUDA
     if (cuda::is_available()) {
-        return cuda::layer_norm(residual, ffn_ln->get_gamma(), ffn_ln->get_beta(), 
-                              config.layer_norm_epsilon);
+        return ffn_ln->forward_cuda(residual);
     }
 #endif
     return ffn_ln->forward(residual);

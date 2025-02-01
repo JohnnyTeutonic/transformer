@@ -161,4 +161,8 @@ class FeedForward {
     // Add Transformer as friend
     friend class Transformer;
     friend class TransformerLayer;
+
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    Matrix forward_cuda(const Matrix& input);
+#endif
 };

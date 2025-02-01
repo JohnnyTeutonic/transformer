@@ -249,9 +249,6 @@ class MultiHeadAttention {
     const Matrix& get_value_weights() const { return params_.value_weights; }
     const Matrix& get_output_weights() const { return params_.output_weights; }
 
-    // Add the direct matrix version of forward
-    Matrix forward(const Matrix& input, const Matrix& attention_mask);
-
     void reset_state() {
         // Clear all cached computations
         cached_keys = Matrix();
@@ -262,6 +259,17 @@ class MultiHeadAttention {
         cached_value_layer = Matrix();
     }
 
+    // Core functionality
+    Matrix forward(const Matrix& x, const AttentionMask& mask,
+                  KVCache* kv_cache = nullptr);
+    Matrix backward(const Matrix& grad_output, const Matrix& input,
+                   const AttentionMask& mask);
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    Matrix forward_cuda(const Matrix& x, const AttentionMask& mask,
+                       const std::optional<KVCache>& kv_cache = std::nullopt);
+#endif
+
+    // Serialization
   private:
     Parameters params_;
     Gradients grads_;
