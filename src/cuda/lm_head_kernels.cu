@@ -109,8 +109,8 @@ namespace cuda {
                                      float* m, float* v,
                                      float beta1, float beta2,
                                      float eps, float lr,
-                                     int step, unsigned long size) {
-        const unsigned long idx = blockIdx.x * blockDim.x + threadIdx.x;
+                                     int step, int size) {
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx < size) {
             m[idx] = beta1 * m[idx] + (1 - beta1) * grad[idx];
             v[idx] = beta2 * v[idx] + (1 - beta2) * grad[idx] * grad[idx];
@@ -136,12 +136,16 @@ namespace cuda {
                            float* m, float* v,
                            float beta1, float beta2,
                            float eps, float lr,
-                           int step, unsigned long size,
+                           int step, int size,
                            cudaStream_t stream) {
         const int block_size = 256;
         const int num_blocks = (size + block_size - 1) / block_size;
         adam_update_kernel<<<num_blocks, block_size, 0, stream>>>(
             param, grad, m, v, beta1, beta2, eps, lr, step, size);
+        CUDA_CHECK(cudaGetLastError());
+        if (stream == nullptr) {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 }
 

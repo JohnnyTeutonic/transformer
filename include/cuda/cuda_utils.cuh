@@ -37,6 +37,7 @@ namespace cuda {
                        cudaStream_t stream = nullptr);
     
     void launch_adam_update(float* params, const float* grads, float* m, float* v,
-                           float beta1, float beta2, float eps, float lr, int size,
-                           int step, cudaStream_t stream = nullptr);
+                           float beta1, float beta2, float eps, float lr,
+                           int step, int size,
+                           cudaStream_t stream = nullptr);
 }
