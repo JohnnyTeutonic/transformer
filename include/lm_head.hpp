@@ -30,6 +30,7 @@ using half = __half;  // Define half type alias for CUDA's __half
  */
 class LanguageModelHead {
   private:
+    // Core model components
     Matrix projection;                    ///< Projection matrix to vocabulary space
     Vector bias;                         ///< Bias terms for each token
     float dropout_prob;                  ///< Dropout probability during training
@@ -64,14 +65,13 @@ class LanguageModelHead {
     static constexpr size_t LOSS_HISTORY_SIZE = 100;
     float prev_loss = std::numeric_limits<float>::infinity();
     
-    // Add the update_learning_rate function declaration
     void update_learning_rate(float current_loss);
     
     // Pinned memory for efficient GPU transfers
     float* h_projection = nullptr;
     float* h_bias = nullptr;
 
-    // Regular device memory buffers (available regardless of CUDA/FP16 support)
+    // Regular device memory buffers
     float* d_projection = nullptr;  // Device copy of projection matrix
     float* d_bias = nullptr;       // Device copy of bias
     float* d_output = nullptr;      // Final FP32 output
@@ -102,152 +102,38 @@ class LanguageModelHead {
 
     // Helper methods
     void bias_completion_format(Matrix& logits);
-
-    // Remove duplicate declarations that were here before
+    
+    // Core components
     std::unique_ptr<LayerNorm> layer_norm;  ///< Layer normalization
     std::shared_ptr<TiktokenTokenizer> tokenizer;  ///< Tokenizer instance
 
   public:
-    /**
-     * @brief Constructs a language model head.
-     * @param hidden_size Size of input hidden states
-     * @param vocab_size Size of the vocabulary
-     */
+    // Constructors and destructor
     LanguageModelHead(size_t hidden_size, size_t vocab_size);
+    LanguageModelHead(const LanguageModelHead& other);  // Copy constructor
+    ~LanguageModelHead();
 
-    ~LanguageModelHead();  // Just declare it here
-
-    /**
-     * @brief Performs the forward pass, computing logits from hidden states.
-     * @param hidden_states Input hidden states
-     * @return Matrix of logits over vocabulary
-     */
+    // Core functionality
     Matrix forward(const Matrix& hidden_states, bool training = false);
-
-    /**
-     * @brief Performs the backward pass with Adam optimization.
-     * @param grad_output Gradient of the loss with respect to the output
-     * @param hidden_states Original input hidden states
-     * @return Gradient with respect to the input
-     */
     Matrix backward_pass(const Matrix& grad_output, const Matrix& hidden_states);
-
-    /**
-     * @brief Saves the model head to a stream.
-     * @param os Output stream to save to
-     */
-    void save(std::ostream& os) const {
-        projection.save(os);
-        bias.save(os);
-        os.write(reinterpret_cast<const char*>(&dropout_prob), sizeof(dropout_prob));
-    }
-
-    /**
-     * @brief Loads a model head from a stream.
-     * @param is Input stream to load from
-     * @return Unique pointer to loaded model head
-     */
-    static std::unique_ptr<LanguageModelHead> load(std::istream& is) {
-        auto lm_head = std::make_unique<LanguageModelHead>(0, 0); // Temporary sizes
-        lm_head->projection = Matrix::load(is);
-        lm_head->bias = Vector::load(is);
-        is.read(reinterpret_cast<char*>(&lm_head->dropout_prob), sizeof(lm_head->dropout_prob));
-        return lm_head;
-    }
-
-    /**
-     * @brief Gets references to trainable parameters.
-     * @return Vector of parameter references
-     */
-    std::vector<std::reference_wrapper<Matrix>> get_parameters() {
-        std::vector<std::reference_wrapper<Matrix>> params;
-        params.push_back(std::ref(projection));
-        // Note: We'll need to handle bias separately since it's a Vector
-        return params;
-    }
-
-    /**
-     * @brief Gets the projection weights matrix.
-     * @return Reference to the projection weights matrix
-     */
-    Matrix& get_weights() { return projection; }
-
-    /**
-     * @brief Gets the projection weights matrix (const version).
-     * @return Const reference to the projection weights matrix
-     */
-    const Matrix& get_weights() const { return projection; }
-
-    /**
-     * @brief Gets the bias vector.
-     * @return Reference to the bias vector
-     */
-    Vector& get_bias() { return bias; }
-
-    /**
-     * @brief Gets the bias vector (const version).
-     * @return Const reference to the bias vector
-     */
-    const Vector& get_bias() const { return bias; }
-
-    /**
-     * @brief Projects hidden states to vocabulary space.
-     * @param hidden_states Input hidden states
-     * @return Matrix of logits over vocabulary
-     */
     Matrix project_to_vocab(const Matrix& hidden_states);
-
-    /**
-     * @brief Performs backward pass with optional target distribution.
-     * @param grad_output Gradient of the loss with respect to the output
-     * @param target_distribution Optional target distribution for distillation
-     * @return Gradient with respect to the input
-     */
     Matrix backward(const Matrix& grad_output, const Matrix& target_distribution = Matrix());
+    
+    // Serialization
+    void save(std::ostream& os) const;
+    static std::unique_ptr<LanguageModelHead> load(std::istream& is);
 
-    /**
-     * @brief Updates token frequencies based on observed tokens.
-     * @param tokens Vector of token indices observed in the current batch
-     */
-    void update_token_frequencies(const std::vector<int>& tokens);
-
-    /**
-     * @brief Prunes vocabulary by removing infrequently used tokens.
-     * @param min_frequency_threshold Minimum frequency threshold for keeping tokens
-     */
-    void prune_vocabulary(float min_frequency_threshold = 1e-5);
-
-    void set_training(bool training_mode);  // Add setter for training mode
-
-    // Add tokenizer setter
+    // Getters and setters
+    std::vector<std::reference_wrapper<Matrix>> get_parameters();
+    Matrix& get_weights() { return projection; }
+    const Matrix& get_weights() const { return projection; }
+    Vector& get_bias() { return bias; }
+    const Vector& get_bias() const { return bias; }
+    const std::vector<float>& get_token_frequencies() const { return token_frequencies; }
+    void set_training(bool training_mode);
     void set_tokenizer(std::shared_ptr<TiktokenTokenizer> tok) { tokenizer = tok; }
 
-    // Add getter for token frequencies
-    const std::vector<float>& get_token_frequencies() const {
-        return token_frequencies;
-    }
-
-    // Copy constructor
-    LanguageModelHead(const LanguageModelHead& other);
-
-    // Add these member function declarations
-    void launch_convert_to_fp16(half* output, const float* input, size_t size);
-    void launch_convert_and_expand_vocab(
-        float* output, const half* input,
-        size_t batch_size, size_t vocab_size, size_t active_vocab_size);
-
-    unsigned char* d_active_tokens = nullptr;  // Add this member
-#ifdef CUDA_AVAILABLE
-    half* d_projection_fp16 = nullptr;
-    half* d_hidden_states_fp16 = nullptr;
-    half* d_output_fp16 = nullptr;
-#endif
-
-#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
-    // CUDA host functions
-    void launch_convert_to_fp16(half* output, const float* input, size_t size);
-    void launch_convert_and_expand_vocab(
-        float* output, const half* input,
-        size_t batch_size, size_t vocab_size, size_t active_vocab_size);
-#endif
+    // Token management
+    void update_token_frequencies(const std::vector<int>& tokens);
+    void prune_vocabulary(float min_frequency_threshold = 1e-5);
 };
