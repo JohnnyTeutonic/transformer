@@ -179,10 +179,24 @@ namespace cuda {
                                float* output, const float* mask,
                                int batch_size, int num_heads, int seq_len, int head_dim,
                                float scale, cudaStream_t stream) {
-        dim3 block(256);
-        dim3 grid((seq_len + block.x - 1) / block.x, num_heads, batch_size);
+        // Each thread processes one position in the sequence
+        const int threads_per_block = 256;
+        // Grid dimensions: (batch_size, num_heads, 1)
+        dim3 block(threads_per_block);
+        dim3 grid(batch_size, num_heads, 1);
         
-        size_t shared_mem_size = seq_len * sizeof(float);
+        // Each thread needs seq_len floats for scores
+        size_t shared_mem_size = threads_per_block * seq_len * sizeof(float);
+        
+        // Verify shared memory size doesn't exceed device limits
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+        if (shared_mem_size > prop.sharedMemPerBlock) {
+            // If shared memory is too large, we need to process in chunks
+            // For now, throw an error
+            throw std::runtime_error("Sequence length too large for shared memory");
+        }
+        
         attention_kernel<<<grid, block, shared_mem_size, stream>>>(
             Q, K, V, output, mask, 
             batch_size, seq_len, head_dim, head_dim * num_heads);
@@ -233,37 +247,39 @@ namespace cuda {
     __global__ void attention_kernel(const float* Q, const float* K, const float* V,
                                    float* output, const float* mask,
                                    int batch_size, int seq_len, int head_dim, int hidden_dim) {
-        int b = blockIdx.x * blockDim.x + threadIdx.x;  // batch index
-        int h = blockIdx.y;  // head index
-
-        if (b < batch_size) {
-            // Process this batch element for the current head
-            int head_offset = h * head_dim;
-            int batch_offset = b * hidden_dim;
-            
-            // Allocate scores in shared memory
-            extern __shared__ float scores[];
-            
-            // Compute attention scores for this head
+        const int b = blockIdx.x;  // batch index
+        const int h = blockIdx.y;  // head index
+        const int tid = threadIdx.x;  // thread index within block
+        
+        // Each thread processes multiple sequence positions
+        extern __shared__ float shared_scores[];
+        // Each thread has its own seq_len-sized array in shared memory
+        float* scores = &shared_scores[tid * seq_len];
+        
+        for (int i = tid; i < seq_len; i += blockDim.x) {
+            // Compute attention scores for position i
             for (int j = 0; j < seq_len; j++) {
                 float score = 0.0f;
+                
+                // Compute dot product
                 for (int d = 0; d < head_dim; d++) {
-                    int q_idx = batch_offset + head_offset + d;
-                    int k_idx = j * hidden_dim + head_offset + d;
-                    
-                    if (q_idx < batch_size * hidden_dim && k_idx < seq_len * hidden_dim) {
-                        score += Q[q_idx] * K[k_idx];
-                    }
+                    const int q_idx = ((b * hidden_dim) + (h * head_dim) + d) + (i * hidden_dim);
+                    const int k_idx = ((b * hidden_dim) + (h * head_dim) + d) + (j * hidden_dim);
+                    score += Q[q_idx] * K[k_idx];
                 }
-                scores[j] = score / sqrtf(float(head_dim));
+                
+                // Scale and store score
+                score /= sqrtf(float(head_dim));
                 
                 // Apply mask if provided
                 if (mask != nullptr) {
-                    scores[j] += mask[b * seq_len + j];
+                    score += mask[i * seq_len + j];
                 }
+                
+                scores[j] = score;
             }
             
-            // Apply softmax
+            // Apply softmax to scores
             float max_score = scores[0];
             for (int j = 1; j < seq_len; j++) {
                 max_score = max(max_score, scores[j]);
@@ -279,16 +295,16 @@ namespace cuda {
                 scores[j] /= sum;
             }
             
-            // Compute weighted sum
+            // Compute weighted sum of values
             for (int d = 0; d < head_dim; d++) {
                 float weighted_sum = 0.0f;
                 for (int j = 0; j < seq_len; j++) {
-                    int v_idx = j * hidden_dim + head_offset + d;
-                    if (v_idx < seq_len * hidden_dim) {
-                        weighted_sum += scores[j] * V[v_idx];
-                    }
+                    const int v_idx = ((b * hidden_dim) + (h * head_dim) + d) + (j * hidden_dim);
+                    weighted_sum += scores[j] * V[v_idx];
                 }
-                int out_idx = batch_offset + head_offset + d;
+                
+                // Write output
+                const int out_idx = ((b * hidden_dim) + (h * head_dim) + d) + (i * hidden_dim);
                 if (out_idx < batch_size * hidden_dim) {
                     output[out_idx] = weighted_sum;
                 }
@@ -356,53 +372,113 @@ namespace cuda {
     }
 }
 
-// Implementation of MultiHeadAttention::forward_cuda
 #ifdef CUDA_AVAILABLE
 Matrix MultiHeadAttention::forward_cuda(const Matrix& input, 
                                       const AttentionMask& mask,
                                       const std::optional<KVCache>& kv_cache) {
+    // Verify dimensions
+    if (hidden_size % num_heads != 0) {
+        throw std::runtime_error("hidden_size must be divisible by num_heads");
+    }
+    if (input.cols() % hidden_size != 0) {
+        throw std::runtime_error("input.cols() must be divisible by hidden_size");
+    }
+    
     const int batch_size = input.rows();
     const int seq_len = input.cols() / hidden_size;
+    const int head_dim = hidden_size / num_heads;
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     
-    // Project input to Q, K, V using CUDA matmul
-    Matrix Q(input.rows(), get_query_weights().cols());
-    cuda::matmul(input, get_query_weights(), Q, nullptr);
+    // Project input to Q, K, V spaces
+    Matrix Q(batch_size * seq_len, hidden_size);
+    cuda::matmul(input, params_.query_weights, Q, nullptr);
     
     Matrix K;
     if (kv_cache) {
         K = kv_cache->get_key();
     } else {
-        K = Matrix(input.rows(), get_key_weights().cols());
-        cuda::matmul(input, get_key_weights(), K, nullptr);
+        K = Matrix(batch_size * seq_len, hidden_size);
+        cuda::matmul(input, params_.key_weights, K, nullptr);
     }
     
     Matrix V;
     if (kv_cache) {
         V = kv_cache->get_value();
     } else {
-        V = Matrix(input.rows(), get_value_weights().cols());
-        cuda::matmul(input, get_value_weights(), V, nullptr);
+        V = Matrix(batch_size * seq_len, hidden_size);
+        cuda::matmul(input, params_.value_weights, V, nullptr);
     }
     
-    // Reshape matrices for attention
-    Matrix Q_reshaped = Q.reshape(batch_size, num_heads, seq_len, head_dim);
-    Matrix K_reshaped = K.reshape(batch_size, num_heads, seq_len, head_dim);
-    Matrix V_reshaped = V.reshape(batch_size, num_heads, seq_len, head_dim);
+    // Allocate device memory for reshaped matrices
+    float *d_Q, *d_K, *d_V, *d_output;
+    const size_t qkv_size = batch_size * num_heads * seq_len * head_dim * sizeof(float);
+    const size_t output_size = batch_size * seq_len * hidden_size * sizeof(float);
     
-    // Allocate output
-    Matrix output(batch_size * seq_len, hidden_size);
+    CUDA_CHECK(cudaMalloc(&d_Q, qkv_size));
+    CUDA_CHECK(cudaMalloc(&d_K, qkv_size));
+    CUDA_CHECK(cudaMalloc(&d_V, qkv_size));
+    CUDA_CHECK(cudaMalloc(&d_output, output_size));
+    
+    // Copy and reshape Q, K, V to device
+    for (int b = 0; b < batch_size; b++) {
+        for (int h = 0; h < num_heads; h++) {
+            for (int s = 0; s < seq_len; s++) {
+                for (int d = 0; d < head_dim; d++) {
+                    const int src_idx = (b * seq_len + s) * hidden_size + h * head_dim + d;
+                    const int dst_idx = ((b * num_heads + h) * seq_len + s) * head_dim + d;
+                    
+                    float* d_src = reinterpret_cast<float*>(Q.data());
+                    CUDA_CHECK(cudaMemcpy(&d_Q[dst_idx], &d_src[src_idx], 
+                                        sizeof(float), cudaMemcpyHostToDevice));
+                    
+                    if (!kv_cache) {
+                        d_src = reinterpret_cast<float*>(K.data());
+                        CUDA_CHECK(cudaMemcpy(&d_K[dst_idx], &d_src[src_idx], 
+                                            sizeof(float), cudaMemcpyHostToDevice));
+                        
+                        d_src = reinterpret_cast<float*>(V.data());
+                        CUDA_CHECK(cudaMemcpy(&d_V[dst_idx], &d_src[src_idx], 
+                                            sizeof(float), cudaMemcpyHostToDevice));
+                    }
+                }
+            }
+        }
+    }
+    
+    if (kv_cache) {
+        CUDA_CHECK(cudaMemcpy(d_K, K.data(), qkv_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_V, V.data(), qkv_size, cudaMemcpyHostToDevice));
+    }
+    
+    // Copy mask if provided
+    float* d_mask = nullptr;
+    if (!mask.empty()) {
+        CUDA_CHECK(cudaMalloc(&d_mask, batch_size * seq_len * seq_len * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(d_mask, mask.get_data(), 
+                            batch_size * seq_len * seq_len * sizeof(float),
+                            cudaMemcpyHostToDevice));
+    }
     
     // Launch attention kernel
     cuda::launch_attention_kernel(
-        Q_reshaped.data(), K_reshaped.data(), V_reshaped.data(),
-        output.data(), mask.value().data(),
+        d_Q, d_K, d_V, d_output, d_mask,
         batch_size, num_heads, seq_len, head_dim,
-        scale);
+        scale, cuda::get_stream());
     
-    // Project output
-    Matrix final_output(output.rows(), get_output_weights().cols());
-    cuda::matmul(output, get_output_weights(), final_output, nullptr);
+    // Copy output back to host
+    Matrix output(batch_size * seq_len, hidden_size);
+    CUDA_CHECK(cudaMemcpy(output.data(), d_output, output_size, cudaMemcpyDeviceToHost));
+    
+    // Clean up device memory
+    CUDA_CHECK(cudaFree(d_Q));
+    CUDA_CHECK(cudaFree(d_K));
+    CUDA_CHECK(cudaFree(d_V));
+    CUDA_CHECK(cudaFree(d_output));
+    if (d_mask) CUDA_CHECK(cudaFree(d_mask));
+    
+    // Final projection
+    Matrix final_output(output.rows(), params_.output_weights.cols());
+    cuda::matmul(output, params_.output_weights, final_output, nullptr);
     
     return final_output;
 }

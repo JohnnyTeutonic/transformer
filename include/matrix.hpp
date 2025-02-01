@@ -412,7 +412,7 @@ class Matrix {
     // Reshape methods
     Matrix reshape(size_t new_rows, size_t new_cols) const {
         if (new_rows * new_cols != rows_ * cols_) {
-            throw std::runtime_error("New dimensions must preserve total size in reshape");
+            throw std::runtime_error("New dimensions must preserve total size within matrix in reshape");
         }
         Matrix reshaped(new_rows, new_cols);
         std::copy(data_.begin(), data_.end(), reshaped.data_.begin());

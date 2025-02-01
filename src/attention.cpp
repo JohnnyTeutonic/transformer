@@ -949,3 +949,10 @@ Matrix MultiHeadAttention::forward_cpu(const Matrix& input, const AttentionMask&
     return matmul(attention_output, get_output_weights());
 }
 
+#ifdef CUDA_AVAILABLE
+// Just declare the function, don't provide an empty implementation
+Matrix MultiHeadAttention::forward_cuda(const Matrix& input, 
+                                      const AttentionMask& mask,
+                                      const std::optional<KVCache>& kv_cache) = delete;  // Mark as deleted here
+#endif
+

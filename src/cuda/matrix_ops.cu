@@ -115,7 +115,7 @@ namespace cuda {
             throw std::runtime_error("Output matrix dimensions mismatch");
         }
 
-        std::cout << "Starting CUDA matrix multiplication..." << std::endl;
+        std::cout << "\n=== Matrix Multiplication Debug Info ===" << std::endl;
         std::cout << "Matrix A: " << a.rows() << "x" << a.cols() << std::endl;
         std::cout << "Matrix B: " << b.rows() << "x" << b.cols() << std::endl;
         std::cout << "Matrix C: " << c.rows() << "x" << c.cols() << std::endl;
@@ -124,6 +124,11 @@ namespace cuda {
         size_t A_size = a.rows() * a.cols() * sizeof(float);
         size_t B_size = b.rows() * b.cols() * sizeof(float);
         size_t C_size = c.rows() * c.cols() * sizeof(float);
+
+        std::cout << "Allocating device memory..." << std::endl;
+        std::cout << "A_size: " << A_size << " bytes" << std::endl;
+        std::cout << "B_size: " << B_size << " bytes" << std::endl;
+        std::cout << "C_size: " << C_size << " bytes" << std::endl;
 
         CUDA_CHECK(cudaMalloc(&d_A, A_size));
         CUDA_CHECK(cudaMalloc(&d_B, B_size));
@@ -138,41 +143,50 @@ namespace cuda {
         float alpha = 1.0f;
         float beta = 0.0f;
 
+        std::cout << "cuBLAS parameters:" << std::endl;
+        std::cout << "alpha: " << alpha << ", beta: " << beta << std::endl;
+        std::cout << "Leading dimensions:" << std::endl;
+        std::cout << "lda (A rows): " << a.rows() << std::endl;
+        std::cout << "ldb (B rows): " << b.rows() << std::endl;
+        std::cout << "ldc (C rows): " << c.rows() << std::endl;
+
         // Set stream for cuBLAS operations
         if (stream) {
             CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
         }
 
-        // For row-major matrices A[m,k] * B[k,n] = C[m,n], we compute:
-        // C = A * B in column-major order
+        // Using transposed operations to handle row-major to column-major conversion
         cublasStatus_t status = cublasSgemm(cublas_handle,
-                                          CUBLAS_OP_N, CUBLAS_OP_N,  // No transposition needed
-                                          b.cols(), a.rows(), a.cols(),  // Dimensions for the operation
+                                          CUBLAS_OP_T, CUBLAS_OP_T,  // Use transposed operations
+                                          c.cols(), c.rows(), a.cols(),  // m, n, k dimensions
                                           &alpha,
-                                          d_B, b.cols(),  // Leading dimension is cols for B
-                                          d_A, a.cols(),  // Leading dimension is cols for A
+                                          d_B, b.rows(),  // Leading dimension for B (k)
+                                          d_A, a.rows(),  // Leading dimension for A (n)
                                           &beta,
-                                          d_C, b.cols()); // Leading dimension is cols for C
+                                          d_C, c.cols()); // Leading dimension for C (m)
 
         if (status != CUBLAS_STATUS_SUCCESS) {
+            std::cout << "cuBLAS error status: " << status << std::endl;
             cudaFree(d_A);
             cudaFree(d_B);
             cudaFree(d_C);
             throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
         }
 
+        std::cout << "Matrix multiplication completed, copying results back..." << std::endl;
         CUDA_CHECK(cudaMemcpyAsync(c.data(), d_C, C_size, cudaMemcpyDeviceToHost, compute_stream));
         
-        // Synchronize if using a stream
-        if (stream) {
-            CUDA_CHECK(cudaStreamSynchronize(stream));
+        // Ensure all operations are complete
+        if (!stream) {
+            CUDA_CHECK(cudaDeviceSynchronize());
         }
 
+        // Cleanup
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
         CUDA_CHECK(cudaFree(d_C));
-
-        std::cout << "CUDA matrix multiplication completed successfully" << std::endl;
+        
+        std::cout << "Matrix multiplication completed successfully" << std::endl;
     }
 }
 

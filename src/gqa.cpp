@@ -106,7 +106,7 @@ Matrix GroupedQueryAttention::forward(const Matrix& x, const AttentionMask& mask
 
     // Calculate dimensions
     size_t batch_size = x.rows();
-    size_t seq_len = mask.value().rows();
+    size_t seq_len = mask.mask.rows();
 
     // Move to GPU
     Matrix Q_gpu = Q.to_gpu();

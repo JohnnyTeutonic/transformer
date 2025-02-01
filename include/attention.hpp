@@ -41,20 +41,18 @@ class AttentionMask {
     static AttentionMask create_padding_mask(const std::vector<int>& lengths, size_t max_len);
     
     AttentionMask() = default;
-    explicit operator bool() const { return has_mask_; }
-    const Matrix& value() const { return mask_; }
+    explicit operator bool() const { return !mask.empty(); }
 
     // Constructor taking a mask matrix
-    explicit AttentionMask(const Matrix& mask) : mask_(mask), has_mask_(true) {}
+    explicit AttentionMask(const Matrix& mask_) : mask(mask_) {}
 
     // Add is_masked method
     bool is_masked(size_t i, size_t j) const {
         return mask.empty() ? false : mask(i, j) == 0.0f;
     }
 
-  private:
-    Matrix mask_;
-    bool has_mask_ = false;
+    bool empty() const { return mask.empty(); }
+    const float* get_data() const { return mask.data(); }
 };
 
 class KVCache;
