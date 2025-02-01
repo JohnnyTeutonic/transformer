@@ -14,6 +14,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
+using half = __half;  // Define half type alias for CUDA's __half
 #endif
 
 /**
@@ -70,54 +71,41 @@ class LanguageModelHead {
     float* h_projection = nullptr;
     float* h_bias = nullptr;
 
-    // Device memory buffers
+    // Regular device memory buffers (available regardless of CUDA/FP16 support)
     float* d_projection = nullptr;  // Device copy of projection matrix
     float* d_bias = nullptr;       // Device copy of bias
-    half* d_projection_fp16 = nullptr;  // FP16 version of projection
-    half* d_hidden_states_fp16 = nullptr;  // FP16 version of input
-    half* d_output_fp16 = nullptr;  // FP16 intermediate output
     float* d_output = nullptr;      // Final FP32 output
-
-    // Add new member variables
-    std::unique_ptr<LayerNorm> layer_norm;  ///< Layer normalization
-    std::shared_ptr<TiktokenTokenizer> tokenizer;  ///< Tokenizer instance
-
-    /**
-     * @brief Computes gradients for the linear projection.
-     * @param grad_output Gradient of the loss with respect to the output
-     */
-    void backward_linear(const Matrix& grad_output);
-
-    /**
-     * @brief Implementation of the forward pass computation.
-     * @param hidden_states Input hidden states
-     * @return Output logits over vocabulary
-     */
-    Matrix forward_impl(const Matrix& hidden_states);
-
-    void update_active_tokens();
-
-#ifdef USE_CUDA
-    // CUDA streams and synchronization
-    cudaStream_t compute_stream;
-
-    // Device memory for active tokens and indices
     unsigned char* d_active_tokens = nullptr;
-    int* d_active_token_indices = nullptr;
 
-    // Maximum batch size for memory allocation
-    static constexpr size_t max_batch_size = 4096;  // Adjust based on your needs
-
-    // CUDA kernel launchers
-    __host__ void launch_convert_to_fp16(half* output, const float* input, size_t size);
-    __host__ void launch_convert_and_expand_vocab(
-        float* output, const half* input, size_t batch_size, size_t vocab_size, size_t active_vocab_size);
-
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    // CUDA-specific members
+    cudaStream_t compute_stream;
     cublasHandle_t cublas_handle;
+    
+    // FP16 device memory buffers
+    half* d_projection_fp16 = nullptr;
+    half* d_hidden_states_fp16 = nullptr;
+    half* d_output_fp16 = nullptr;
+
+    // CUDA kernel declarations
+    __device__ static void convert_to_fp16_kernel(half* output, const float* input, size_t idx);
+    __device__ static void convert_and_expand_vocab_kernel(
+        float* output, const half* input, const unsigned char* active_tokens,
+        size_t row, size_t col, size_t batch_size, size_t vocab_size, size_t active_vocab_size);
+
+    // CUDA host functions
+    void launch_convert_to_fp16(half* output, const float* input, size_t size);
+    void launch_convert_and_expand_vocab(
+        float* output, const half* input,
+        size_t batch_size, size_t vocab_size, size_t active_vocab_size);
 #endif
 
     // Helper methods
     void bias_completion_format(Matrix& logits);
+
+    // Remove duplicate declarations that were here before
+    std::unique_ptr<LayerNorm> layer_norm;  ///< Layer normalization
+    std::shared_ptr<TiktokenTokenizer> tokenizer;  ///< Tokenizer instance
 
   public:
     /**
@@ -239,60 +227,27 @@ class LanguageModelHead {
         return token_frequencies;
     }
 
-    // Add copy constructor
-    LanguageModelHead(const LanguageModelHead& other) 
-        : projection(other.projection),
-          bias(other.bias),
-          dropout_prob(other.dropout_prob),
-          vocab_size_(other.vocab_size_),
-          hidden_size_(other.hidden_size_),
-          hidden_states(other.hidden_states),
-          hidden_states_(other.hidden_states_),
-          token_frequencies(other.token_frequencies),
-          pruning_threshold(other.pruning_threshold),
-          active_tokens(other.active_tokens),
-          active_token_indices(other.active_token_indices),
-          training_steps(other.training_steps),
-          is_training_(other.is_training_),
-          // Adam optimizer state
-          m_proj(other.m_proj),
-          v_proj(other.v_proj),
-          m_bias(other.m_bias),
-          v_bias(other.v_bias),
-          t(other.t),
-          beta1(other.beta1),
-          beta2(other.beta2),
-          eps(other.eps),
-          // Learning rate adaptation
-          current_lr(other.current_lr),
-          min_lr(other.min_lr),
-          max_lr(other.max_lr),
-          lr_decay(other.lr_decay),
-          lr_growth(other.lr_growth),
-          loss_history(other.loss_history),
-          prev_loss(other.prev_loss) {
-        
-        // Deep copy layer_norm if it exists
-        if (other.layer_norm) {
-            layer_norm = std::make_unique<LayerNorm>(*other.layer_norm);
-        }
-        
-        // Copy tokenizer reference
-        tokenizer = other.tokenizer;
-        
-        // Initialize device memory to nullptr since it will be allocated on demand
-        h_projection = nullptr;
-        h_bias = nullptr;
-        d_projection = nullptr;
-        d_bias = nullptr;
-        d_projection_fp16 = nullptr;
-        d_hidden_states_fp16 = nullptr;
-        d_output_fp16 = nullptr;
-        d_output = nullptr;
-        
-    #ifdef USE_CUDA
-        d_active_tokens = nullptr;
-        d_active_token_indices = nullptr;
-    #endif
-    }
+    // Copy constructor
+    LanguageModelHead(const LanguageModelHead& other);
+
+    // Add these member function declarations
+    void launch_convert_to_fp16(half* output, const float* input, size_t size);
+    void launch_convert_and_expand_vocab(
+        float* output, const half* input,
+        size_t batch_size, size_t vocab_size, size_t active_vocab_size);
+
+    unsigned char* d_active_tokens = nullptr;  // Add this member
+#ifdef CUDA_AVAILABLE
+    half* d_projection_fp16 = nullptr;
+    half* d_hidden_states_fp16 = nullptr;
+    half* d_output_fp16 = nullptr;
+#endif
+
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    // CUDA host functions
+    void launch_convert_to_fp16(half* output, const float* input, size_t size);
+    void launch_convert_and_expand_vocab(
+        float* output, const half* input,
+        size_t batch_size, size_t vocab_size, size_t active_vocab_size);
+#endif
 };

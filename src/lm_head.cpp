@@ -1,6 +1,8 @@
 #include "../include/lm_head.hpp"
 #include "../include/token_constants.hpp"
+#include "../include/cuda/cuda_utils.cuh"
 #include "../include/cuda/matrix_ops.cuh"  // Add CUDA matrix operations header
+#include "../include/cuda/lm_head_kernels.cuh"
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -69,20 +71,27 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     // Cache hidden states for backward pass
     hidden_states_ = hidden_states;
     
-    // Project hidden states to vocabulary space using CUDA matrix multiplication
-    // hidden_states: [batch_size x hidden_size]
-    // projection: [hidden_size x vocab_size]
-    // result: [batch_size x vocab_size]
-    std::cout << "\nLM Head matrix dimensions:" << std::endl;
-    std::cout << "hidden_states: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-    std::cout << "projection: " << projection.rows() << "x" << projection.cols() << std::endl;
-    
-    Matrix logits(hidden_states.rows(), vocab_size_);  // Initialize with correct dimensions
-    std::cout << "pre-allocated logits: " << logits.rows() << "x" << logits.cols() << std::endl;
-    
-    cuda::matmul(hidden_states, projection, logits);  // Now cuda namespace should be recognized
-    
-    std::cout << "after matmul logits: " << logits.rows() << "x" << logits.cols() << std::endl;
+#ifdef USE_CUDA
+    if (cuda::is_available()) {
+        // Project hidden states to vocabulary space using CUDA
+        Matrix logits(hidden_states.rows(), vocab_size_);
+        
+        // Use cuBLAS for matrix multiplication
+        cuda::matmul(hidden_states, projection, logits);
+        
+        // Add bias using CUDA kernel
+        cuda::launch_add_bias(logits.data(), bias.data(), 
+                            logits.rows(), logits.cols(), 
+                            cuda::get_stream());
+        
+        cuda::synchronize();
+        return logits;
+    }
+#endif
+
+    // CPU fallback
+    Matrix logits(hidden_states.rows(), vocab_size_);
+    cuda::matmul(hidden_states, projection, logits);
     
     // Add bias
     for (size_t i = 0; i < logits.rows(); ++i) {
@@ -260,126 +269,47 @@ void LanguageModelHead::set_training(bool training_mode) {
 Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix& hidden_states) {
     // Verify input dimensions
     if (grad_output.cols() != vocab_size_) {
-        throw std::runtime_error("Gradient output dimension mismatch in backward pass. Expected vocab_size: " + 
-                               std::to_string(vocab_size_) + ", got: " + std::to_string(grad_output.cols()));
+        throw std::runtime_error("Gradient output dimension mismatch in backward pass");
     }
     if (hidden_states.cols() != hidden_size_) {
-        throw std::runtime_error("Hidden states dimension mismatch in backward pass. Expected hidden_size: " + 
-                               std::to_string(hidden_size_) + ", got: " + std::to_string(hidden_states.cols()));
+        throw std::runtime_error("Hidden states dimension mismatch in backward pass");
     }
 
-    std::cout << "\nLM Head Backward Pass Dimensions:" << std::endl;
-    std::cout << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl;
-    std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
-    std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
-    
-    // Compute gradients for projection matrix
-    // hidden_states.T: [hidden_size x batch_size]
-    // grad_output: [batch_size x vocab_size]
-    // grad_proj: [hidden_size x vocab_size]
+#ifdef USE_CUDA
+    if (cuda::is_available()) {
+        // Compute gradients for projection matrix using cuBLAS
+        Matrix hidden_states_t = hidden_states.transpose();
+        Matrix grad_proj(hidden_size_, vocab_size_);
+        cuda::matmul(hidden_states_t, grad_output, grad_proj);
+        
+        // Compute bias gradients using CUDA reduction
+        Vector grad_bias(vocab_size_);
+        cuda::launch_row_sum(grad_output.data(), grad_bias.data(),
+                           grad_output.rows(), grad_output.cols(),
+                           cuda::get_stream());
+        
+        // Compute gradient with respect to input
+        Matrix projection_t = projection.transpose();
+        Matrix grad_input(grad_output.rows(), hidden_size_);
+        cuda::matmul(grad_output, projection_t, grad_input);
+        
+        // Update parameters using Adam optimizer on GPU
+        cuda::launch_adam_update(projection.data(), grad_proj.data(),
+                               m_proj.data(), v_proj.data(),
+                               current_lr, beta1, beta2, eps, t,
+                               projection.size(), cuda::get_stream());
+        
+        cuda::synchronize();
+        return grad_input;
+    }
+#endif
+
+    // CPU fallback implementation
     Matrix hidden_states_t = hidden_states.transpose();
     Matrix grad_proj = matmul(hidden_states_t, grad_output);
-    
-    // Compute bias gradients
     Vector grad_bias = grad_output.row_sum();
-    
-    // Update parameters using Adam optimizer
-    t++;  // Increment time step
-    
-    // Constants for gradient clipping and stability
-    const float clip_threshold = 5.0f;
-    const float max_allowed_value = 100.0f;
-    const float scale_factor = std::sqrt(1.0f / hidden_size_);
-    const float max_update = 0.05f * scale_factor;
-    
-    bool has_unstable_update = false;
-    
-    // Update projection matrix using Adam optimizer
-    #pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
-    for (size_t i = 0; i < grad_proj.rows(); ++i) {
-        for (size_t j = 0; j < grad_proj.cols(); ++j) {
-            if (!std::isfinite(grad_proj(i, j))) {
-                continue;
-            }
-            
-            // Clip gradient
-            float clipped_grad = grad_proj(i, j);
-            if (std::abs(clipped_grad) > clip_threshold) {
-                clipped_grad *= clip_threshold / std::abs(clipped_grad);
-            }
-            
-            // Update momentum
-            float new_m = beta1 * m_proj(i, j) + (1 - beta1) * clipped_grad;
-            if (!std::isfinite(new_m)) {
-                has_unstable_update = true;
-                continue;
-            }
-            m_proj(i, j) = new_m;
-            
-            // Update RMSprop
-            float grad_squared = clipped_grad * clipped_grad;
-            float new_v = beta2 * v_proj(i, j) + (1 - beta2) * grad_squared;
-            if (!std::isfinite(new_v)) {
-                has_unstable_update = true;
-                continue;
-            }
-            v_proj(i, j) = new_v;
-            
-            // Bias correction
-            float m_hat = m_proj(i, j) / (1 - std::pow(beta1, t));
-            float v_hat = v_proj(i, j) / (1 - std::pow(beta2, t));
-            
-            if (!std::isfinite(m_hat) || !std::isfinite(v_hat)) {
-                has_unstable_update = true;
-                continue;
-            }
-            
-            // Compute update
-            float denom = std::sqrt(v_hat) + eps;
-            if (denom < eps) denom = eps;
-            
-            float update = current_lr * m_hat / denom;
-            update *= scale_factor;
-            
-            if (!std::isfinite(update)) {
-                has_unstable_update = true;
-                continue;
-            }
-            
-            // Hard clip update
-            update = std::max(-max_update, std::min(max_update, update));
-            
-            // Compute proposed new value
-            float new_value = projection(i, j) - update;
-            
-            if (std::abs(new_value) > max_allowed_value) {
-                has_unstable_update = true;
-                continue;
-            }
-            
-            if (std::isfinite(new_value)) {
-                projection(i, j) = new_value;
-            }
-        }
-    }
-    
-    // Compute gradient with respect to input
-    // grad_output: [batch_size x vocab_size]
-    // projection.T: [vocab_size x hidden_size]
-    // result: [batch_size x hidden_size]
     Matrix projection_t = projection.transpose();
-    Matrix grad_input = matmul(grad_output, projection_t);
-    
-    // Verify output dimensions
-    if (grad_input.cols() != hidden_size_) {
-        throw std::runtime_error("Output gradient dimension mismatch. Expected hidden_size: " + 
-                               std::to_string(hidden_size_) + ", got: " + std::to_string(grad_input.cols()));
-    }
-    
-    std::cout << "Gradient propagation dimensions:" << std::endl;
-    std::cout << "- Input gradient: [" << grad_input.rows() << " x " << grad_input.cols() << "]" << std::endl;
-    
-    return grad_input;
+    return matmul(grad_output, projection_t);
 }
 
 void LanguageModelHead::bias_completion_format(Matrix& logits) {

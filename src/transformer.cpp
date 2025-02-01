@@ -101,210 +101,82 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
                                  const std::optional<KVCache>& kv_cache) {
     std::cout << "=== TransformerLayer::forward START ===" << std::endl;
 
-    // Layer norm before attention
+#ifdef USE_CUDA
+    // Layer norm before attention using CUDA
+    Matrix normalized;
+    if (cuda::is_available()) {
+        normalized = cuda::layer_norm(input, attention_ln->get_gamma(), attention_ln->get_beta(), 
+                                    config.layer_norm_epsilon);
+    } else {
+        normalized = attention_ln->forward(input);
+    }
+#else
+    // CPU fallback
     Matrix normalized = attention_ln->forward(input);
-    
-    // Debug normalized output and validate statistics
-    float min_norm = std::numeric_limits<float>::infinity();
-    float max_norm = -std::numeric_limits<float>::infinity();
-    float sum_norm = 0.0f;
-    float sum_squared = 0.0f;
-    size_t nonzero_norm = 0;
-    const size_t total_elements = normalized.rows() * normalized.cols();
-    
-    #pragma omp parallel for collapse(2) reduction(min:min_norm) reduction(max:max_norm) \
-                             reduction(+:sum_norm,sum_squared,nonzero_norm)
-    for (size_t i = 0; i < normalized.rows(); i++) {
-        for (size_t j = 0; j < normalized.cols(); j++) {
-            float val = normalized(i, j);
-            min_norm = std::min(min_norm, val);
-            max_norm = std::max(max_norm, val);
-            sum_norm += val;
-            sum_squared += val * val;
-            if (std::abs(val) > 1e-6) nonzero_norm++;
-        }
-    }
-    
-    float mean = sum_norm / total_elements;
-    float variance = (sum_squared / total_elements) - (mean * mean);
-    
-    // Check for layer norm instability
-    const float STABILITY_THRESHOLD = 1e3;
-    if (std::abs(mean) > 1e-2 || std::abs(variance - 1.0) > 1e-1 || 
-        std::abs(min_norm) > STABILITY_THRESHOLD || std::abs(max_norm) > STABILITY_THRESHOLD) {
-        std::cerr << "WARNING: Layer normalization statistics outside expected ranges:\n"
-                  << "Mean: " << mean << " (expected close to 0)\n"
-                  << "Variance: " << variance << " (expected close to 1)\n"
-                  << "Min: " << min_norm << "\n"
-                  << "Max: " << max_norm << "\n";
-                  
-        // Clip extreme values if needed
-        if (std::abs(min_norm) > STABILITY_THRESHOLD || std::abs(max_norm) > STABILITY_THRESHOLD) {
-            for (size_t i = 0; i < normalized.rows(); i++) {
-                for (size_t j = 0; j < normalized.cols(); j++) {
-                    normalized(i, j) = std::max(-STABILITY_THRESHOLD, 
-                                              std::min(STABILITY_THRESHOLD, normalized(i, j)));
-                }
-            }
-            std::cerr << "Applied value clipping for stability\n";
-        }
-    }
-    
-    std::cout << "After attention layer norm:\n"
-              << "Min norm: " << min_norm << "\n"
-              << "Max norm: " << max_norm << "\n"
-              << "Mean norm: " << mean << "\n"
-              << "Variance: " << variance << "\n"
-              << "Nonzero norm: " << nonzero_norm << "/" << total_elements << "\n\n";
+#endif
 
     // Cache the normalized input for attention backward pass
     std::string attn_key = "attn_norm_" + std::to_string(layer_idx);
     GradientCheckpoint::cache_activation(attn_key, normalized);
 
-    // Self attention
-    Matrix attention_output = self_attention->forward(normalized, mask, kv_cache);
-    
-    // Debug attention output
-    float min_attn = std::numeric_limits<float>::infinity();
-    float max_attn = -std::numeric_limits<float>::infinity();
-    float sum_attn = 0.0f;
-    size_t nonzero_attn = 0;
-    
-    #pragma omp parallel for collapse(2) reduction(min:min_attn) reduction(max:max_attn) \
-                             reduction(+:sum_attn,nonzero_attn)
-    for (size_t i = 0; i < attention_output.rows(); i++) {
-        for (size_t j = 0; j < attention_output.cols(); j++) {
-            float val = attention_output(i, j);
-            min_attn = std::min(min_attn, val);
-            max_attn = std::max(max_attn, val);
-            sum_attn += val;
-            if (std::abs(val) > 1e-6) nonzero_attn++;
-        }
+    // Self attention with CUDA acceleration
+#ifdef USE_CUDA
+    Matrix attention_output;
+    if (cuda::is_available()) {
+        attention_output = self_attention->forward_cuda(normalized, mask, kv_cache);
+    } else {
+        attention_output = self_attention->forward(normalized, mask, kv_cache);
     }
-    
-    std::cout << "After self attention:\n"
-              << "Min attn: " << min_attn << "\n"
-              << "Max attn: " << max_attn << "\n"
-              << "Mean attn: " << sum_attn / (attention_output.rows() * attention_output.cols()) << "\n"
-              << "Nonzero attn: " << nonzero_attn << "/" 
-              << (attention_output.rows() * attention_output.cols()) << "\n\n";
-    
+#else
+    Matrix attention_output = self_attention->forward(normalized, mask, kv_cache);
+#endif
+
     if (training) {
         attention_output = attention_dropout->forward(attention_output, true);
     }
     Matrix residual = attention_output + normalized;
     
-    // Debug residual
-    float min_res = std::numeric_limits<float>::infinity();
-    float max_res = -std::numeric_limits<float>::infinity();
-    float sum_res = 0.0f;
-    size_t nonzero_res = 0;
-    
-    for (size_t i = 0; i < residual.rows(); i++) {
-        for (size_t j = 0; j < residual.cols(); j++) {
-            float val = residual(i, j);
-            min_res = std::min(min_res, val);
-            max_res = std::max(max_res, val);
-            sum_res += val;
-            if (std::abs(val) > 1e-6) nonzero_res++;
-        }
+    // Second layer norm with CUDA
+#ifdef USE_CUDA
+    Matrix norm1;
+    if (cuda::is_available()) {
+        norm1 = cuda::layer_norm(residual, ffn_ln->get_gamma(), ffn_ln->get_beta(), 
+                               config.layer_norm_epsilon);
+    } else {
+        norm1 = ffn_ln->forward(residual);
     }
-    
-    std::cout << "After residual connection:\n"
-              << "Min res: " << min_res << "\n"
-              << "Max res: " << max_res << "\n"
-              << "Mean res: " << sum_res / (residual.rows() * residual.cols()) << "\n"
-              << "Nonzero res: " << nonzero_res << "/" 
-              << (residual.rows() * residual.cols()) << "\n\n";
-    
-    std::cout << "calculating attention ln" << std::endl;
-    Matrix norm1 = attention_ln->forward(residual);
-    
-    // Debug norm1
-    float min_norm1 = std::numeric_limits<float>::infinity();
-    float max_norm1 = -std::numeric_limits<float>::infinity();
-    float sum_norm1 = 0.0f;
-    size_t nonzero_norm1 = 0;
-    
-    for (size_t i = 0; i < norm1.rows(); i++) {
-        for (size_t j = 0; j < norm1.cols(); j++) {
-            float val = norm1(i, j);
-            min_norm1 = std::min(min_norm1, val);
-            max_norm1 = std::max(max_norm1, val);
-            sum_norm1 += val;
-            if (std::abs(val) > 1e-6) nonzero_norm1++;
-        }
-    }
-    
-    std::cout << "After second attention layer norm:\n"
-              << "Min norm1: " << min_norm1 << "\n"
-              << "Max norm1: " << max_norm1 << "\n"
-              << "Mean norm1: " << sum_norm1 / (norm1.rows() * norm1.cols()) << "\n"
-              << "Nonzero norm1: " << nonzero_norm1 << "/" 
-              << (norm1.rows() * norm1.cols()) << "\n\n";
+#else
+    Matrix norm1 = ffn_ln->forward(residual);
+#endif
 
-    // Cache the normalized input for feed forward backward pass
+    // Cache for backward pass
     std::string ffn_key = "ffn_norm_" + std::to_string(layer_idx);
     GradientCheckpoint::cache_activation(ffn_key, norm1);
-    std::cout << "Cached normalized input for feed forward: " << norm1.rows() << "x"
-                  << norm1.cols() << std::endl;
-    // Feed forward
-    Matrix ff_output = feed_forward->forward(norm1);
-    
-    // Debug feed forward output
-    float min_ff = std::numeric_limits<float>::infinity();
-    float max_ff = -std::numeric_limits<float>::infinity();
-    float sum_ff = 0.0f;
-    size_t nonzero_ff = 0;
-    
-    for (size_t i = 0; i < ff_output.rows(); i++) {
-        for (size_t j = 0; j < ff_output.cols(); j++) {
-            float val = ff_output(i, j);
-            min_ff = std::min(min_ff, val);
-            max_ff = std::max(max_ff, val);
-            sum_ff += val;
-            if (std::abs(val) > 1e-6) nonzero_ff++;
-        }
+
+    // Feed forward with CUDA
+#ifdef USE_CUDA
+    Matrix ff_output;
+    if (cuda::is_available()) {
+        ff_output = feed_forward->forward_cuda(norm1);
+    } else {
+        ff_output = feed_forward->forward(norm1);
     }
-    
-    std::cout << "After feed forward:\n"
-              << "Min ff: " << min_ff << "\n"
-              << "Max ff: " << max_ff << "\n"
-              << "Mean ff: " << sum_ff / (ff_output.rows() * ff_output.cols()) << "\n"
-              << "Nonzero ff: " << nonzero_ff << "/" 
-              << (ff_output.rows() * ff_output.cols()) << "\n\n";
-    
-    std::cout << "FF output dimensions: " << ff_output.rows() << "x" << ff_output.cols() << std::endl;
+#else
+    Matrix ff_output = feed_forward->forward(norm1);
+#endif
+
     if (training) {
         ff_output = ffn_dropout->forward(ff_output, true);
     }
-    std::cout << "FF dropout dimensions: " << ff_output.rows() << "x" << ff_output.cols() << std::endl;
     residual = ff_output + norm1;
     
-    // Debug final residual
-    float min_final = std::numeric_limits<float>::infinity();
-    float max_final = -std::numeric_limits<float>::infinity();
-    float sum_final = 0.0f;
-    size_t nonzero_final = 0;
-    
-    for (size_t i = 0; i < residual.rows(); i++) {
-        for (size_t j = 0; j < residual.cols(); j++) {
-            float val = residual(i, j);
-            min_final = std::min(min_final, val);
-            max_final = std::max(max_final, val);
-            sum_final += val;
-            if (std::abs(val) > 1e-6) nonzero_final++;
-        }
+    // Final layer norm with CUDA
+#ifdef USE_CUDA
+    if (cuda::is_available()) {
+        return cuda::layer_norm(residual, ffn_ln->get_gamma(), ffn_ln->get_beta(), 
+                              config.layer_norm_epsilon);
     }
-    
-    std::cout << "After final residual:\n"
-              << "Min final: " << min_final << "\n"
-              << "Max final: " << max_final << "\n"
-              << "Mean final: " << sum_final / (residual.rows() * residual.cols()) << "\n"
-              << "Nonzero final: " << nonzero_final << "/" 
-              << (residual.rows() * residual.cols()) << "\n\n";
-    
-    std::cout << "Residual dimensions: " << residual.rows() << "x" << residual.cols() << std::endl;
+#endif
     return ffn_ln->forward(residual);
 }
 

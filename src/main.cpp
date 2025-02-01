@@ -460,8 +460,12 @@ void test_model_predictions(Transformer& transformer, std::unique_ptr<Tokenizer>
 int main(int argc, char* argv[]) {
     try {
         // Initialize CUDA at program startup
-        cuda::initialize_cuda();
+#ifdef USE_CUDA
+        cuda::initialize();
         std::cout << "CUDA initialized successfully" << std::endl;
+#else
+        std::cout << "CUDA support not enabled" << std::endl;
+#endif
 
         std::cout << "entering main" << std::endl;
         Logger& logger = Logger::getInstance();
@@ -689,7 +693,34 @@ int main(int argc, char* argv[]) {
         
         // Save tuning results
         std::string tuning_results_path = save_directory + "/tuning_results.json";
-        tuner.save_results(tuning_results_path);
+        std::cout << "\nSaving hyperparameter tuning results to: " << tuning_results_path << std::endl;
+        
+        try {
+            // Create directory if it doesn't exist
+            if (!std::filesystem::exists(save_directory)) {
+                std::cout << "Creating directory: " << save_directory << std::endl;
+                if (!std::filesystem::create_directories(save_directory)) {
+                    throw std::runtime_error("Failed to create directory: " + save_directory);
+                }
+            }
+            
+            // Save results
+            tuner.save_results(tuning_results_path);
+            std::cout << "Successfully saved tuning results" << std::endl;
+            
+            // Log best hyperparameters
+            std::cout << "\nBest hyperparameters:" << std::endl;
+            std::cout << "- num_layers: " << best_config.num_layers << std::endl;
+            std::cout << "- num_heads: " << best_config.num_heads << std::endl;
+            std::cout << "- hidden_size: " << best_config.hidden_size << std::endl;
+            std::cout << "- initial_lr: " << best_config.initial_lr << std::endl;
+            std::cout << "- peak_lr: " << best_config.peak_lr << std::endl;
+            std::cout << "- warmup_steps: " << best_config.warmup_steps << std::endl;
+            std::cout << "- gradient_clip_threshold: " << best_config.gradient_clip_threshold << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Error saving tuning results: " << e.what() << std::endl;
+            std::cerr << "Will continue with best hyperparameters but results won't be saved" << std::endl;
+        }
         
         std::cout << "\nHyperparameter tuning complete!" << std::endl;
         std::cout << "Best configuration achieved validation loss: " 
@@ -1103,7 +1134,7 @@ int main(int argc, char* argv[]) {
         test_model_predictions(transformer, tokenizer);
 
         // Cleanup CUDA before exit
-        cuda::cleanup_cuda();
+        cuda::cleanup();
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

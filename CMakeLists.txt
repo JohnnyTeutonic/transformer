@@ -30,10 +30,18 @@ include(FetchContent)
 # Find required packages
 find_package(CUDAToolkit)
 
-# Set CUDA availability flag
+# Set CUDA availability flag and definitions BEFORE any source files
 if(CUDAToolkit_FOUND)
     message(STATUS "CUDA found - enabling CUDA support")
     add_definitions(-DCUDA_AVAILABLE)
+    add_definitions(-DUSE_CUDA)
+    
+    # Add CUDA compilation flags early
+    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+    
+    # Include CUDA directories early
+    include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 else()
     message(STATUS "CUDA not found - building without CUDA support")
 endif()
@@ -67,11 +75,6 @@ FetchContent_Declare(
 )
 set(FETCHCONTENT_QUIET OFF)
 FetchContent_MakeAvailable(json)
-
-# Include directories
-if(CUDAToolkit_FOUND)
-    include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-endif()
 
 # Base include directories - single source of truth for all includes
 include_directories(
@@ -151,12 +154,6 @@ set(HEADERS
     ${HEADERS}
     include/tensor.hpp
 )
-
-# Add CUDA compilation flags
-if(CUDAToolkit_FOUND)
-    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_60)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-endif()
 
 # Create library with all components
 add_library(transformer_lib
@@ -263,16 +260,19 @@ if(CUDAToolkit_FOUND)
         src/cuda/gqa_kernels.cu
         src/cuda/beam_search_ops.cu
         src/cuda/tokenizer_kernels.cu
+        src/cuda/lm_head_kernels.cu
     )
 
     set_target_properties(cuda_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         LANGUAGE CUDA
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
 
     # Add CUDA include directories
     target_include_directories(cuda_kernels
-        PRIVATE
+        PUBLIC
         ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRS}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/third_party

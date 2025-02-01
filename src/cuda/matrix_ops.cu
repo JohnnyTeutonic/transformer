@@ -8,6 +8,10 @@
 __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C, 
                                       int M, int N, int K);
 __global__ void gelu_forward_kernel(float* x, int size);
+__global__ void add_bias_kernel(float* output, const float* bias, int rows, int cols);
+__global__ void row_sum_kernel(const float* input, float* output, int rows, int cols);
+__global__ void adam_update_kernel(float* params, const float* grads, float* m, float* v,
+                                 float beta1, float beta2, float lr, float epsilon, int size);
 
 namespace cuda {
     // Global cuBLAS handle with proper initialization
@@ -131,6 +135,42 @@ namespace cuda {
         CUDA_CHECK(cudaMemcpy(x.data(), d_x, size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(d_x));
     }
+
+    // Add new utility functions
+    bool is_available() {
+        int deviceCount = 0;
+        cudaError_t error = cudaGetDeviceCount(&deviceCount);
+        return (error == cudaSuccess && deviceCount > 0);
+    }
+
+    cudaStream_t get_stream() {
+        return nullptr; // Returns default stream for now
+    }
+
+    void synchronize() {
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    void launch_add_bias(float* output, const float* bias, int rows, int cols) {
+        dim3 block(256);
+        dim3 grid((rows * cols + block.x - 1) / block.x);
+        add_bias_kernel<<<grid, block>>>(output, bias, rows, cols);
+    }
+
+    void launch_row_sum(const float* input, float* output, int rows, int cols) {
+        dim3 block(256);
+        dim3 grid((cols + block.x - 1) / block.x);
+        row_sum_kernel<<<grid, block>>>(input, output, rows, cols);
+    }
+
+    void launch_adam_update(float* params, const float* grads, float* m, float* v,
+                          float beta1, float beta2, float lr, float epsilon, int size,
+                          cudaStream_t stream) {
+        dim3 block(256);
+        dim3 grid((size + block.x - 1) / block.x);
+        adam_update_kernel<<<grid, block, 0, stream>>>(params, grads, m, v,
+                                                      beta1, beta2, lr, epsilon, size);
+    }
 }
 
 // Kernel implementations
@@ -181,5 +221,40 @@ __global__ void gelu_forward_kernel(float* x, int size) {
         float val = x[idx];
         float cdf = 0.5f * (1.0f + tanhf(0.797884f * (val + 0.044715f * val * val * val)));
         x[idx] = val * cdf;
+    }
+}
+
+// Add kernel implementations at the bottom of the file
+__global__ void add_bias_kernel(float* output, const float* bias, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < rows * cols) {
+        int col = idx % cols;
+        output[idx] += bias[col];
+    }
+}
+
+__global__ void row_sum_kernel(const float* input, float* output, int rows, int cols) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {
+            sum += input[row * cols + col];
+        }
+        output[col] = sum;
+    }
+}
+
+__global__ void adam_update_kernel(float* params, const float* grads, float* m, float* v,
+                                 float beta1, float beta2, float lr, float epsilon, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        // Update biased first moment estimate
+        m[idx] = beta1 * m[idx] + (1.0f - beta1) * grads[idx];
+        
+        // Update biased second raw moment estimate
+        v[idx] = beta2 * v[idx] + (1.0f - beta2) * grads[idx] * grads[idx];
+        
+        // Update parameters
+        params[idx] -= lr * m[idx] / (sqrtf(v[idx]) + epsilon);
     }
 }
