@@ -107,6 +107,16 @@ class LanguageModelHead {
     std::unique_ptr<LayerNorm> layer_norm;  ///< Layer normalization
     std::shared_ptr<TiktokenTokenizer> tokenizer;  ///< Tokenizer instance
 
+    // Private helper functions
+    void backward_linear(const Matrix& grad_output);
+    void update_active_tokens();
+    static constexpr size_t MIN_ACTIVE_TOKENS = 1000;  // Minimum number of active tokens to maintain
+
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    // Additional CUDA device memory
+    int* d_active_token_indices = nullptr;
+#endif
+
   public:
     // Constructors and destructor
     LanguageModelHead(size_t hidden_size, size_t vocab_size);
