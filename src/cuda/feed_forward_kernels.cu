@@ -140,10 +140,27 @@ Matrix FeedForward::forward_cuda(const Matrix& input) {
     
     // First linear layer
     Matrix intermediate(batch_size, W1.cols());  // Create intermediate matrix with correct dimensions
+    
+    // Allocate GPU memory for intermediate results and biases
+    float* d_intermediate;
+    float* d_b1;
+    size_t intermediate_size = intermediate.size() * sizeof(float);
+    size_t b1_size = b1.size() * sizeof(float);
+    
+    CUDA_CHECK(cudaMalloc(&d_intermediate, intermediate_size));
+    CUDA_CHECK(cudaMalloc(&d_b1, b1_size));
+    
+    // Copy bias to GPU
+    CUDA_CHECK(cudaMemcpy(d_b1, b1.data(), b1_size, cudaMemcpyHostToDevice));
+    
+    // First matmul (this already handles GPU memory internally)
     cuda::matmul(input, W1, intermediate, nullptr);
     
-    // Add bias - ensure types match exactly
-    cuda::launch_add_bias(intermediate.data(), b1.data(),
+    // Copy intermediate result to GPU
+    CUDA_CHECK(cudaMemcpy(d_intermediate, intermediate.data(), intermediate_size, cudaMemcpyHostToDevice));
+    
+    // Add bias using GPU memory pointers
+    cuda::launch_add_bias(d_intermediate, d_b1,
                          static_cast<int>(batch_size), 
                          static_cast<int>(intermediate.cols()));
     
@@ -152,19 +169,48 @@ Matrix FeedForward::forward_cuda(const Matrix& input) {
     dim3 grid((intermediate.size() + block.x - 1) / block.x);
     
     cuda::gelu_activation_kernel<<<grid, block>>>(
-        intermediate.data(),
+        d_intermediate,  // Use GPU pointer
         static_cast<int>(intermediate.size())
     );
     CUDA_CHECK(cudaGetLastError());
     
+    // Copy result back to intermediate
+    CUDA_CHECK(cudaMemcpy(intermediate.data(), d_intermediate, intermediate_size, cudaMemcpyDeviceToHost));
+    
     // Second linear layer
-    Matrix output(batch_size, W2.cols());  // Create output matrix with correct dimensions
+    Matrix output(batch_size, W2.cols());
+    
+    // Allocate GPU memory for output and second bias
+    float* d_output;
+    float* d_b2;
+    size_t output_size = output.size() * sizeof(float);
+    size_t b2_size = b2.size() * sizeof(float);
+    
+    CUDA_CHECK(cudaMalloc(&d_output, output_size));
+    CUDA_CHECK(cudaMalloc(&d_b2, b2_size));
+    
+    // Copy second bias to GPU
+    CUDA_CHECK(cudaMemcpy(d_b2, b2.data(), b2_size, cudaMemcpyHostToDevice));
+    
+    // Second matmul
     cuda::matmul(intermediate, W2, output, nullptr);
     
-    // Add bias - ensure types match exactly
-    cuda::launch_add_bias(output.data(), b2.data(),
+    // Copy output to GPU
+    CUDA_CHECK(cudaMemcpy(d_output, output.data(), output_size, cudaMemcpyHostToDevice));
+    
+    // Add second bias
+    cuda::launch_add_bias(d_output, d_b2,
                          static_cast<int>(batch_size), 
                          static_cast<int>(output.cols()));
+    
+    // Copy final result back to output
+    CUDA_CHECK(cudaMemcpy(output.data(), d_output, output_size, cudaMemcpyDeviceToHost));
+    
+    // Cleanup GPU memory
+    CUDA_CHECK(cudaFree(d_intermediate));
+    CUDA_CHECK(cudaFree(d_b1));
+    CUDA_CHECK(cudaFree(d_output));
+    CUDA_CHECK(cudaFree(d_b2));
     
     return output;
 }

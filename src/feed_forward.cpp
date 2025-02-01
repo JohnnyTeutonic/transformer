@@ -100,6 +100,10 @@ Matrix FeedForward::forward(const Matrix& input) {
         // First layer
         Matrix intermediate(input.rows(), params_.ff1_weights.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "input shape: " << input.rows() << "x" << input.cols() << std::endl;
+        std::cout << "params_.ff1_weights shape: " << params_.ff1_weights.rows() << "x" << params_.ff1_weights.cols() << std::endl;
+        std::cout << "intermediate shape: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
         cuda::matmul(input, params_.ff1_weights, intermediate, nullptr);
 #else
         intermediate = matmul(input, params_.ff1_weights);
@@ -129,6 +133,10 @@ Matrix FeedForward::forward(const Matrix& input) {
         // Second layer
         Matrix output(intermediate.rows(), params_.ff2_weights.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "intermediate shape: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
+        std::cout << "params_.ff2_weights shape: " << params_.ff2_weights.rows() << "x" << params_.ff2_weights.cols() << std::endl;
+        std::cout << "output shape: " << output.rows() << "x" << output.cols() << std::endl;
         cuda::matmul(intermediate, params_.ff2_weights, output, nullptr);
 #else
         output = matmul(intermediate, params_.ff2_weights);
@@ -202,6 +210,10 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
 
         Matrix d_intermediate(grad_output.rows(), w2_transpose.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "grad_output shape: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
+        std::cout << "w2_transpose shape: " << w2_transpose.rows() << "x" << w2_transpose.cols() << std::endl;
+        std::cout << "d_intermediate shape: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
         cuda::matmul(grad_output, w2_transpose, d_intermediate, nullptr);
 #else
         d_intermediate = matmul(grad_output, w2_transpose);
@@ -222,6 +234,10 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
 
         Matrix d_input(d_intermediate.rows(), w1_transpose.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "d_intermediate shape: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
+        std::cout << "w1_transpose shape: " << w1_transpose.rows() << "x" << w1_transpose.cols() << std::endl;
+        std::cout << "d_input shape: " << d_input.rows() << "x" << d_input.cols() << std::endl;
         cuda::matmul(d_intermediate, w1_transpose, d_input, nullptr);
 #else
         d_input = matmul(d_intermediate, w1_transpose);
@@ -232,7 +248,14 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         Matrix ff1_grad(input.transpose().rows(), d_intermediate.cols());
         Matrix ff2_grad(intermediate_cache.transpose().rows(), grad_output.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "input.transpose() shape: " << input.transpose().rows() << "x" << input.transpose().cols() << std::endl;
+        std::cout << "d_intermediate shape: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
+        std::cout << "ff1_grad shape: " << ff1_grad.rows() << "x" << ff1_grad.cols() << std::endl;
         cuda::matmul(input.transpose(), d_intermediate, ff1_grad, nullptr);
+        std::cout << "intermediate_cache.transpose() shape: " << intermediate_cache.transpose().rows() << "x" << intermediate_cache.transpose().cols() << std::endl;
+        std::cout << "grad_output shape: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
+        std::cout << "ff2_grad shape: " << ff2_grad.rows() << "x" << ff2_grad.cols() << std::endl;
         cuda::matmul(intermediate_cache.transpose(), grad_output, ff2_grad, nullptr);
 #else
         ff1_grad = matmul(input.transpose(), d_intermediate);

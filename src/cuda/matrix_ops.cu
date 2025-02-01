@@ -115,7 +115,7 @@ namespace cuda {
             throw std::runtime_error("Output matrix dimensions mismatch");
         }
 
-        std::cout << "\n=== Matrix Multiplication Debug Info ===" << std::endl;
+        std::cout << "Starting CUDA matrix multiplication..." << std::endl;
         std::cout << "Matrix A: " << a.rows() << "x" << a.cols() << std::endl;
         std::cout << "Matrix B: " << b.rows() << "x" << b.cols() << std::endl;
         std::cout << "Matrix C: " << c.rows() << "x" << c.cols() << std::endl;
@@ -124,11 +124,6 @@ namespace cuda {
         size_t A_size = a.rows() * a.cols() * sizeof(float);
         size_t B_size = b.rows() * b.cols() * sizeof(float);
         size_t C_size = c.rows() * c.cols() * sizeof(float);
-
-        std::cout << "Allocating device memory..." << std::endl;
-        std::cout << "A_size: " << A_size << " bytes" << std::endl;
-        std::cout << "B_size: " << B_size << " bytes" << std::endl;
-        std::cout << "C_size: " << C_size << " bytes" << std::endl;
 
         CUDA_CHECK(cudaMalloc(&d_A, A_size));
         CUDA_CHECK(cudaMalloc(&d_B, B_size));
@@ -143,53 +138,49 @@ namespace cuda {
         float alpha = 1.0f;
         float beta = 0.0f;
 
-        std::cout << "cuBLAS parameters:" << std::endl;
-        std::cout << "alpha: " << alpha << ", beta: " << beta << std::endl;
-        std::cout << "Leading dimensions:" << std::endl;
-        std::cout << "lda (A): " << a.rows() << " (rows)" << std::endl;
-        std::cout << "ldb (B): " << b.rows() << " (rows)" << std::endl;
-        std::cout << "ldc (C): " << c.cols() << " (cols)" << std::endl;
-        std::cout << "Operation dimensions (m,n,k): " << c.cols() << "," << c.rows() << "," << a.cols() << std::endl;
-
         // Set stream for cuBLAS operations
         if (stream) {
             CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
         }
 
-        // Using transposed operations to handle row-major to column-major conversion
+        // For row-major matrices A[m,k] * B[k,n] = C[m,n], we compute:
+        // C = A * B in column-major order
         cublasStatus_t status = cublasSgemm(cublas_handle,
-                                          CUBLAS_OP_T, CUBLAS_OP_T,  // Use transposed operations
-                                          c.cols(), c.rows(), a.cols(),  // m, n, k dimensions
+                                          CUBLAS_OP_N, CUBLAS_OP_N,  // No transposition needed
+                                          b.cols(), a.rows(), a.cols(),  // Dimensions for the operation
                                           &alpha,
-                                          d_B, ((b.rows() + 31) / 32) * 32,  // Pad leading dimension to multiple of 32
-                                          d_A, ((a.rows() + 31) / 32) * 32,  // Pad leading dimension to multiple of 32
+                                          d_B, b.cols(),  // Leading dimension is cols for B
+                                          d_A, a.cols(),  // Leading dimension is cols for A
                                           &beta,
-                                          d_C, ((c.cols() + 31) / 32) * 32); // Pad leading dimension to multiple of 32
+                                          d_C, b.cols()); // Leading dimension is cols for C
 
         if (status != CUBLAS_STATUS_SUCCESS) {
-            std::cout << "cuBLAS error status: " << status << std::endl;
             cudaFree(d_A);
             cudaFree(d_B);
             cudaFree(d_C);
             throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
         }
 
-        std::cout << "Matrix multiplication completed, copying results back..." << std::endl;
-        CUDA_CHECK(cudaMemcpyAsync(c.data(), d_C, C_size, cudaMemcpyDeviceToHost, compute_stream));
-        
-        // Ensure all operations are complete
-        if (stream) {
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-        } else {
-            CUDA_CHECK(cudaDeviceSynchronize());
+        // Ensure all GPU operations are complete before copying back
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+
+        // Ensure the output matrix has CPU memory allocated
+        if (c.data() == nullptr) {
+            c.resize(c.rows(), c.cols());  // This will allocate CPU memory if needed
         }
 
-        // Cleanup
+        // Copy result back to host
+        CUDA_CHECK(cudaMemcpyAsync(c.data(), d_C, C_size, cudaMemcpyDeviceToHost, compute_stream));
+        
+        // Final synchronization to ensure the async copy is complete
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+
+        // Cleanup GPU memory
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
         CUDA_CHECK(cudaFree(d_C));
-        
-        std::cout << "Matrix multiplication completed successfully" << std::endl;
+
+        std::cout << "CUDA matrix multiplication completed successfully" << std::endl;
     }
 }
 

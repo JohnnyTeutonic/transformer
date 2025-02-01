@@ -253,6 +253,8 @@ Matrix MultiHeadAttention::flash_attention(const Matrix& Q, const Matrix& K, con
 
 Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matrix& K, const AttentionMask& mask) {
     Matrix scores(Q.rows(), K.cols());
+    std::cout << "Q shape: " << Q.rows() << "x" << Q.cols() << std::endl;
+    std::cout << "K shape: " << K.rows() << "x" << K.cols() << std::endl;
 #ifdef USE_CUDA
     cuda::matmul(Q, K.transpose(), scores, nullptr);
 #else
@@ -311,6 +313,9 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
         Matrix output_weights_t = params_.output_weights.transpose();
         Matrix d_value(grad_output.rows(), output_weights_t.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "grad_output shape: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
+        std::cout << "output_weights_t shape: " << output_weights_t.rows() << "x" << output_weights_t.cols() << std::endl;
         cuda::matmul(grad_output, output_weights_t, d_value, nullptr);
 #else
         d_value = matmul(grad_output, output_weights_t);
@@ -361,6 +366,9 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
         // Compute input gradients for backward flow
         Matrix d_input(scaled_grad.rows(), params_.output_weights.cols());
 #ifdef USE_CUDA
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "scaled_grad shape: " << scaled_grad.rows() << "x" << scaled_grad.cols() << std::endl;
+        std::cout << "output_weights shape: " << params_.output_weights.rows() << "x" << params_.output_weights.cols() << std::endl;
         cuda::matmul(scaled_grad, params_.output_weights, d_input, nullptr);
 #else
         d_input = matmul(scaled_grad, params_.output_weights);
@@ -394,6 +402,9 @@ Matrix MultiHeadAttention::compute_query_gradients(const Matrix& grad, const Mat
 Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matrix& input) {
     Matrix d_key(grad.rows(), grad.cols());
 #ifdef USE_CUDA
+    std::cout << "Using CUDA for matrix multiplication" << std::endl;
+    std::cout << "grad shape: " << grad.rows() << "x" << grad.cols() << std::endl;
+    std::cout << "key_weights_t shape: " << params_.key_weights.transpose().rows() << "x" << params_.key_weights.transpose().cols() << std::endl;
     cuda::matmul(grad, params_.key_weights.transpose(), d_key, nullptr);  // Explicitly use stream version
 #else
     d_key = matmul(grad, params_.key_weights.transpose());
@@ -404,6 +415,9 @@ Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matri
 Matrix MultiHeadAttention::compute_value_gradients(const Matrix& grad, const Matrix& input) {
     Matrix d_value(grad.rows(), grad.cols());
 #ifdef USE_CUDA
+    std::cout << "Using CUDA for matrix multiplication" << std::endl;
+    std::cout << "grad shape: " << grad.rows() << "x" << grad.cols() << std::endl;
+    std::cout << "value_weights_t shape: " << params_.value_weights.transpose().rows() << "x" << params_.value_weights.transpose().cols() << std::endl;
     cuda::matmul(grad, params_.value_weights.transpose(), d_value, nullptr);  // Explicitly use stream version
 #else
     d_value = matmul(grad, params_.value_weights.transpose());
@@ -614,6 +628,9 @@ Matrix MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     // Compute attention scores
     Matrix scores(Q_mat.rows(), K_mat.transpose().cols());
 #ifdef USE_CUDA
+    std::cout << "Using CUDA for matrix multiplication" << std::endl;
+    std::cout << "Q_mat shape: " << Q_mat.rows() << "x" << Q_mat.cols() << std::endl;
+    std::cout << "K_mat.transpose() shape: " << K_mat.transpose().rows() << "x" << K_mat.transpose().cols() << std::endl;
     cuda::matmul(Q_mat, K_mat.transpose(), scores, nullptr);
 #else
     scores = matmul(Q_mat, K_mat.transpose());
@@ -663,6 +680,9 @@ Matrix MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     // Compute attention output
     Matrix attention(scores.rows(), V_mat.cols());
 #ifdef USE_CUDA
+    std::cout << "Using CUDA for matrix multiplication" << std::endl;
+    std::cout << "scores shape: " << scores.rows() << "x" << scores.cols() << std::endl;
+    std::cout << "V_mat shape: " << V_mat.rows() << "x" << V_mat.cols() << std::endl;
     cuda::matmul(scores, V_mat, attention, nullptr);
 #else
     attention = matmul(scores, V_mat);
@@ -758,6 +778,8 @@ Tensor MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
         }
 
         // Compute scores for this block
+        std::cout << "Computing scores for block " << start_idx / BLOCK_SIZE + 1 << " of "
+                  << (Q.rows() + BLOCK_SIZE - 1) / BLOCK_SIZE << std::endl;
         Matrix scores = matmul(Q_block, K.transpose());
         scores *= scale_factor;
 
@@ -804,6 +826,8 @@ Tensor MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
         }
 
         // Compute output for this block
+        std::cout << "Computing output for block " << start_idx / BLOCK_SIZE + 1 << " of "
+                  << (Q.rows() + BLOCK_SIZE - 1) / BLOCK_SIZE << std::endl;
         Matrix block_output = matmul(scores, V);
 
         // Add block output to final output
@@ -917,16 +941,26 @@ std::unique_ptr<MultiHeadAttention> MultiHeadAttention::load(std::istream& is, c
 Matrix MultiHeadAttention::forward_cpu(const Matrix& input, const AttentionMask& mask,
                                      const std::optional<KVCache>& kv_cache) {
     // Project input to Q, K, V
+    std::cout << "=== MultiHeadAttention::forward_cpu START ===" << std::endl;
     Matrix Q(input.rows(), get_query_weights().cols());
     Matrix K(input.rows(), get_key_weights().cols());
     Matrix V(input.rows(), get_value_weights().cols());
 
 #ifdef USE_CUDA
+    std::cout << "Using CUDA for matrix multiplication" << std::endl;
+    std::cout << "Input shape: " << input.rows() << "x" << input.cols() << std::endl;
+    std::cout << "Query weights shape: " << get_query_weights().rows() << "x" << get_query_weights().cols() << std::endl;
+    std::cout << "Q shape: " << Q.rows() << "x" << Q.cols() << std::endl;
     cuda::matmul(input, get_query_weights(), Q, nullptr);
     if (!kv_cache) {
+        std::cout << "Using CUDA for matrix multiplication" << std::endl;
+        std::cout << "Input shape: " << input.rows() << "x" << input.cols() << std::endl;
+        std::cout << "Key weights shape: " << get_key_weights().rows() << "x" << get_key_weights().cols() << std::endl;
+        std::cout << "K shape: " << K.rows() << "x" << K.cols() << std::endl;
         cuda::matmul(input, get_key_weights(), K, nullptr);
         cuda::matmul(input, get_value_weights(), V, nullptr);
     } else {
+        std::cout << "Using cached KV cache" << std::endl;
         K = kv_cache->get_key();
         V = kv_cache->get_value();
     }

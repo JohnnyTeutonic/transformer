@@ -391,14 +391,22 @@ Matrix MultiHeadAttention::forward_cuda(const Matrix& input,
     
     // Project input to Q, K, V spaces
     Matrix Q(batch_size * seq_len, hidden_size);
+    std::cout << "Using CUDA for matrix multiplication in multihead attention" << std::endl;
+    std::cout << "input shape: " << input.rows() << "x" << input.cols() << std::endl;
+    std::cout << "params_.query_weights shape: " << params_.query_weights.rows() << "x" << params_.query_weights.cols() << std::endl;
     cuda::matmul(input, params_.query_weights, Q, nullptr);
     
+
     Matrix K;
     if (kv_cache) {
         K = kv_cache->get_key();
     } else {
         K = Matrix(batch_size * seq_len, hidden_size);
+        std::cout << "Using CUDA for matrix multiplication in multihead attention" << std::endl;
+        std::cout << "input shape: " << input.rows() << "x" << input.cols() << std::endl;
+        std::cout << "params_.key_weights shape: " << params_.key_weights.rows() << "x" << params_.key_weights.cols() << std::endl;
         cuda::matmul(input, params_.key_weights, K, nullptr);
+
     }
     
     Matrix V;
@@ -406,9 +414,13 @@ Matrix MultiHeadAttention::forward_cuda(const Matrix& input,
         V = kv_cache->get_value();
     } else {
         V = Matrix(batch_size * seq_len, hidden_size);
+        std::cout << "Using CUDA for matrix multiplication in multihead attention after key matrix multiplication" << std::endl;
+        std::cout << "input shape: " << input.rows() << "x" << input.cols() << std::endl;
+        std::cout << "params_.value_weights shape: " << params_.value_weights.rows() << "x" << params_.value_weights.cols() << std::endl;
         cuda::matmul(input, params_.value_weights, V, nullptr);
     }
     
+
     // Allocate device memory for reshaped matrices
     float *d_Q, *d_K, *d_V, *d_output;
     const size_t qkv_size = batch_size * num_heads * seq_len * head_dim * sizeof(float);
@@ -478,8 +490,12 @@ Matrix MultiHeadAttention::forward_cuda(const Matrix& input,
     
     // Final projection
     Matrix final_output(output.rows(), params_.output_weights.cols());
+    std::cout << "Using CUDA for matrix multiplication inside kernel for final projection" << std::endl;
+    std::cout << "output shape: " << output.rows() << "x" << output.cols() << std::endl;
+    std::cout << "params_.output_weights shape: " << params_.output_weights.rows() << "x" << params_.output_weights.cols() << std::endl;
     cuda::matmul(output, params_.output_weights, final_output, nullptr);
     
+
     return final_output;
 }
 #endif 

@@ -99,7 +99,7 @@ TransformerLayer::TransformerLayer(const TransformerConfig& config_, size_t idx)
 
 Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
                                  const std::optional<KVCache>& kv_cache) {
-    std::cout << "=== TransformerLayer::forward START ===" << std::endl;
+    std::cout << "=== TransformerLayer::forward START NORMAL ===" << std::endl;
 
     // Layer norm before attention using CUDA
 #ifdef USE_CUDA
