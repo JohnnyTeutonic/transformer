@@ -335,4 +335,57 @@ void LanguageModelHead::bias_completion_format(Matrix& logits) {
             }
         }
     }
+}
+
+LanguageModelHead::LanguageModelHead(const LanguageModelHead& other) {
+    // Copy constructor implementation
+    this->projection = other.projection;  // Use projection instead of weight
+    this->bias = other.bias;
+    this->token_frequencies = other.token_frequencies;
+    this->pruning_threshold = other.pruning_threshold;
+    this->active_tokens = other.active_tokens;
+    this->training_steps = other.training_steps;
+    this->is_training_ = other.is_training_;
+    this->m_proj = other.m_proj;
+    this->v_proj = other.v_proj;
+    this->m_bias = other.m_bias;
+    this->v_bias = other.v_bias;
+    this->t = other.t;
+    this->beta1 = other.beta1;
+    this->beta2 = other.beta2;
+    this->eps = other.eps;
+    this->current_lr = other.current_lr;
+    this->min_lr = other.min_lr;
+    this->max_lr = other.max_lr;
+    this->lr_decay = other.lr_decay;
+}
+
+std::unique_ptr<LanguageModelHead> LanguageModelHead::load(std::istream& input) {
+    // Create a new instance
+    size_t hidden_size, vocab_size;
+    input.read(reinterpret_cast<char*>(&hidden_size), sizeof(hidden_size));
+    input.read(reinterpret_cast<char*>(&vocab_size), sizeof(vocab_size));
+    
+    auto head = std::make_unique<LanguageModelHead>(hidden_size, vocab_size);
+    
+    // Load matrices
+    head->projection.load(input);
+    head->bias.load(input);
+    
+    // Load other necessary data
+    input.read(reinterpret_cast<char*>(&head->training_steps), sizeof(head->training_steps));
+    input.read(reinterpret_cast<char*>(&head->is_training_), sizeof(head->is_training_));
+    input.read(reinterpret_cast<char*>(&head->t), sizeof(head->t));
+    input.read(reinterpret_cast<char*>(&head->current_lr), sizeof(head->current_lr));
+    
+    // Load vectors
+    size_t size;
+    input.read(reinterpret_cast<char*>(&size), sizeof(size));
+    head->token_frequencies.resize(size);
+    input.read(reinterpret_cast<char*>(head->token_frequencies.data()), size * sizeof(float));
+    
+    head->active_tokens.resize(size);
+    input.read(reinterpret_cast<char*>(head->active_tokens.data()), size * sizeof(unsigned char));
+    
+    return head;
 } 

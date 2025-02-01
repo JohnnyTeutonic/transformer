@@ -2,6 +2,21 @@
 #include "../include/cuda/cuda_check.cuh"
 #include "../include/cuda/cuda_launch.cuh"
 #include "../include/cuda/feed_forward_kernels.cuh"
+#include "../../include/cuda/cuda_utils.cuh"
+#include <cuda_runtime.h>
+
+namespace cuda {
+
+__global__ void gelu_activation_kernel(float* x, int size) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        const float val = x[idx];
+        const float cdf = 0.5f * (1.0f + tanhf(0.797884f * (val + 0.044715f * val * val * val)));
+        x[idx] = val * cdf;
+    }
+}
+
+} // namespace cuda
 
 Matrix FeedForward::backward_cuda(const Matrix& grad, const Matrix& input) const {
     const size_t batch_size = grad.rows();
@@ -55,4 +70,30 @@ Matrix FeedForward::backward_cuda(const Matrix& grad, const Matrix& input) const
     CUDA_CHECK(cudaFree(d_dx));
 
     return dx;
+}
+
+void FeedForward::forward_cuda(const Matrix& input) {
+    // First linear layer
+    Matrix intermediate = matmul(input, W1);
+    
+    // Add bias
+    cuda::launch_add_bias(intermediate.data(), b1.data(),
+                         intermediate.rows(), intermediate.cols(),
+                         cuda::get_stream());
+    
+    // GELU activation
+    dim3 block(256);
+    dim3 grid((intermediate.size() + block.x - 1) / block.x);
+    cuda::gelu_activation_kernel<<<grid, block>>>(
+        intermediate.data(), intermediate.size());
+    
+    // Second linear layer
+    Matrix output = matmul(intermediate, W2);
+    
+    // Add bias
+    cuda::launch_add_bias(output.data(), b2.data(),
+                         output.rows(), output.cols(),
+                         cuda::get_stream());
+    
+    return output;
 }

@@ -141,55 +141,6 @@ void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
     std::cout << "=== LayerNorm Backward Complete ===" << std::endl;
 }
 
-void layer_norm_forward(const Matrix& input, const Matrix& gamma, const Matrix& beta,
-                          Matrix& output, float eps) {
-    const int batch_size = input.rows();
-    const int hidden_size = input.cols();
-    
-    float* d_input, *d_gamma, *d_beta, *d_output;
-    float* d_mean, *d_variance;
-    
-    // Allocate device memory
-    CUDA_CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_gamma, gamma.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_beta, beta.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_output, output.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_mean, batch_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_variance, batch_size * sizeof(float)));
-    
-    // Copy input data to device
-    CUDA_CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gamma, gamma.data(), gamma.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_beta, beta.data(), beta.size() * sizeof(float), cudaMemcpyHostToDevice));
-    
-    // Launch kernels
-    const int block_size = 256;
-    const int grid_size = (batch_size + block_size - 1) / block_size;
-    
-    // First compute mean and variance
-    size_t shared_mem_size = 2 * block_size * sizeof(float);  // For sum and squared sum
-    layer_norm_stats_kernel<<<grid_size, block_size, shared_mem_size>>>(
-        d_input, d_mean, d_variance, hidden_size, batch_size);
-    
-    // Then normalize using the computed statistics
-    const int total_elements = batch_size * hidden_size;
-    const int norm_grid_size = (total_elements + block_size - 1) / block_size;
-    layer_norm_kernel<<<norm_grid_size, block_size>>>(
-        d_input, d_mean, d_variance, d_gamma, d_beta, d_output,
-        hidden_size, batch_size, eps);
-    
-    // Copy result back to host
-    CUDA_CHECK(cudaMemcpy(output.data(), d_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    
-    // Free device memory
-    CUDA_CHECK(cudaFree(d_input));
-    CUDA_CHECK(cudaFree(d_gamma));
-    CUDA_CHECK(cudaFree(d_beta));
-    CUDA_CHECK(cudaFree(d_output));
-    CUDA_CHECK(cudaFree(d_mean));
-    CUDA_CHECK(cudaFree(d_variance));
-}
-
 __global__ void layer_norm_stats_kernel(const float* input, float* mean, float* variance,
                                       int hidden_size, int batch_size) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -231,5 +182,39 @@ __global__ void layer_norm_kernel(const float* input, const float* mean, const f
 }
 
 } // namespace cuda
+
+Matrix LayerNorm::forward_cuda(const Matrix& input) {
+    // Create output matrix with same dimensions as input
+    Matrix output(input.rows(), input.cols());
+    
+    int batch_size = input.rows();
+    int hidden_size = input.cols();
+
+    // Allocate device memory for stats
+    float *d_mean, *d_variance;
+    CUDA_CHECK(cudaMalloc(&d_mean, batch_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_variance, batch_size * sizeof(float)));
+
+    // Launch stats kernel
+    dim3 block(256);
+    dim3 grid((batch_size + block.x - 1) / block.x);
+    cuda::layer_norm_stats_kernel<<<grid, block>>>(
+        input.data(), d_mean, d_variance,
+        hidden_size, batch_size);
+
+    // Launch normalization kernel
+    dim3 norm_block(256);
+    dim3 norm_grid((batch_size + norm_block.x - 1) / norm_block.x);
+    cuda::layer_norm_kernel<<<norm_grid, norm_block>>>(
+        input.data(), d_mean, d_variance,
+        this->params_.gamma.data(), this->params_.beta.data(), output.data(),
+        hidden_size, batch_size, this->eps_);
+
+    // Free device memory
+    CUDA_CHECK(cudaFree(d_mean));
+    CUDA_CHECK(cudaFree(d_variance));
+
+    return output;
+}
 
 #endif // USE_CUDA

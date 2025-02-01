@@ -1,6 +1,8 @@
 #include "../../include/lm_head.hpp"
 #include "../../include/cuda/lm_head_kernels.cuh"
 #include "../../include/cuda/cuda_check.cuh"
+#include "cuda_kernels.hpp"
+#include "cuda/cuda_utils.cuh"
 
 #if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
 #include <cuda_runtime.h>
@@ -94,25 +96,73 @@ void LanguageModelHead::launch_convert_and_expand_vocab(
 namespace cuda {
     // Remove duplicate utility functions and keep only the kernel-specific code
     
-    void launch_add_bias(float* output, const float* bias, int rows, int cols) {
-        dim3 block(256);
-        dim3 grid((rows * cols + block.x - 1) / block.x);
-        add_bias_kernel<<<grid, block>>>(output, bias, rows, cols);
+    __global__ void add_bias_kernel(float* output, const float* bias, 
+                                   unsigned long rows, unsigned long cols) {
+        const unsigned long idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < rows * cols) {
+            const unsigned long col = idx % cols;
+            output[idx] += bias[col];
+        }
     }
 
-    void launch_row_sum(const float* input, float* output, int rows, int cols) {
-        dim3 block(256);
-        dim3 grid((cols + block.x - 1) / block.x);
-        row_sum_kernel<<<grid, block>>>(input, output, rows, cols);
+    __global__ void row_sum_kernel(const float* input, float* output,
+                                  unsigned long rows, unsigned long cols) {
+        const unsigned long row = blockIdx.x * blockDim.x + threadIdx.x;
+        if (row < rows) {
+            float sum = 0.0f;
+            for (unsigned long col = 0; col < cols; ++col) {
+                sum += input[row * cols + col];
+            }
+            output[row] = sum;
+        }
     }
 
-    void launch_adam_update(float* params, const float* grads, float* m, float* v,
-                          float beta1, float beta2, float eps, float lr, int size,
-                          unsigned long step, cudaStream_t stream) {
-        dim3 block(256);
-        dim3 grid((size + block.x - 1) / block.x);
-        adam_update_kernel<<<grid, block, 0, stream>>>(params, grads, m, v,
-                                                      beta1, beta2, eps, lr, size, step);
+    __global__ void adam_update_kernel(float* param, const float* grad,
+                                     float* m, float* v,
+                                     float beta1, float beta2,
+                                     float eps, float lr,
+                                     int step, unsigned long size) {
+        const unsigned long idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) {
+            m[idx] = beta1 * m[idx] + (1 - beta1) * grad[idx];
+            v[idx] = beta2 * v[idx] + (1 - beta2) * grad[idx] * grad[idx];
+            
+            float m_hat = m[idx] / (1 - pow(beta1, step));
+            float v_hat = v[idx] / (1 - pow(beta2, step));
+            
+            param[idx] -= lr * m_hat / (sqrt(v_hat) + eps);
+        }
+    }
+
+    // Launch functions with corrected signatures
+    void launch_add_bias(float* output, const float* bias,
+                        unsigned long rows, unsigned long cols,
+                        cudaStream_t stream) {
+        const int block_size = 256;
+        const int num_blocks = (rows * cols + block_size - 1) / block_size;
+        add_bias_kernel<<<num_blocks, block_size, 0, stream>>>(
+            output, bias, rows, cols);
+    }
+
+    void launch_row_sum(const float* input, float* output,
+                       unsigned long rows, unsigned long cols,
+                       cudaStream_t stream) {
+        const int block_size = 256;
+        const int num_blocks = (rows + block_size - 1) / block_size;
+        row_sum_kernel<<<num_blocks, block_size, 0, stream>>>(
+            input, output, rows, cols);
+    }
+
+    void launch_adam_update(float* param, const float* grad,
+                           float* m, float* v,
+                           float beta1, float beta2,
+                           float eps, float lr,
+                           int step, unsigned long size,
+                           cudaStream_t stream) {
+        const int block_size = 256;
+        const int num_blocks = (size + block_size - 1) / block_size;
+        adam_update_kernel<<<num_blocks, block_size, 0, stream>>>(
+            param, grad, m, v, beta1, beta2, eps, lr, step, size);
     }
 }
 
