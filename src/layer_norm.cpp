@@ -14,6 +14,17 @@ LayerNorm::LayerNorm(size_t hidden_size_, float eps_)
     // Initialize gradients
     grads_.gamma_grad = Matrix(1, hidden_size_);
     grads_.beta_grad = Matrix(1, hidden_size_);
+
+    // Ensure data is properly initialized in CPU memory
+    if (params_.gamma.empty() || params_.beta.empty() || 
+        params_.gamma.data() == nullptr || params_.beta.data() == nullptr) {
+        throw std::runtime_error("Failed to initialize LayerNorm parameters");
+    }
+
+    std::cout << "LayerNorm initialized with hidden_size=" << hidden_size_ 
+              << ", eps=" << eps_ << std::endl;
+    std::cout << "Gamma shape: " << params_.gamma.rows() << "x" << params_.gamma.cols() << std::endl;
+    std::cout << "Beta shape: " << params_.beta.rows() << "x" << params_.beta.cols() << std::endl;
 }
 
 Matrix LayerNorm::forward(const Matrix& input) {

@@ -105,6 +105,8 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
 #ifdef USE_CUDA
     Matrix normalized;
     if (cuda::is_available()) {
+        std::cout << "Using CUDA for layer norm before attention" << std::endl;
+        std::cout << "input shape: " << input.rows() << "x" << input.cols() << std::endl;
         normalized = attention_ln->forward_cuda(input);
     } else {
         normalized = attention_ln->forward(input);

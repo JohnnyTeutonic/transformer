@@ -143,21 +143,44 @@ void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
 
 __global__ void layer_norm_stats_kernel(const float* input, float* mean, float* variance,
                                       int hidden_size, int batch_size) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= batch_size) return;
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
 
-    float sum = 0.0f;
-    float sq_sum = 0.0f;
+    // Each thread processes a portion of the hidden dimension
+    float local_sum = 0.0f;
+    float local_sq_sum = 0.0f;
     
-    // Compute mean and variance for this sequence position
-    for (int i = 0; i < hidden_size; ++i) {
-        float val = input[idx * hidden_size + i];
-        sum += val;
-        sq_sum += val * val;
+    // Use shared memory for reduction
+    extern __shared__ float shared_mem[];
+    float* shared_sum = shared_mem;
+    float* shared_sq_sum = shared_mem + blockDim.x;
+    
+    // Each thread processes multiple elements in the hidden dimension
+    for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+        float val = input[batch_idx * hidden_size + i];
+        local_sum += val;
+        local_sq_sum += val * val;
     }
     
-    mean[idx] = sum / hidden_size;
-    variance[idx] = (sq_sum / hidden_size) - (mean[idx] * mean[idx]);
+    // Store in shared memory
+    shared_sum[threadIdx.x] = local_sum;
+    shared_sq_sum[threadIdx.x] = local_sq_sum;
+    __syncthreads();
+    
+    // Parallel reduction in shared memory
+    for (int stride = blockDim.x/2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_sum[threadIdx.x] += shared_sum[threadIdx.x + stride];
+            shared_sq_sum[threadIdx.x] += shared_sq_sum[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    
+    // Write results
+    if (threadIdx.x == 0) {
+        mean[batch_idx] = shared_sum[0] / hidden_size;
+        variance[batch_idx] = (shared_sq_sum[0] / hidden_size) - (mean[batch_idx] * mean[batch_idx]);
+    }
 }
 
 __global__ void layer_norm_kernel(const float* input, const float* mean, const float* variance,
@@ -183,62 +206,91 @@ __global__ void layer_norm_kernel(const float* input, const float* mean, const f
 
 } // namespace cuda
 
-Matrix LayerNorm::forward_cuda(const Matrix& input) {
-    // Create output matrix with same dimensions as input
-    Matrix output(input.rows(), input.cols());
+// Define the static GPU memory
+namespace {
+    struct GPUMemory {
+        float *d_input = nullptr;
+        float *d_output = nullptr;
+        float *d_gamma = nullptr;
+        float *d_beta = nullptr;
+        float *d_mean = nullptr;
+        float *d_variance = nullptr;
+        int cached_batch_size = 0;
+        int cached_hidden_size = 0;
+        
+        void free() {
+            if (d_input) cudaFree(d_input);
+            if (d_output) cudaFree(d_output);
+            if (d_gamma) cudaFree(d_gamma);
+            if (d_beta) cudaFree(d_beta);
+            if (d_mean) cudaFree(d_mean);
+            if (d_variance) cudaFree(d_variance);
+            d_input = d_output = d_gamma = d_beta = d_mean = d_variance = nullptr;
+            cached_batch_size = cached_hidden_size = 0;
+        }
+        
+        ~GPUMemory() {
+            free();
+        }
+    };
     
+    GPUMemory gpu_memory;
+}
+
+Matrix LayerNorm::forward_cuda(const Matrix& input) {
     int batch_size = input.rows();
     int hidden_size = input.cols();
-
-    // Allocate and copy input data to device
-    float *d_input, *d_output, *d_gamma, *d_beta;
-    CUDA_CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_output, output.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_gamma, params_.gamma.size() * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_beta, params_.beta.size() * sizeof(float)));
     
-    CUDA_CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gamma, params_.gamma.data(), params_.gamma.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_beta, params_.beta.data(), params_.beta.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-    // Allocate device memory for stats
-    float *d_mean, *d_variance;
-    CUDA_CHECK(cudaMalloc(&d_mean, batch_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_variance, batch_size * sizeof(float)));
-
-    // Launch stats kernel - one block per batch element
-    const int threads_per_block = 256;
-    const size_t shared_mem_size = 2 * threads_per_block * sizeof(float); // for sum and squared sum
+    // Only reallocate if batch size or hidden size changes
+    if (batch_size != gpu_memory.cached_batch_size || 
+        hidden_size != gpu_memory.cached_hidden_size) {
+        // Free old memory
+        gpu_memory.free();
+        
+        // Allocate new memory
+        CUDA_CHECK(cudaMalloc(&gpu_memory.d_input, batch_size * hidden_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gpu_memory.d_output, batch_size * hidden_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gpu_memory.d_gamma, hidden_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gpu_memory.d_beta, hidden_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gpu_memory.d_mean, batch_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&gpu_memory.d_variance, batch_size * sizeof(float)));
+        
+        gpu_memory.cached_batch_size = batch_size;
+        gpu_memory.cached_hidden_size = hidden_size;
+    }
     
+    // Create output matrix
+    Matrix output(batch_size, hidden_size, 0.0f);
+    
+    // Copy data to device
+    CUDA_CHECK(cudaMemcpy(gpu_memory.d_input, input.data(), 
+                         batch_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(gpu_memory.d_gamma, params_.gamma.data(), 
+                         hidden_size * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(gpu_memory.d_beta, params_.beta.data(), 
+                         hidden_size * sizeof(float), cudaMemcpyHostToDevice));
+    
+    // Launch kernels
     dim3 stats_grid(batch_size);
-    dim3 stats_block(threads_per_block);
+    dim3 stats_block(std::min(hidden_size, 256));
+    dim3 norm_grid(batch_size);
+    dim3 norm_block(std::min(hidden_size, 256));
     
-    cuda::layer_norm_stats_kernel<<<stats_grid, stats_block, shared_mem_size>>>(
-        d_input, d_mean, d_variance,
+    cuda::layer_norm_stats_kernel<<<stats_grid, stats_block, 2 * stats_block.x * sizeof(float)>>>(
+        gpu_memory.d_input, gpu_memory.d_mean, gpu_memory.d_variance,
         hidden_size, batch_size);
     CUDA_CHECK(cudaGetLastError());
-
-    // Launch normalization kernel - one block per batch element
-    dim3 norm_grid(batch_size);
-    dim3 norm_block(threads_per_block);
     
     cuda::layer_norm_kernel<<<norm_grid, norm_block>>>(
-        d_input, d_mean, d_variance,
-        d_gamma, d_beta, d_output,
+        gpu_memory.d_input, gpu_memory.d_mean, gpu_memory.d_variance,
+        gpu_memory.d_gamma, gpu_memory.d_beta, gpu_memory.d_output,
         hidden_size, batch_size, eps_);
     CUDA_CHECK(cudaGetLastError());
-
+    
     // Copy result back to host
-    CUDA_CHECK(cudaMemcpy(output.data(), d_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
-
-    // Free device memory
-    CUDA_CHECK(cudaFree(d_input));
-    CUDA_CHECK(cudaFree(d_output));
-    CUDA_CHECK(cudaFree(d_gamma));
-    CUDA_CHECK(cudaFree(d_beta));
-    CUDA_CHECK(cudaFree(d_mean));
-    CUDA_CHECK(cudaFree(d_variance));
-
+    CUDA_CHECK(cudaMemcpy(output.data(), gpu_memory.d_output,
+                         batch_size * hidden_size * sizeof(float), cudaMemcpyDeviceToHost));
+    
     return output;
 }
 
