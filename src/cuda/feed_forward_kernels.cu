@@ -81,15 +81,15 @@ namespace cuda {
         CUDA_CHECK(cudaFree(d_dx));
         CUDA_CHECK(cudaFree(d_intermediate));
     }
-}
 
-__global__ void gelu_backward_kernel(const float* d_intermediate, float* d_input,
-                                     const int num_elements) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_elements) {
-        float x = d_input[idx];
-        float cdf = 0.5f * (1.0f + tanhf(0.797884f * (x + 0.044715f * x * x * x)));
-        float pdf = 0.797884f * (1.0f - tanhf(0.797884f * x) * tanhf(0.797884f * x));
-        d_input[idx] = d_intermediate[idx] * (cdf + x * pdf);
+    __global__ void gelu_backward_kernel(const float* d_intermediate, float* d_input,
+                                       const int num_elements) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < num_elements) {
+            float x = d_input[idx];
+            float cdf = 0.5f * (1.0f + tanhf(0.797884f * (x + 0.044715f * x * x * x)));
+            float pdf = 0.797884f * (1.0f - tanhf(0.797884f * x) * tanhf(0.797884f * x));
+            d_input[idx] = d_intermediate[idx] * (cdf + x * pdf);
+        }
     }
 }

@@ -38,6 +38,13 @@ namespace cuda {
 
     template<typename T>
     void copy_to_host(T* dst, const T* src, size_t size);
+
+    // Declare the CUDA kernel launches as extern to be defined in .cu files
+    extern void launch_add_bias(float* output, const float* bias, unsigned long rows, unsigned long cols, cudaStream_t stream = nullptr);
+    extern void launch_row_sum(const float* input, float* output, unsigned long rows, unsigned long cols, cudaStream_t stream = nullptr);
+    extern void launch_adam_update(float* params, const float* grads, float* m, float* v,
+                                 float beta1, float beta2, float eps, float lr, int size,
+                                 unsigned long step, cudaStream_t stream = nullptr);
 }
 
 #ifdef CUDA_AVAILABLE

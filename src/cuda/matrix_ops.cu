@@ -11,7 +11,8 @@ __global__ void gelu_forward_kernel(float* x, int size);
 __global__ void add_bias_kernel(float* output, const float* bias, int rows, int cols);
 __global__ void row_sum_kernel(const float* input, float* output, int rows, int cols);
 __global__ void adam_update_kernel(float* params, const float* grads, float* m, float* v,
-                                 float beta1, float beta2, float lr, float epsilon, int size);
+                                 float beta1, float beta2, float epsilon, float lr, int size,
+                                 unsigned long step);
 
 namespace cuda {
     // Global cuBLAS handle with proper initialization
@@ -121,9 +122,8 @@ namespace cuda {
     }
 
     void gelu_forward(Matrix& x) {
-        float* d_x;
         size_t size = x.size() * sizeof(float);
-        
+        float* d_x;
         CUDA_CHECK(cudaMalloc(&d_x, size));
         CUDA_CHECK(cudaMemcpy(d_x, x.data(), size, cudaMemcpyHostToDevice));
         
@@ -134,21 +134,6 @@ namespace cuda {
         
         CUDA_CHECK(cudaMemcpy(x.data(), d_x, size, cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(d_x));
-    }
-
-    // Add new utility functions
-    bool is_available() {
-        int deviceCount = 0;
-        cudaError_t error = cudaGetDeviceCount(&deviceCount);
-        return (error == cudaSuccess && deviceCount > 0);
-    }
-
-    cudaStream_t get_stream() {
-        return nullptr; // Returns default stream for now
-    }
-
-    void synchronize() {
-        CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     void launch_add_bias(float* output, const float* bias, int rows, int cols) {
@@ -164,12 +149,12 @@ namespace cuda {
     }
 
     void launch_adam_update(float* params, const float* grads, float* m, float* v,
-                          float beta1, float beta2, float lr, float epsilon, int size,
-                          cudaStream_t stream) {
+                          float beta1, float beta2, float eps, float lr, int size,
+                          unsigned long step, cudaStream_t stream) {
         dim3 block(256);
         dim3 grid((size + block.x - 1) / block.x);
         adam_update_kernel<<<grid, block, 0, stream>>>(params, grads, m, v,
-                                                      beta1, beta2, lr, epsilon, size);
+                                                      beta1, beta2, eps, lr, size, step);
     }
 }
 
@@ -245,7 +230,8 @@ __global__ void row_sum_kernel(const float* input, float* output, int rows, int 
 }
 
 __global__ void adam_update_kernel(float* params, const float* grads, float* m, float* v,
-                                 float beta1, float beta2, float lr, float epsilon, int size) {
+                                 float beta1, float beta2, float epsilon, float lr, int size,
+                                 unsigned long step) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         // Update biased first moment estimate
@@ -254,7 +240,11 @@ __global__ void adam_update_kernel(float* params, const float* grads, float* m, 
         // Update biased second raw moment estimate
         v[idx] = beta2 * v[idx] + (1.0f - beta2) * grads[idx] * grads[idx];
         
-        // Update parameters
-        params[idx] -= lr * m[idx] / (sqrtf(v[idx]) + epsilon);
+        // Compute bias correction terms
+        float m_hat = m[idx] / (1.0f - powf(beta1, step));
+        float v_hat = v[idx] / (1.0f - powf(beta2, step));
+        
+        // Update parameters with bias correction
+        params[idx] -= lr * m_hat / (sqrtf(v_hat) + epsilon);
     }
 }
