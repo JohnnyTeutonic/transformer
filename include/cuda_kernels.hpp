@@ -46,7 +46,7 @@ void launch_add_bias(float* output, const float* bias,
                     cudaStream_t stream);
 
 void launch_row_sum(const float* input, float* output,
-                   unsigned long rows, unsigned long cols,
+                   int rows, int cols,
                    cudaStream_t stream);
 
 void launch_adam_update(float* param, const float* grad,

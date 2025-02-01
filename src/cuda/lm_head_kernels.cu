@@ -105,18 +105,6 @@ namespace cuda {
         }
     }
 
-    __global__ void row_sum_kernel(const float* input, float* output,
-                                  unsigned long rows, unsigned long cols) {
-        const unsigned long row = blockIdx.x * blockDim.x + threadIdx.x;
-        if (row < rows) {
-            float sum = 0.0f;
-            for (unsigned long col = 0; col < cols; ++col) {
-                sum += input[row * cols + col];
-            }
-            output[row] = sum;
-        }
-    }
-
     __global__ void adam_update_kernel(float* param, const float* grad,
                                      float* m, float* v,
                                      float beta1, float beta2,
@@ -142,15 +130,6 @@ namespace cuda {
         const int num_blocks = (rows * cols + block_size - 1) / block_size;
         add_bias_kernel<<<num_blocks, block_size, 0, stream>>>(
             output, bias, rows, cols);
-    }
-
-    void launch_row_sum(const float* input, float* output,
-                       unsigned long rows, unsigned long cols,
-                       cudaStream_t stream) {
-        const int block_size = 256;
-        const int num_blocks = (rows + block_size - 1) / block_size;
-        row_sum_kernel<<<num_blocks, block_size, 0, stream>>>(
-            input, output, rows, cols);
     }
 
     void launch_adam_update(float* param, const float* grad,

@@ -87,10 +87,14 @@ namespace cuda {
         CUDA_CHECK(cudaGetLastError());
     }
 
-    void launch_row_sum(const float* input, float* output, int rows, int cols) {
-        dim3 block(256);
-        dim3 grid((cols + block.x - 1) / block.x);
-        row_sum_kernel<<<grid, block>>>(input, output, rows, cols);
+    void launch_row_sum(const float* input, float* output, int rows, int cols, cudaStream_t stream) {
+        const int block_size = 256;
+        const int num_blocks = (rows + block_size - 1) / block_size;
+        row_sum_kernel<<<num_blocks, block_size, 0, stream>>>(input, output, rows, cols);
+        CUDA_CHECK(cudaGetLastError());
+        if (stream == nullptr) {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 
     void matmul(const Matrix& a, const Matrix& b, Matrix& c, cudaStream_t stream) {
@@ -233,13 +237,13 @@ __global__ void add_bias_kernel(float* output, const float* bias, int rows, int 
 }
 
 __global__ void row_sum_kernel(const float* input, float* output, int rows, int cols) {
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (col < cols) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
         float sum = 0.0f;
-        for (int row = 0; row < rows; row++) {
+        for (int col = 0; col < cols; ++col) {
             sum += input[row * cols + col];
         }
-        output[col] = sum;
+        output[row] = sum;
     }
 }
 

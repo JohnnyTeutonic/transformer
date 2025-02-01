@@ -131,11 +131,18 @@ namespace cuda {
 
         // Allocate shared memory for scores
         size_t shared_mem_size = seq_len * sizeof(float);
-        attention_kernel<<<grid, block, shared_mem_size>>>(d_Q, d_K, d_V, d_output,
-                                                         batch_size, seq_len, head_dim, hidden_dim);
+
+        // Allocate and initialize mask to nullptr
+        float* d_mask = nullptr;
+        
+        // Launch kernel with corrected parameters
+        attention_kernel<<<grid, block, shared_mem_size>>>(
+            d_Q, d_K, d_V, d_output, d_mask,  // Added d_mask parameter
+            batch_size, seq_len, head_dim, hidden_dim);
 
         CUDA_CHECK(cudaMemcpy(output.data(), d_output, output_size, cudaMemcpyDeviceToHost));
 
+        // Add d_mask to cleanup if it was allocated
         CUDA_CHECK(cudaFree(d_Q));
         CUDA_CHECK(cudaFree(d_K));
         CUDA_CHECK(cudaFree(d_V));

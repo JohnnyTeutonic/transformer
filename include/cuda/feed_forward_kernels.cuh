@@ -11,8 +11,12 @@
 #endif
 
 namespace cuda {
+    // Host function declarations
     void feed_forward_backward(const Matrix& grad, const Matrix& weights,
-                            Matrix& dx, bool is_first_layer);
+                             Matrix& dx, bool is_first_layer);
+
+    void feed_forward_forward(const Matrix& input, const Matrix& W1, const Matrix& W2,
+                            Matrix& intermediate, Matrix& output);
 
     __global__ void feed_forward_backward_kernel_1(const float* grad, const float* w2,
                                                 float* d_intermediate, int batch_size,
@@ -24,7 +28,4 @@ namespace cuda {
 
     __global__ void gelu_backward_kernel(const float* d_intermediate, float* d_input,
                                        const int num_elements);
-
-    // Declare launch_add_bias with specific types to avoid ambiguity
-    void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size);
 }

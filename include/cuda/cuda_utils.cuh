@@ -41,12 +41,12 @@ namespace cuda {
     void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size);
     
     void launch_row_sum(const float* input, float* output, 
-                       unsigned long rows, unsigned long cols, 
+                       int rows, int cols, 
                        cudaStream_t stream = nullptr);
     
     void launch_adam_update(float* params, const float* grads, float* m, float* v,
                            float beta1, float beta2, float eps, float lr, int size,
-                           unsigned long step, cudaStream_t stream = nullptr);
+                           int step, cudaStream_t stream = nullptr);
 
     // Declare common CUDA utilities here
 }

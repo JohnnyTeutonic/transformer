@@ -34,5 +34,5 @@ namespace cuda {
 
     // Bias operations
     void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size);
-    void launch_row_sum(const float* input, float* output, int rows, int cols);
+    void launch_row_sum(const float* input, float* output, int rows, int cols, cudaStream_t stream);
 } 
