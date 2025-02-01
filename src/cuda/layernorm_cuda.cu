@@ -190,27 +190,52 @@ Matrix LayerNorm::forward_cuda(const Matrix& input) {
     int batch_size = input.rows();
     int hidden_size = input.cols();
 
+    // Allocate and copy input data to device
+    float *d_input, *d_output, *d_gamma, *d_beta;
+    CUDA_CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_output, output.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_gamma, params_.gamma.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_beta, params_.beta.size() * sizeof(float)));
+    
+    CUDA_CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_gamma, params_.gamma.data(), params_.gamma.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_beta, params_.beta.data(), params_.beta.size() * sizeof(float), cudaMemcpyHostToDevice));
+
     // Allocate device memory for stats
     float *d_mean, *d_variance;
     CUDA_CHECK(cudaMalloc(&d_mean, batch_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_variance, batch_size * sizeof(float)));
 
-    // Launch stats kernel
-    dim3 block(256);
-    dim3 grid((batch_size + block.x - 1) / block.x);
-    cuda::layer_norm_stats_kernel<<<grid, block>>>(
-        input.data(), d_mean, d_variance,
+    // Launch stats kernel - one block per batch element
+    const int threads_per_block = 256;
+    const size_t shared_mem_size = 2 * threads_per_block * sizeof(float); // for sum and squared sum
+    
+    dim3 stats_grid(batch_size);
+    dim3 stats_block(threads_per_block);
+    
+    cuda::layer_norm_stats_kernel<<<stats_grid, stats_block, shared_mem_size>>>(
+        d_input, d_mean, d_variance,
         hidden_size, batch_size);
+    CUDA_CHECK(cudaGetLastError());
 
-    // Launch normalization kernel
-    dim3 norm_block(256);
-    dim3 norm_grid((batch_size + norm_block.x - 1) / norm_block.x);
+    // Launch normalization kernel - one block per batch element
+    dim3 norm_grid(batch_size);
+    dim3 norm_block(threads_per_block);
+    
     cuda::layer_norm_kernel<<<norm_grid, norm_block>>>(
-        input.data(), d_mean, d_variance,
-        this->params_.gamma.data(), this->params_.beta.data(), output.data(),
-        hidden_size, batch_size, this->eps_);
+        d_input, d_mean, d_variance,
+        d_gamma, d_beta, d_output,
+        hidden_size, batch_size, eps_);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Copy result back to host
+    CUDA_CHECK(cudaMemcpy(output.data(), d_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
     // Free device memory
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_output));
+    CUDA_CHECK(cudaFree(d_gamma));
+    CUDA_CHECK(cudaFree(d_beta));
     CUDA_CHECK(cudaFree(d_mean));
     CUDA_CHECK(cudaFree(d_variance));
 
