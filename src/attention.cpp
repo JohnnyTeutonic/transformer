@@ -251,62 +251,13 @@ Matrix MultiHeadAttention::flash_attention(const Matrix& Q, const Matrix& K, con
     return O;
 }
 
-Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mask, const std::optional<KVCache>& kv_cache) {
-    try {
-        std::cout << "\n=== MultiHeadAttention::forward START ===" << std::endl;
-        std::cout << "Input dims: " << input.rows() << "x" << input.cols() << std::endl;
-        
-        // Project input to Q, K, V
-        Matrix Q = matmul(input, params_.query_weights);
-        Matrix K = matmul(input, params_.key_weights);
-        Matrix V = matmul(input, params_.value_weights);
-        
-        std::cout << "Q dims: " << Q.rows() << "x" << Q.cols() << std::endl;
-        std::cout << "K dims: " << K.rows() << "x" << K.cols() << std::endl;
-        std::cout << "V dims: " << V.rows() << "x" << V.cols() << std::endl;
-        std::cout << "Query weights dims: " << params_.query_weights.rows() << "x" << params_.query_weights.cols() << std::endl;
-        std::cout << "Key weights dims: " << params_.key_weights.rows() << "x" << params_.key_weights.cols() << std::endl;
-        std::cout << "Value weights dims: " << params_.value_weights.rows() << "x" << params_.value_weights.cols() << std::endl;
-        
-        // Cache for backward pass
-        GradientCheckpoint::cache_activation("query", Q);
-        GradientCheckpoint::cache_activation("key", K);
-        GradientCheckpoint::cache_activation("value", V);
-        
-        // Get dimensions
-        size_t batch_size = input.rows();
-        size_t hidden_size = input.cols();
-        size_t seq_len = batch_size;
-        
-        std::cout << "batch_size: " << batch_size << std::endl;
-        std::cout << "hidden_size: " << hidden_size << std::endl;
-        std::cout << "seq_len: " << seq_len << std::endl;
-        
-        Matrix attention_output;
-        if (use_flash) {
-            attention_output = flash_attention(Q, K, V, mask);
-        } else {
-            Matrix attention_scores = compute_attention_scores(Q, K, mask);
-            std::cout << "Attention scores dims: " << attention_scores.rows() << "x" << attention_scores.cols() << std::endl;
-            GradientCheckpoint::cache_activation("attention_scores", attention_scores);
-            attention_output = matmul(attention_scores, V);
-        }
-        std::cout << "Attention output dims: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
-        
-        // Final projection
-        Matrix final_output = matmul(attention_output, params_.output_weights);
-        std::cout << "Final output dims: " << final_output.rows() << "x" << final_output.cols() << std::endl;
-        std::cout << "Output weights dims: " << params_.output_weights.rows() << "x" << params_.output_weights.cols() << std::endl;
-        
-        std::cout << "=== MultiHeadAttention::forward END ===\n" << std::endl;
-        return final_output;
-    } catch (const std::exception& e) {
-        throw std::runtime_error("MultiHeadAttention forward failed: " + std::string(e.what()));
-    }
-}
-
 Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matrix& K, const AttentionMask& mask) {
-    Matrix scores = matmul(Q, K.transpose());
+    Matrix scores(Q.rows(), K.cols());
+#ifdef USE_CUDA
+    cuda::matmul(Q, K.transpose(), scores, nullptr);
+#else
+    scores = matmul(Q, K.transpose());
+#endif
 
     // Scale scores with careful handling of numerical stability
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
@@ -358,7 +309,12 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
         const float eps = 1e-6f;
         
         Matrix output_weights_t = params_.output_weights.transpose();
-        Matrix d_value = matmul(grad_output, output_weights_t);
+        Matrix d_value(grad_output.rows(), output_weights_t.cols());
+#ifdef USE_CUDA
+        cuda::matmul(grad_output, output_weights_t, d_value, nullptr);
+#else
+        d_value = matmul(grad_output, output_weights_t);
+#endif
         
         // Compute gradient norms
         float grad_norm = 0.0f;
@@ -403,7 +359,12 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
         param_gradients().output_bias_grad = output_bias_grad;
         
         // Compute input gradients for backward flow
-        Matrix d_input = matmul(scaled_grad, params_.output_weights);
+        Matrix d_input(scaled_grad.rows(), params_.output_weights.cols());
+#ifdef USE_CUDA
+        cuda::matmul(scaled_grad, params_.output_weights, d_input, nullptr);
+#else
+        d_input = matmul(scaled_grad, params_.output_weights);
+#endif
         
         std::cout << "=== MultiHeadAttention::backward END ===\n" << std::endl;
         return d_input;
@@ -433,7 +394,7 @@ Matrix MultiHeadAttention::compute_query_gradients(const Matrix& grad, const Mat
 Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matrix& input) {
     Matrix d_key(grad.rows(), grad.cols());
 #ifdef USE_CUDA
-    cuda::matmul(grad, params_.key_weights.transpose(), d_key);
+    cuda::matmul(grad, params_.key_weights.transpose(), d_key, nullptr);  // Explicitly use stream version
 #else
     d_key = matmul(grad, params_.key_weights.transpose());
 #endif
@@ -443,7 +404,7 @@ Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matri
 Matrix MultiHeadAttention::compute_value_gradients(const Matrix& grad, const Matrix& input) {
     Matrix d_value(grad.rows(), grad.cols());
 #ifdef USE_CUDA
-    cuda::matmul(grad, params_.value_weights.transpose(), d_value);
+    cuda::matmul(grad, params_.value_weights.transpose(), d_value, nullptr);  // Explicitly use stream version
 #else
     d_value = matmul(grad, params_.value_weights.transpose());
 #endif
@@ -651,7 +612,12 @@ Matrix MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     Matrix V_mat = V_reshaped.to_matrix(); // [num_heads * seq_len, head_size]
 
     // Compute attention scores
-    Matrix scores = matmul(Q_mat, K_mat.transpose()); // [num_heads * seq_len, seq_len]
+    Matrix scores(Q_mat.rows(), K_mat.transpose().cols());
+#ifdef USE_CUDA
+    cuda::matmul(Q_mat, K_mat.transpose(), scores, nullptr);
+#else
+    scores = matmul(Q_mat, K_mat.transpose());
+#endif
 
     // Scale scores
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_size));
@@ -695,7 +661,12 @@ Matrix MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     apply_stable_softmax(scores);
 
     // Compute attention output
-    Matrix attention = matmul(scores, V_mat);
+    Matrix attention(scores.rows(), V_mat.cols());
+#ifdef USE_CUDA
+    cuda::matmul(scores, V_mat, attention, nullptr);
+#else
+    attention = matmul(scores, V_mat);
+#endif
 
     // Reshape back to original dimensions
     std::vector<unsigned long> dims = {
@@ -941,5 +912,40 @@ std::unique_ptr<MultiHeadAttention> MultiHeadAttention::load(std::istream& is, c
 
     std::cout << "=== MultiHeadAttention::load END ===\n" << std::endl;
     return attention;
+}
+
+Matrix MultiHeadAttention::forward_cpu(const Matrix& input, const AttentionMask& mask,
+                                     const std::optional<KVCache>& kv_cache) {
+    // Project input to Q, K, V
+    Matrix Q(input.rows(), get_query_weights().cols());
+    Matrix K(input.rows(), get_key_weights().cols());
+    Matrix V(input.rows(), get_value_weights().cols());
+
+#ifdef USE_CUDA
+    cuda::matmul(input, get_query_weights(), Q, nullptr);
+    if (!kv_cache) {
+        cuda::matmul(input, get_key_weights(), K, nullptr);
+        cuda::matmul(input, get_value_weights(), V, nullptr);
+    } else {
+        K = kv_cache->get_key();
+        V = kv_cache->get_value();
+    }
+#else
+    Q = matmul(input, get_query_weights());
+    if (!kv_cache) {
+        K = matmul(input, get_key_weights());
+        V = matmul(input, get_value_weights());
+    } else {
+        K = kv_cache->get_key();
+        V = kv_cache->get_value();
+    }
+#endif
+    
+    // Compute attention scores
+    Matrix attention_scores = compute_attention_scores(Q, K, mask);
+    Matrix attention_output = matmul(attention_scores, V);
+    
+    // Final projection
+    return matmul(attention_output, get_output_weights());
 }
 

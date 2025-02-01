@@ -1,5 +1,6 @@
 #pragma once
 #include "../matrix.hpp"
+#include <cuda_runtime.h>
 
 namespace cuda {
     // Initialize and cleanup
@@ -7,8 +8,11 @@ namespace cuda {
     void cleanup_cuda();
 
     // Matrix operations
-    void matmul(const Matrix& A, const Matrix& B, Matrix& C);
     void add(const Matrix& A, const Matrix& B, Matrix& C);
+    
+    // Matrix multiplication operations
+    Matrix matmul(const Matrix& A, const Matrix& B);  // Returns new matrix
+    void matmul(const Matrix& A, const Matrix& B, Matrix& C, cudaStream_t stream = nullptr);  // In-place version with optional stream
     
     // GELU operations
     void gelu_forward(Matrix& x);
@@ -27,4 +31,8 @@ namespace cuda {
     void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
                            const Matrix& gamma, Matrix& grad_gamma,
                            Matrix& grad_beta, float eps);
+
+    // Bias operations
+    void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size);
+    void launch_row_sum(const float* input, float* output, int rows, int cols);
 } 

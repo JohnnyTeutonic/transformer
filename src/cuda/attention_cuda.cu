@@ -1,6 +1,8 @@
-#include "../../include/multi_head_attention.hpp"
+#include "../../include/attention.hpp"
+#include "../../include/cuda/matrix_ops.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
 #include "../../include/cuda/cuda_check.cuh"
+#include "../../include/cuda/attention_ops.cuh"
 #include <cuda_runtime.h>
 
 namespace cuda {
@@ -65,36 +67,45 @@ __global__ void scaled_dot_product_attention_kernel(
 
 } // namespace cuda
 
-void MultiHeadAttention::forward_cuda(const Matrix& input, 
-                                    const AttentionMask& mask,
-                                    const std::optional<KVCache>& kv_cache) {
+Matrix MultiHeadAttention::forward_cuda(const Matrix& input, 
+                                      const AttentionMask& mask,
+                                      const std::optional<KVCache>& kv_cache) {
     const int batch_size = input.rows();
     const int seq_len = input.cols() / hidden_size_;
-    const float scale = 1.0f / std::sqrt(head_dim_);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
     
-    // Project input to Q, K, V
-    Matrix Q = matmul(input, W_q);
-    Matrix K = matmul(input, W_k);
-    Matrix V = matmul(input, W_v);
+    // Project input to Q, K, V spaces
+    Matrix Q(input.rows(), params_.query_weights.cols());
+    cuda::matmul(input, params_.query_weights, Q, nullptr);
     
-    // Reshape for attention
-    Q.reshape(batch_size, num_heads_, seq_len, head_dim_);
-    K.reshape(batch_size, num_heads_, seq_len, head_dim_);
-    V.reshape(batch_size, num_heads_, seq_len, head_dim_);
+    Matrix K;
+    if (kv_cache) {
+        K = kv_cache->get_key();
+    } else {
+        K = Matrix(input.rows(), params_.key_weights.cols());
+        cuda::matmul(input, params_.key_weights, K, nullptr);
+    }
+    
+    Matrix V;
+    if (kv_cache) {
+        V = kv_cache->get_value();
+    } else {
+        V = Matrix(input.rows(), params_.value_weights.cols());
+        cuda::matmul(input, params_.value_weights, V, nullptr);
+    }
     
     // Allocate output
     Matrix output(batch_size * seq_len, hidden_size_);
     
-    // Launch kernel
-    dim3 block(256);
-    dim3 grid((seq_len + block.x - 1) / block.x, num_heads_, batch_size);
-    
-    cuda::scaled_dot_product_attention_kernel<<<grid, block>>>(
+    // Launch attention kernel
+    cuda::launch_attention_kernel(
         Q.data(), K.data(), V.data(),
-        output.data(), mask.data(),
+        output.data(), mask.value().data(),
         batch_size, num_heads_, seq_len, head_dim_,
-        scale);
+        scale, cuda::get_stream());
     
     // Project output
-    return matmul(output, W_o);
+    Matrix output_proj(output.rows(), params_.output_weights.cols());
+    cuda::matmul(output, params_.output_weights, output_proj, nullptr);
+    return output_proj;
 } 

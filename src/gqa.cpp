@@ -100,13 +100,13 @@ Matrix GroupedQueryAttention::forward(const Matrix& x, const AttentionMask& mask
 
     // Handle KV cache
     if (kv_cache) {
-        K = kv_cache->key_cache;
-        V = kv_cache->value_cache;
+        K = kv_cache->get_key();
+        V = kv_cache->get_value();
     }
 
     // Calculate dimensions
     size_t batch_size = x.rows();
-    size_t seq_len = mask.mask.rows();
+    size_t seq_len = mask.value().rows();
 
     // Move to GPU
     Matrix Q_gpu = Q.to_gpu();
@@ -130,8 +130,8 @@ Matrix GroupedQueryAttention::forward(const Matrix& x, const AttentionMask& mask
 
     // Handle KV cache if present
     if (kv_cache) {
-        K = kv_cache->key_cache;
-        V = kv_cache->value_cache;
+        K = kv_cache->get_key();
+        V = kv_cache->get_value();
     }
 
     // Repeat K/V heads to match number of query heads

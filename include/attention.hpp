@@ -97,13 +97,21 @@ class MultiHeadAttention {
 
     /**
      * @brief Performs the forward pass of the attention mechanism.
-     * @param x Input tensor of shape [batch_size, seq_len, hidden_size]
+     * @param input Input tensor of shape [batch_size, seq_len, hidden_size]
      * @param mask Attention mask to prevent attending to certain positions
      * @param kv_cache Optional cache of key and value projections for efficient inference
      * @return Output tensor of shape [batch_size, seq_len, hidden_size]
      */
-    Matrix forward(const Matrix& x, const AttentionMask& mask,
-                   const std::optional<KVCache>& kv_cache = std::nullopt);
+    virtual Matrix forward(const Matrix& input, const AttentionMask& mask,
+                         const std::optional<KVCache>& kv_cache = std::nullopt) {
+        // Default implementation that chooses between CPU and CUDA
+#ifdef CUDA_AVAILABLE
+        if (use_cuda_) {
+            return forward_cuda(input, mask, kv_cache);
+        }
+#endif
+        return forward_cpu(input, mask, kv_cache);
+    }
 
     /**
      * @brief Performs the backward pass to compute gradients.
@@ -197,6 +205,22 @@ class MultiHeadAttention {
         FloatVector key_bias;
         FloatVector value_bias;
         FloatVector output_bias;
+        size_t hidden_size;
+        size_t num_heads;
+        size_t head_dim;
+        
+        // Add default constructor
+        Parameters() : hidden_size(0), num_heads(0), head_dim(0) {}
+        
+        Parameters(size_t hidden_size_, size_t num_heads_, size_t head_dim_)
+            : hidden_size(hidden_size_), num_heads(num_heads_), head_dim(head_dim_) {
+            // Initialize weight matrices
+            size_t embed_dim = num_heads_ * head_dim_;
+            query_weights = Matrix(hidden_size_, embed_dim);
+            key_weights = Matrix(hidden_size_, embed_dim);
+            value_weights = Matrix(hidden_size_, embed_dim);
+            output_weights = Matrix(embed_dim, hidden_size_);
+        }
     };
 
     // Gradient structure to hold all gradients
@@ -260,14 +284,16 @@ class MultiHeadAttention {
     }
 
     // Core functionality
-    Matrix forward(const Matrix& x, const AttentionMask& mask,
-                  KVCache* kv_cache = nullptr);
     Matrix backward(const Matrix& grad_output, const Matrix& input,
                    const AttentionMask& mask);
-#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
-    Matrix forward_cuda(const Matrix& x, const AttentionMask& mask,
+
+#ifdef CUDA_AVAILABLE
+    Matrix forward_cuda(const Matrix& input, const AttentionMask& mask,
                        const std::optional<KVCache>& kv_cache = std::nullopt);
 #endif
+
+    Matrix forward_cpu(const Matrix& input, const AttentionMask& mask,
+                      const std::optional<KVCache>& kv_cache);
 
     // Serialization
   private:
@@ -287,6 +313,7 @@ class MultiHeadAttention {
     size_t num_kv_heads;     ///< Number of key/value heads for GQA
     size_t max_seq_length;   ///< Maximum sequence length supported
     bool use_fp16_;         ///< Whether to use FP16 computation
+    bool use_cuda_ = false;  ///< Whether to use CUDA acceleration
 
     // Cache variables
     Matrix cached_keys;              ///< Cached key projections
@@ -418,6 +445,10 @@ class MultiHeadAttention {
 
     // Add static initialization method
     static void initialize_static_rope_cache(size_t max_seq_len, size_t dim, size_t num_heads);
+
+    // Add setter for CUDA usage
+    void set_use_cuda(bool use_cuda) { use_cuda_ = use_cuda; }
+    bool get_use_cuda() const { return use_cuda_; }
 };
 
 // Add sliding window attention
@@ -425,7 +456,7 @@ class SlidingWindowAttention : public MultiHeadAttention {
   private:
     size_t window_size;
     bool use_local_attention;
-    size_t head_dim;  // Add head dimension member
+    size_t head_dim;
 
     /**
      * @brief Process attention for a single window
@@ -448,7 +479,11 @@ class SlidingWindowAttention : public MultiHeadAttention {
      */
     explicit SlidingWindowAttention(size_t window_size_ = 512, size_t head_dim_ = 64,
                                   bool use_local_attention_ = true)
-        : MultiHeadAttention(), window_size(window_size_), head_dim(head_dim_),
+        // Initialize base class with default parameters
+        : MultiHeadAttention(head_dim_ * 16, 16, head_dim_, 0.1f, false, false, 
+                           true, window_size_, false, 16, 2048, false),
+          window_size(window_size_),
+          head_dim(head_dim_),
           use_local_attention(use_local_attention_) {}
 
     /**

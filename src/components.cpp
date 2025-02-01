@@ -4,6 +4,9 @@
 #include <random>
 #include <string>
 #include "../include/components.hpp"
+#ifdef USE_CUDA
+#include "../include/cuda/cuda_utils.cuh"
+#endif
 #include "../include/cuda/matrix_ops.cuh"
 // Constructor implementations
 Matrix::Matrix() : rows_(0), cols_(0), shape_(std::make_tuple(0, 0)) {}
@@ -387,7 +390,7 @@ Matrix operator*(const Matrix& a, const Matrix& b) {
 Matrix matmul(const Matrix& A, const Matrix& B) {
     #ifdef USE_CUDA
     Matrix C(A.rows(), B.cols());
-    cuda::matmul(A, B, C);
+    cuda::matmul(A, B, C, nullptr);
     return C;
     #else
     // Original CPU implementation

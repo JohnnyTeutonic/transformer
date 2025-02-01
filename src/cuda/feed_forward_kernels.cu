@@ -1,7 +1,18 @@
 #include "../../include/cuda/feed_forward_kernels.cuh"
 #include "../../include/cuda/cuda_check.cuh"
+#include "../../include/cuda/matrix_ops.cuh"  // Include this for launch_add_bias
 #include "../../include/matrix.hpp"
+#include "../../include/feed_forward.hpp"
+#include "../../include/cuda/cuda_utils.cuh"
+#include "../../include/cuda/kernel_declarations.cuh"
 #include <cuda_runtime.h>
+
+// Forward declare kernels
+namespace cuda {
+    __global__ void add_bias_kernel(float* output, const float* bias,
+                                  int batch_size, int hidden_size);
+    __global__ void gelu_activation_kernel(float* data, int size);
+}
 
 namespace cuda {
     __global__ void feed_forward_backward_kernel_1(const float* grad, const float* w2,
@@ -92,4 +103,69 @@ namespace cuda {
             d_input[idx] = d_intermediate[idx] * (cdf + x * pdf);
         }
     }
+
+    __global__ void gelu_activation_kernel(float* data, int size) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) {
+            float x = data[idx];
+            float x3 = x * x * x;
+            constexpr float sqrt_2_pi = 0.7978845608028654f;
+            data[idx] = 0.5f * x * (1.0f + tanhf(sqrt_2_pi * (x + 0.044715f * x3)));
+        }
+    }
+
+    void feed_forward_forward(const Matrix& input, const Matrix& W1, const Matrix& W2,
+                            Matrix& intermediate, Matrix& output) {
+        // Implementation...
+    }
+    
+    void feed_forward_backward(const Matrix& grad_output, const Matrix& input,
+                             const Matrix& W1, const Matrix& W2,
+                             Matrix& d_input, Matrix& d_W1, Matrix& d_W2) {
+        // Implementation...
+    }
+} // end namespace cuda
+
+// Move FeedForward::forward_cuda implementation outside of cuda namespace
+#ifdef CUDA_AVAILABLE
+Matrix FeedForward::forward_cuda(const Matrix& input) {
+    const int batch_size = input.rows();
+    const int hidden_size = input.cols();
+    
+    // Get weights and biases using accessor methods
+    const Matrix& W1 = get_fc1_weights();
+    const Matrix& W2 = get_fc2_weights();
+    const Vector& b1 = get_fc1_bias();
+    const Vector& b2 = get_fc2_bias();
+    
+    // First linear layer
+    Matrix intermediate(batch_size, W1.cols());  // Create intermediate matrix with correct dimensions
+    cuda::matmul(input, W1, intermediate, nullptr);
+    
+    // Add bias - ensure types match exactly
+    cuda::launch_add_bias(intermediate.data(), b1.data(),
+                         static_cast<int>(batch_size), 
+                         static_cast<int>(intermediate.cols()));
+    
+    // Apply GELU activation
+    dim3 block(256);
+    dim3 grid((intermediate.size() + block.x - 1) / block.x);
+    
+    cuda::gelu_activation_kernel<<<grid, block>>>(
+        intermediate.data(),
+        static_cast<int>(intermediate.size())
+    );
+    CUDA_CHECK(cudaGetLastError());
+    
+    // Second linear layer
+    Matrix output(batch_size, W2.cols());  // Create output matrix with correct dimensions
+    cuda::matmul(intermediate, W2, output, nullptr);
+    
+    // Add bias - ensure types match exactly
+    cuda::launch_add_bias(output.data(), b2.data(),
+                         static_cast<int>(batch_size), 
+                         static_cast<int>(output.cols()));
+    
+    return output;
 }
+#endif

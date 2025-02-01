@@ -76,13 +76,12 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
         // Project hidden states to vocabulary space using CUDA
         Matrix logits(hidden_states.rows(), vocab_size_);
         
-        // Use cuBLAS for matrix multiplication
-        cuda::matmul(hidden_states, projection, logits);
+        // Use cuBLAS for matrix multiplication with output matrix
+        cuda::matmul(hidden_states, projection, logits, nullptr);  // Explicitly use stream version
         
         // Add bias using CUDA kernel
         cuda::launch_add_bias(logits.data(), bias.data(), 
-                            logits.rows(), logits.cols(), 
-                            cuda::get_stream());
+                            logits.rows(), logits.cols());
         
         cuda::synchronize();
         return logits;
@@ -91,7 +90,7 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
 
     // CPU fallback
     Matrix logits(hidden_states.rows(), vocab_size_);
-    cuda::matmul(hidden_states, projection, logits);
+    cuda::matmul(hidden_states, projection, logits, nullptr);  // Explicitly use stream version
     
     // Add bias
     for (size_t i = 0; i < logits.rows(); ++i) {
@@ -280,7 +279,8 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
         // Compute gradients for projection matrix using cuBLAS
         Matrix hidden_states_t = hidden_states.transpose();
         Matrix grad_proj(hidden_size_, vocab_size_);
-        cuda::matmul(hidden_states_t, grad_output, grad_proj);
+        Matrix output(hidden_states_t.rows(), grad_output.cols());
+        cuda::matmul(hidden_states_t, grad_output, output, nullptr);  // Explicitly use stream version
         
         // Compute bias gradients using CUDA reduction
         Vector grad_bias(vocab_size_);
@@ -291,7 +291,7 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
         // Compute gradient with respect to input
         Matrix projection_t = projection.transpose();
         Matrix grad_input(grad_output.rows(), hidden_size_);
-        cuda::matmul(grad_output, projection_t, grad_input);
+        cuda::matmul(grad_output, projection_t, grad_input, nullptr);  // Explicitly use stream version
         
         // Update parameters using Adam optimizer on GPU
         cuda::launch_adam_update(projection.data(), grad_proj.data(),

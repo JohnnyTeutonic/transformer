@@ -56,69 +56,12 @@ namespace cuda {
         }
     }
 
-    void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
-        // Ensure CUDA is initialized
-        if (!cuda_initialized || cublas_handle == nullptr) {
-            initialize_cuda();
-        }
-
-        // Verify dimensions
-        if (A.cols() != B.rows()) {
-            throw std::runtime_error("Matrix multiplication dimension mismatch: " +
-                std::to_string(A.rows()) + "x" + std::to_string(A.cols()) + " * " +
-                std::to_string(B.rows()) + "x" + std::to_string(B.cols()));
-        }
-        // Ensure output matrix has correct dimensions
-        if (C.rows() != A.rows() || C.cols() != B.cols()) {
-            throw std::runtime_error("Output matrix has wrong dimensions: expected " +
-                std::to_string(A.rows()) + "x" + std::to_string(B.cols()) + " got " +
-                std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
-        }
-
-        float* d_A, *d_B, *d_C;
-        size_t A_size = A.rows() * A.cols() * sizeof(float);
-        size_t B_size = B.rows() * B.cols() * sizeof(float);
-        size_t C_size = A.rows() * B.cols() * sizeof(float);
-
-        CUDA_CHECK(cudaMalloc(&d_A, A_size));
-        CUDA_CHECK(cudaMalloc(&d_B, B_size));
-        CUDA_CHECK(cudaMalloc(&d_C, C_size));
-
-        CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
-
-        float alpha = 1.0f;
-        float beta = 0.0f;
-
-        // For row-major matrices A[m,k] * B[k,n] = C[m,n], we compute:
-        // C = A * B in column-major order
-        cublasStatus_t status = cublasSgemm(cublas_handle,
-                                          CUBLAS_OP_N, CUBLAS_OP_N,  // No transposition needed
-                                          B.cols(), A.rows(), A.cols(),  // Dimensions for the operation
-                                          &alpha,
-                                          d_B, B.cols(),  // Leading dimension is cols for B
-                                          d_A, A.cols(),  // Leading dimension is cols for A
-                                          &beta,
-                                          d_C, B.cols()); // Leading dimension is cols for C
-
-        // Print dimensions for debugging
-        std::cout << "Matrix multiplication dimensions:" << std::endl;
-        std::cout << "A: " << A.rows() << "x" << A.cols() << std::endl;
-        std::cout << "B: " << B.rows() << "x" << B.cols() << std::endl;
-        std::cout << "C: " << C.rows() << "x" << C.cols() << std::endl;
-
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            cudaFree(d_A);
-            cudaFree(d_B);
-            cudaFree(d_C);
-            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
-        }
-
-        CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
-
-        CUDA_CHECK(cudaFree(d_A));
-        CUDA_CHECK(cudaFree(d_B));
-        CUDA_CHECK(cudaFree(d_C));
+    Matrix matmul(const Matrix& A, const Matrix& B) {
+        // Create output matrix
+        Matrix C(A.rows(), B.cols());
+        // Call the stream version with nullptr stream
+        matmul(A, B, C, nullptr);
+        return C;
     }
 
     void gelu_forward(Matrix& x) {
@@ -136,10 +79,12 @@ namespace cuda {
         CUDA_CHECK(cudaFree(d_x));
     }
 
-    void launch_add_bias(float* output, const float* bias, int rows, int cols) {
+    void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size) {
         dim3 block(256);
-        dim3 grid((rows * cols + block.x - 1) / block.x);
-        add_bias_kernel<<<grid, block>>>(output, bias, rows, cols);
+        dim3 grid((batch_size * hidden_size + block.x - 1) / block.x);
+        
+        add_bias_kernel<<<grid, block>>>(output, bias, batch_size, hidden_size);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     void launch_row_sum(const float* input, float* output, int rows, int cols) {
@@ -148,13 +93,82 @@ namespace cuda {
         row_sum_kernel<<<grid, block>>>(input, output, rows, cols);
     }
 
-    void launch_adam_update(float* params, const float* grads, float* m, float* v,
-                          float beta1, float beta2, float eps, float lr, int size,
-                          unsigned long step, cudaStream_t stream) {
-        dim3 block(256);
-        dim3 grid((size + block.x - 1) / block.x);
-        adam_update_kernel<<<grid, block, 0, stream>>>(params, grads, m, v,
-                                                      beta1, beta2, eps, lr, size, step);
+    void matmul(const Matrix& a, const Matrix& b, Matrix& c, cudaStream_t stream) {
+        // Ensure CUDA is initialized
+        if (!cuda_initialized || cublas_handle == nullptr) {
+            initialize_cuda();
+        }
+
+        // Verify dimensions
+        if (a.cols() != b.rows()) {
+            throw std::runtime_error("Matrix multiplication dimension mismatch: " +
+                std::to_string(a.rows()) + "x" + std::to_string(a.cols()) + " * " +
+                std::to_string(b.rows()) + "x" + std::to_string(b.cols()));
+        }
+
+        // Verify output matrix dimensions
+        if (c.rows() != a.rows() || c.cols() != b.cols()) {
+            throw std::runtime_error("Output matrix dimensions mismatch");
+        }
+
+        std::cout << "Starting CUDA matrix multiplication..." << std::endl;
+        std::cout << "Matrix A: " << a.rows() << "x" << a.cols() << std::endl;
+        std::cout << "Matrix B: " << b.rows() << "x" << b.cols() << std::endl;
+        std::cout << "Matrix C: " << c.rows() << "x" << c.cols() << std::endl;
+
+        float* d_A, *d_B, *d_C;
+        size_t A_size = a.rows() * a.cols() * sizeof(float);
+        size_t B_size = b.rows() * b.cols() * sizeof(float);
+        size_t C_size = c.rows() * c.cols() * sizeof(float);
+
+        CUDA_CHECK(cudaMalloc(&d_A, A_size));
+        CUDA_CHECK(cudaMalloc(&d_B, B_size));
+        CUDA_CHECK(cudaMalloc(&d_C, C_size));
+
+        // Use stream for async operations if provided
+        cudaStream_t compute_stream = stream ? stream : cudaStream_t(nullptr);
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_A, a.data(), A_size, cudaMemcpyHostToDevice, compute_stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_B, b.data(), B_size, cudaMemcpyHostToDevice, compute_stream));
+
+        float alpha = 1.0f;
+        float beta = 0.0f;
+
+        // Set stream for cuBLAS operations
+        if (stream) {
+            CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
+        }
+
+        // For row-major matrices A[m,k] * B[k,n] = C[m,n], we compute:
+        // C = A * B in column-major order
+        cublasStatus_t status = cublasSgemm(cublas_handle,
+                                          CUBLAS_OP_N, CUBLAS_OP_N,  // No transposition needed
+                                          b.cols(), a.rows(), a.cols(),  // Dimensions for the operation
+                                          &alpha,
+                                          d_B, b.cols(),  // Leading dimension is cols for B
+                                          d_A, a.cols(),  // Leading dimension is cols for A
+                                          &beta,
+                                          d_C, b.cols()); // Leading dimension is cols for C
+
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            cudaFree(d_A);
+            cudaFree(d_B);
+            cudaFree(d_C);
+            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+        }
+
+        CUDA_CHECK(cudaMemcpyAsync(c.data(), d_C, C_size, cudaMemcpyDeviceToHost, compute_stream));
+        
+        // Synchronize if using a stream
+        if (stream) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        }
+
+        CUDA_CHECK(cudaFree(d_A));
+        CUDA_CHECK(cudaFree(d_B));
+        CUDA_CHECK(cudaFree(d_C));
+
+        std::cout << "CUDA matrix multiplication completed successfully" << std::endl;
     }
 }
 

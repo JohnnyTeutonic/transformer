@@ -24,4 +24,7 @@ namespace cuda {
 
     __global__ void gelu_backward_kernel(const float* d_intermediate, float* d_input,
                                        const int num_elements);
+
+    // Declare launch_add_bias with specific types to avoid ambiguity
+    void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size);
 }

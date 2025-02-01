@@ -165,4 +165,10 @@ class FeedForward {
 #if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
     Matrix forward_cuda(const Matrix& input);
 #endif
+
+    // Add accessor methods
+    const Matrix& get_fc1_weights() const { return params_.ff1_weights; }
+    const Matrix& get_fc2_weights() const { return params_.ff2_weights; }
+    const FloatVector& get_fc1_bias() const { return params_.ff1_bias; }
+    const FloatVector& get_fc2_bias() const { return params_.ff2_bias; }
 };

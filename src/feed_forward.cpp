@@ -98,7 +98,12 @@ Matrix FeedForward::forward(const Matrix& input) {
         std::cout << "FF2 bias size: " << params_.ff2_bias.size() << std::endl;
 
         // First layer
-        Matrix intermediate = matmul(input, params_.ff1_weights);
+        Matrix intermediate(input.rows(), params_.ff1_weights.cols());
+#ifdef USE_CUDA
+        cuda::matmul(input, params_.ff1_weights, intermediate, nullptr);
+#else
+        intermediate = matmul(input, params_.ff1_weights);
+#endif
         std::cout << "After FF1 dims: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
 
         for (size_t i = 0; i < intermediate.rows(); ++i) {
@@ -122,7 +127,12 @@ Matrix FeedForward::forward(const Matrix& input) {
         std::cout << "Cached input dims: " << input_cache_.rows() << "x" << input_cache_.cols() << std::endl;
 
         // Second layer
-        Matrix output = matmul(intermediate, params_.ff2_weights);
+        Matrix output(intermediate.rows(), params_.ff2_weights.cols());
+#ifdef USE_CUDA
+        cuda::matmul(intermediate, params_.ff2_weights, output, nullptr);
+#else
+        output = matmul(intermediate, params_.ff2_weights);
+#endif
         std::cout << "Final output dims: " << output.rows() << "x" << output.cols() << std::endl;
         
         for (size_t i = 0; i < output.rows(); ++i) {
@@ -190,7 +200,12 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         Matrix w2_transpose = params_.ff2_weights.transpose();
         std::cout << "w2_transpose dims: " << w2_transpose.rows() << "x" << w2_transpose.cols() << std::endl;
 
-        Matrix d_intermediate = matmul(grad_output, w2_transpose);
+        Matrix d_intermediate(grad_output.rows(), w2_transpose.cols());
+#ifdef USE_CUDA
+        cuda::matmul(grad_output, w2_transpose, d_intermediate, nullptr);
+#else
+        d_intermediate = matmul(grad_output, w2_transpose);
+#endif
         std::cout << "d_intermediate dims: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
 
         // Apply ReLU gradient
@@ -205,14 +220,29 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         Matrix w1_transpose = params_.ff1_weights.transpose();
         std::cout << "w1_transpose dims: " << w1_transpose.rows() << "x" << w1_transpose.cols() << std::endl;
 
-        Matrix d_input = matmul(d_intermediate, w1_transpose);
+        Matrix d_input(d_intermediate.rows(), w1_transpose.cols());
+#ifdef USE_CUDA
+        cuda::matmul(d_intermediate, w1_transpose, d_input, nullptr);
+#else
+        d_input = matmul(d_intermediate, w1_transpose);
+#endif
         std::cout << "d_input dims: " << d_input.rows() << "x" << d_input.cols() << std::endl;
 
         // Update gradients
-        grads_.ff1_grad = matmul(input.transpose(), d_intermediate);
-        grads_.ff2_grad = matmul(intermediate_cache.transpose(), grad_output);
-        std::cout << "ff1_grad dims: " << grads_.ff1_grad.rows() << "x" << grads_.ff1_grad.cols() << std::endl;
-        std::cout << "ff2_grad dims: " << grads_.ff2_grad.rows() << "x" << grads_.ff2_grad.cols() << std::endl;
+        Matrix ff1_grad(input.transpose().rows(), d_intermediate.cols());
+        Matrix ff2_grad(intermediate_cache.transpose().rows(), grad_output.cols());
+#ifdef USE_CUDA
+        cuda::matmul(input.transpose(), d_intermediate, ff1_grad, nullptr);
+        cuda::matmul(intermediate_cache.transpose(), grad_output, ff2_grad, nullptr);
+#else
+        ff1_grad = matmul(input.transpose(), d_intermediate);
+        ff2_grad = matmul(intermediate_cache.transpose(), grad_output);
+#endif
+        std::cout << "ff1_grad dims: " << ff1_grad.rows() << "x" << ff1_grad.cols() << std::endl;
+        std::cout << "ff2_grad dims: " << ff2_grad.rows() << "x" << ff2_grad.cols() << std::endl;
+
+        grads_.ff1_grad = ff1_grad;
+        grads_.ff2_grad = ff2_grad;
 
         std::cout << "=== FeedForward::backward END ===\n" << std::endl;
         return d_input;

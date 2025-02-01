@@ -408,11 +408,36 @@ class Matrix {
      * @throws std::runtime_error if matrix doesn't own its data
      */
     void initialize_constant(float value);
+
+    // Reshape methods
+    Matrix reshape(size_t new_rows, size_t new_cols) const {
+        if (new_rows * new_cols != rows_ * cols_) {
+            throw std::runtime_error("New dimensions must preserve total size in reshape");
+        }
+        Matrix reshaped(new_rows, new_cols);
+        std::copy(data_.begin(), data_.end(), reshaped.data_.begin());
+        return reshaped;
+    }
+    
+    Matrix reshape(size_t batch_size, size_t num_heads, size_t seq_len, size_t head_dim) const {
+        size_t total_size = batch_size * num_heads * seq_len * head_dim;
+        if (total_size != rows_ * cols_) {
+            throw std::runtime_error("New dimensions must preserve total size in reshape");
+        }
+        Matrix reshaped(batch_size * num_heads, seq_len * head_dim);
+        std::copy(data_.begin(), data_.end(), reshaped.data_.begin());
+        return reshaped;
+    }
+
+    // Vector conversion
+    std::vector<float> to_vector() const {
+        return std::vector<float>(data_.begin(), data_.end());
+    }
 };
 
 // Make to_vector inline to allow multiple definitions
-inline std::vector<int> to_vector(const Matrix& m) {
-    return std::vector<int>(m.data(), m.data() + m.size());
+inline std::vector<float> to_vector(const Matrix& m) {
+    return std::vector<float>(m.data(), m.data() + m.size());
 }
 
 // Non-member operators

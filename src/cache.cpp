@@ -1,8 +1,24 @@
 #include "../include/cache.hpp"
 
 KVCache::KVCache(size_t max_len) {
-    // Don't create matrices in constructor
-    // They will be initialized properly when update() is first called
+    key_cache = Matrix();
+    value_cache = Matrix();
+}
+
+KVCache::KVCache(const Matrix& key_matrix, const Matrix& value_matrix)
+    : key_cache(key_matrix), value_cache(value_matrix) {}
+
+const Matrix& KVCache::get_key() const {
+    return key_cache;
+}
+
+const Matrix& KVCache::get_value() const {
+    return value_cache;
+}
+
+void KVCache::update(const Matrix& new_key, const Matrix& new_value) {
+    key_cache = new_key;
+    value_cache = new_value;
 }
 
 void KVCache::clear() {
@@ -10,37 +26,10 @@ void KVCache::clear() {
     value_cache = Matrix();
 }
 
-void KVCache::update(const Matrix& new_keys, const Matrix& new_values) {
-    if (key_cache.empty()) {
-        // First update - initialize matrices with proper dimensions
-        key_cache = new_keys;
-        value_cache = new_values;
-    } else {
-        // Concatenate with existing cache
-        Matrix new_key_cache(key_cache.rows() + new_keys.rows(), new_keys.cols());
-        Matrix new_value_cache(value_cache.rows() + new_values.rows(), new_values.cols());
-
-        // Copy existing cache
-        for (size_t i = 0; i < key_cache.rows(); i++) {
-            for (size_t j = 0; j < key_cache.cols(); j++) {
-                new_key_cache(i, j) = key_cache(i, j);
-                new_value_cache(i, j) = value_cache(i, j);
-            }
-        }
-
-        // Copy new values
-        for (size_t i = 0; i < new_keys.rows(); i++) {
-            for (size_t j = 0; j < new_keys.cols(); j++) {
-                new_key_cache(i + key_cache.rows(), j) = new_keys(i, j);
-                new_value_cache(i + value_cache.rows(), j) = new_values(i, j);
-            }
-        }
-
-        key_cache = std::move(new_key_cache);
-        value_cache = std::move(new_value_cache);
-    }
+bool KVCache::empty() const {
+    return key_cache.empty() || value_cache.empty();
 }
 
 std::pair<Matrix, Matrix> KVCache::get_cached_kv() const {
-    return {key_cache, value_cache};
+    return std::make_pair(key_cache, value_cache);
 }
