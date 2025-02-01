@@ -12,7 +12,7 @@ __global__ void add_bias_kernel(float* output, const float* bias, int rows, int 
 __global__ void row_sum_kernel(const float* input, float* output, int rows, int cols);
 __global__ void adam_update_kernel(float* params, const float* grads, float* m, float* v,
                                  float beta1, float beta2, float epsilon, float lr, int size,
-                                 unsigned long step);
+                                 int step);
 
 namespace cuda {
     // Global cuBLAS handle with proper initialization
@@ -249,7 +249,7 @@ __global__ void row_sum_kernel(const float* input, float* output, int rows, int 
 
 __global__ void adam_update_kernel(float* params, const float* grads, float* m, float* v,
                                  float beta1, float beta2, float epsilon, float lr, int size,
-                                 unsigned long step) {
+                                 int step) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         // Update biased first moment estimate

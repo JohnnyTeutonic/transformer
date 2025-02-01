@@ -149,36 +149,87 @@ namespace cuda {
         CUDA_CHECK(cudaFree(d_output));
     }
 
-    void launch_attention_scores_kernel(const float* Q, const float* K, float* scores, float scale,
-                                      int seq_len, int head_dim, cudaStream_t stream) {
+    void launch_attention_scores(const float* Q, const float* K, float* scores,
+                               float scale, int seq_len, int head_dim,
+                               cudaStream_t stream) {
         dim3 block_dim(16, 16);
-        dim3 grid_dim((seq_len + block_dim.x - 1) / block_dim.x,
-                      (seq_len + block_dim.y - 1) / block_dim.y);
+        dim3 grid_dim(
+            (seq_len + block_dim.x - 1) / block_dim.x,
+            (seq_len + block_dim.y - 1) / block_dim.y
+        );
+        attention_scores_kernel<<<grid_dim, block_dim, 0, stream>>>(
+            Q, K, scores, scale, seq_len, head_dim);
+        CUDA_CHECK(cudaGetLastError());
+        if (stream == nullptr) {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+    }
 
-        attention_scores_kernel<<<grid_dim, block_dim, 0, stream>>>(Q, K, scores, scale, seq_len,
-                                                                 head_dim);
+    void launch_softmax(float* matrix, int rows, int cols, cudaStream_t stream) {
+        const int block_size = 256;
+        const int num_blocks = (rows + block_size - 1) / block_size;
+        softmax_kernel<<<num_blocks, block_size, 0, stream>>>(matrix, rows, cols);
+        CUDA_CHECK(cudaGetLastError());
+        if (stream == nullptr) {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 
     void launch_attention_kernel(const float* Q, const float* K, const float* V,
                                float* output, const float* mask,
                                int batch_size, int num_heads, int seq_len, int head_dim,
                                float scale, cudaStream_t stream) {
-        // Calculate grid and block dimensions
         dim3 block(256);
         dim3 grid((seq_len + block.x - 1) / block.x, num_heads, batch_size);
         
-        // Launch kernel
-        scaled_dot_product_attention_kernel<<<grid, block, 0, stream>>>(
-            Q, K, V, output, mask,
-            batch_size, num_heads, seq_len, head_dim,
-            scale);
+        size_t shared_mem_size = seq_len * sizeof(float);
+        attention_kernel<<<grid, block, shared_mem_size, stream>>>(
+            Q, K, V, output, mask, 
+            batch_size, seq_len, head_dim, head_dim * num_heads);
         
         CUDA_CHECK(cudaGetLastError());
+        if (stream == nullptr) {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
-}
 
-// Kernel implementations
-extern "C" {
+    __global__ void attention_scores_kernel(const float* Q, const float* K, float* scores,
+                                          float scale, int seq_len, int head_dim) {
+        int row = blockIdx.x * blockDim.x + threadIdx.x;
+        int col = blockIdx.y * blockDim.y + threadIdx.y;
+        
+        if (row < seq_len && col < seq_len) {
+            float dot_product = 0.0f;
+            for (int i = 0; i < head_dim; ++i) {
+                dot_product += Q[row * head_dim + i] * K[col * head_dim + i];
+            }
+            scores[row * seq_len + col] = dot_product * scale;
+        }
+    }
+
+    __global__ void softmax_kernel(float* matrix, int rows, int cols) {
+        int row = blockIdx.x * blockDim.x + threadIdx.x;
+        if (row < rows) {
+            // Find max value in row
+            float max_val = matrix[row * cols];
+            for (int i = 1; i < cols; ++i) {
+                max_val = max(max_val, matrix[row * cols + i]);
+            }
+
+            // Compute exp and sum
+            float sum = 0.0f;
+            for (int i = 0; i < cols; ++i) {
+                matrix[row * cols + i] = expf(matrix[row * cols + i] - max_val);
+                sum += matrix[row * cols + i];
+            }
+
+            // Normalize
+            for (int i = 0; i < cols; ++i) {
+                matrix[row * cols + i] /= sum;
+            }
+        }
+    }
+
     __global__ void attention_kernel(const float* Q, const float* K, const float* V,
                                    float* output, const float* mask,
                                    int batch_size, int seq_len, int head_dim, int hidden_dim) {
@@ -245,47 +296,6 @@ extern "C" {
         }
     }
 
-    __global__ void attention_scores_kernel(const float* Q, const float* K, float* scores,
-                                           float scale, int seq_len, int head_dim) {
-        int row = blockIdx.x * blockDim.x + threadIdx.x;
-        int col = blockIdx.y * blockDim.y + threadIdx.y;
-
-        if (row < seq_len && col < seq_len) {
-            float sum = 0.0f;
-            for (int i = 0; i < head_dim; i++) {
-                int q_idx = row * head_dim + i;
-                int k_idx = col * head_dim + i;
-                if (q_idx < seq_len * head_dim && k_idx < seq_len * head_dim) {
-                    sum += Q[q_idx] * K[k_idx];
-                }
-            }
-            scores[row * seq_len + col] = sum * scale;
-        }
-    }
-
-    __global__ void softmax_kernel(float* matrix, int rows, int cols) {
-        int row = blockIdx.x * blockDim.x + threadIdx.x;
-        if (row < rows) {
-            // Find max for numerical stability
-            float max_val = matrix[row * cols];
-            for (int i = 1; i < cols; i++) {
-                max_val = max(max_val, matrix[row * cols + i]);
-            }
-
-            // Compute exp and sum
-            float sum = 0.0f;
-            for (int i = 0; i < cols; i++) {
-                matrix[row * cols + i] = expf(matrix[row * cols + i] - max_val);
-                sum += matrix[row * cols + i];
-            }
-
-            // Normalize
-            for (int i = 0; i < cols; i++) {
-                matrix[row * cols + i] /= (sum + 1e-6f);
-            }
-        }
-    }
-
     __global__ void scaled_dot_product_attention_kernel(
         const float* Q, const float* K, const float* V,
         float* output, const float* mask,
@@ -344,7 +354,7 @@ extern "C" {
             }
         }
     }
-} 
+}
 
 // Implementation of MultiHeadAttention::forward_cuda
 #ifdef CUDA_AVAILABLE

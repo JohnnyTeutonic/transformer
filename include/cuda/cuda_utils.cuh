@@ -28,14 +28,6 @@ namespace cuda {
 
     template<typename T>
     void copy_to_host(T* dst, const T* src, size_t size);
-    
-    // Attention operations
-    void launch_attention_kernel(const float* Q, const float* K, const float* V,
-                               float* output, const float* mask,
-                               int batch_size, int num_heads, int seq_len, int head_dim,
-                               float scale);
-    
-    void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream = nullptr);
 
     // CUDA kernel launches
     void launch_add_bias(float* output, const float* bias, int batch_size, int hidden_size);
@@ -47,6 +39,4 @@ namespace cuda {
     void launch_adam_update(float* params, const float* grads, float* m, float* v,
                            float beta1, float beta2, float eps, float lr, int size,
                            int step, cudaStream_t stream = nullptr);
-
-    // Declare common CUDA utilities here
 }

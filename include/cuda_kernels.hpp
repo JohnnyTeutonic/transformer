@@ -36,13 +36,15 @@ class CudaMatrix {
 // CUDA kernel declarations
 __global__ void softmax_kernel(float* matrix, int rows, int cols);
 __global__ void relu_kernel(float* matrix, int size);
-__global__ void attention_kernel(float* Q, float* K, float* V, float* output, int batch_size,
-                                 int seq_len, int head_dim);
+__global__ void attention_scores_kernel(const float* Q, const float* K, float* scores,
+                                      float scale, int seq_len, int head_dim);
+__global__ void attention_kernel(float* Q, float* K, float* V, float* output, 
+                               int batch_size, int seq_len, int head_dim);
 
 namespace cuda {
 
 void launch_add_bias(float* output, const float* bias,
-                    unsigned long rows, unsigned long cols,
+                    int rows, int cols,
                     cudaStream_t stream);
 
 void launch_row_sum(const float* input, float* output,
@@ -53,7 +55,7 @@ void launch_adam_update(float* param, const float* grad,
                        float* m, float* v,
                        float beta1, float beta2,
                        float eps, float lr,
-                       int step, unsigned long size,
+                       int step, int size,
                        cudaStream_t stream);
 
 } // namespace cuda
