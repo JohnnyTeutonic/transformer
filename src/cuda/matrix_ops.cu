@@ -146,9 +146,10 @@ namespace cuda {
         std::cout << "cuBLAS parameters:" << std::endl;
         std::cout << "alpha: " << alpha << ", beta: " << beta << std::endl;
         std::cout << "Leading dimensions:" << std::endl;
-        std::cout << "lda (A rows): " << a.rows() << std::endl;
-        std::cout << "ldb (B rows): " << b.rows() << std::endl;
-        std::cout << "ldc (C rows): " << c.rows() << std::endl;
+        std::cout << "lda (A): " << a.rows() << " (rows)" << std::endl;
+        std::cout << "ldb (B): " << b.rows() << " (rows)" << std::endl;
+        std::cout << "ldc (C): " << c.cols() << " (cols)" << std::endl;
+        std::cout << "Operation dimensions (m,n,k): " << c.cols() << "," << c.rows() << "," << a.cols() << std::endl;
 
         // Set stream for cuBLAS operations
         if (stream) {
@@ -160,10 +161,10 @@ namespace cuda {
                                           CUBLAS_OP_T, CUBLAS_OP_T,  // Use transposed operations
                                           c.cols(), c.rows(), a.cols(),  // m, n, k dimensions
                                           &alpha,
-                                          d_B, b.rows(),  // Leading dimension for B (k)
-                                          d_A, a.rows(),  // Leading dimension for A (n)
+                                          d_B, ((b.rows() + 31) / 32) * 32,  // Pad leading dimension to multiple of 32
+                                          d_A, ((a.rows() + 31) / 32) * 32,  // Pad leading dimension to multiple of 32
                                           &beta,
-                                          d_C, c.cols()); // Leading dimension for C (m)
+                                          d_C, ((c.cols() + 31) / 32) * 32); // Pad leading dimension to multiple of 32
 
         if (status != CUBLAS_STATUS_SUCCESS) {
             std::cout << "cuBLAS error status: " << status << std::endl;
@@ -177,7 +178,9 @@ namespace cuda {
         CUDA_CHECK(cudaMemcpyAsync(c.data(), d_C, C_size, cudaMemcpyDeviceToHost, compute_stream));
         
         // Ensure all operations are complete
-        if (!stream) {
+        if (stream) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        } else {
             CUDA_CHECK(cudaDeviceSynchronize());
         }
 
