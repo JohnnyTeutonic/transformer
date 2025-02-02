@@ -15,10 +15,24 @@ __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C,
 __global__ void gelu_forward_kernel(float* x, int size);
 
 namespace cuda {
-    // Global state management
-    static cublasHandle_t cublas_handle = nullptr;
-    static bool cuda_initialized = false;
-    static std::mutex cuda_mutex;
+    namespace internal {  // Internal namespace for resource management
+        struct CUDAResources {
+            cublasHandle_t cublas_handle;
+            bool initialized;
+            std::mutex mutex;
+            
+            CUDAResources() : cublas_handle(nullptr), initialized(false) {}
+            
+            ~CUDAResources() {
+                if (cublas_handle) {
+                    cublasDestroy(cublas_handle);
+                    cublas_handle = nullptr;
+                }
+            }
+        };
+        
+        static CUDAResources resources;
+    }
     
     // Stream pool management
     static const int MAX_STREAMS = 8;
@@ -168,12 +182,12 @@ namespace cuda {
         }
 
         // Recreate cuBLAS handle
-        if (cublas_handle) {
-            cublasDestroy(cublas_handle);
-            cublas_handle = nullptr;
+        if (internal::resources.cublas_handle) {
+            cublasDestroy(internal::resources.cublas_handle);
+            internal::resources.cublas_handle = nullptr;
         }
 
-        cublasStatus_t status = cublasCreate(&cublas_handle);
+        cublasStatus_t status = cublasCreate(&internal::resources.cublas_handle);
         if (status != CUBLAS_STATUS_SUCCESS) {
             std::cout << "Failed to create cuBLAS handle: " << status << std::endl;
             return false;
@@ -190,7 +204,7 @@ namespace cuda {
     }
 
     bool initialize_cuda() {
-        std::lock_guard<std::mutex> lock(cuda_mutex);
+        std::lock_guard<std::mutex> lock(internal::resources.mutex);
         static int failure_count = 0;
         const int MAX_GLOBAL_FAILURES = 3;
         const int MAX_RETRY_ATTEMPTS = 3;
@@ -201,11 +215,11 @@ namespace cuda {
             return false;
         }
 
-        if (cuda_initialized) {
+        if (internal::resources.initialized) {
             if (!validate_cuda_context()) {
                 std::cout << "Existing CUDA context invalid, attempting recovery..." << std::endl;
                 if (!recover_cuda_context()) {
-                    cuda_initialized = false;
+                    internal::resources.initialized = false;
                     failure_count++;
                     return false;
                 }
@@ -253,8 +267,8 @@ namespace cuda {
                 }
 
                 // Initialize cuBLAS handle
-                if (cublas_handle == nullptr) {
-                    cublasStatus_t status = cublasCreate(&cublas_handle);
+                if (internal::resources.cublas_handle == nullptr) {
+                    cublasStatus_t status = cublasCreate(&internal::resources.cublas_handle);
                     if (status != CUBLAS_STATUS_SUCCESS) {
                         std::cerr << "Failed to create cuBLAS handle" << std::endl;
                         continue;
@@ -263,9 +277,9 @@ namespace cuda {
 
                 // Initialize stream pool
                 if (!initialize_stream_pool()) {
-                    if (cublas_handle) {
-                        cublasDestroy(cublas_handle);
-                        cublas_handle = nullptr;
+                    if (internal::resources.cublas_handle) {
+                        cublasDestroy(internal::resources.cublas_handle);
+                        internal::resources.cublas_handle = nullptr;
                     }
                     continue;
                 }
@@ -278,7 +292,7 @@ namespace cuda {
                     continue;
                 }
 
-                cuda_initialized = true;
+                internal::resources.initialized = true;
                 failure_count = 0;
                 return true;
 
@@ -294,7 +308,7 @@ namespace cuda {
     }
 
     void cleanup_cuda() {
-        std::lock_guard<std::mutex> lock(cuda_mutex);
+        std::lock_guard<std::mutex> lock(internal::resources.mutex);
         
         // First synchronize all streams
         for (auto& stream : stream_pool) {
@@ -307,12 +321,12 @@ namespace cuda {
         cleanup_stream_pool();
 
         // Finally destroy cuBLAS handle
-        if (cublas_handle != nullptr) {
-            cublasDestroy(cublas_handle);
-            cublas_handle = nullptr;
+        if (internal::resources.cublas_handle != nullptr) {
+            cublasDestroy(internal::resources.cublas_handle);
+            internal::resources.cublas_handle = nullptr;
         }
 
-        cuda_initialized = false;
+        internal::resources.initialized = false;
         
         // Reset device last
         cudaDeviceReset();
@@ -323,7 +337,7 @@ namespace cuda {
 
     // Add a function to check if CUDA is usable
     bool is_cuda_available() {
-        if (!cuda_initialized) {
+        if (!internal::resources.initialized) {
             try {
                 initialize_cuda();
             } catch (const std::exception& e) {
@@ -331,7 +345,7 @@ namespace cuda {
                 return false;
             }
         }
-        return cuda_initialized;
+        return internal::resources.initialized;
     }
 
     void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
@@ -394,7 +408,10 @@ namespace cuda {
             CUDA_CHECK(cudaMemcpyAsync(d_B, B.data(), B_size, cudaMemcpyHostToDevice, stream_guard.get()));
 
             // Set stream for cuBLAS
-            cublasStatus_t cublas_status = cublasSetStream(cublas_handle, stream_guard.get());
+            cublasStatus_t cublas_status = cublasSetStream(
+                internal::resources.cublas_handle, 
+                stream_guard.get()
+            );
             if (cublas_status != CUBLAS_STATUS_SUCCESS) {
                 throw std::runtime_error("Failed to set cuBLAS stream");
             }
@@ -404,7 +421,7 @@ namespace cuda {
 
             // Perform multiplication
             cublasStatus_t status = cublasSgemm(
-                cublas_handle,
+                internal::resources.cublas_handle,
                 CUBLAS_OP_N, CUBLAS_OP_N,
                 B.cols(), A.rows(), A.cols(),
                 &alpha,
