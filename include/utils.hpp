@@ -222,4 +222,11 @@ public:
     }
 
     static void generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer);
+
+    /**
+     * @brief Get the most likely token indices from logits matrix
+     * @param logits Matrix of shape [sequence_length, vocab_size] containing token probabilities
+     * @return Vector of most likely token indices
+     */
+    static std::vector<int> get_most_likely_tokens(const Matrix& logits);
 };

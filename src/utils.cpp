@@ -1241,6 +1241,62 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
                     processed_examples++;
                     global_step++;
                     
+                    // Show test predictions every 50 examples
+                    if (processed_examples % 50 == 0) {
+                        std::cout << "\n=== Test Predictions (Example " << processed_examples << ") ===\n";
+                        // Get a random validation example
+                        if (!val_data.empty()) {
+                            try {
+                                size_t test_idx = global_step % val_data.size();
+                                const auto& [test_input, test_target] = val_data[test_idx];
+                                
+                                std::cout << "Processing test input: " << test_input << std::endl;
+                                
+                                // Generate prediction
+                                std::vector<int> test_tokens = tokenizer.encode(test_input);
+                                
+                                // Set to eval mode for prediction
+                                transformer.set_training(false);
+                                
+                                // Get hidden states from transformer
+                                Matrix hidden_states = transformer.forward(test_tokens, "", tokenizer);
+                                std::cout << "Hidden states shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+                                
+                                // Get language model head
+                                auto lm_head = transformer.get_lm_head();
+                                if (!lm_head) {
+                                    throw std::runtime_error("Language model head not initialized");
+                                }
+                                
+                                // Project hidden states to vocabulary space
+                                Matrix logits = lm_head->forward(hidden_states);
+                                std::cout << "Logits shape: " << logits.rows() << "x" << logits.cols() << std::endl;
+                                
+                                // Print detailed prediction information
+                                std::cout << "\nTop 5 token predictions:\n";
+                                print_top_predictions(logits, tokenizer, transformer, 5);
+                                
+                                // Get most likely sequence
+                                std::vector<int> predicted_tokens = get_most_likely_tokens(logits);
+                                std::string prediction = tokenizer.decode(predicted_tokens);
+                                
+                                std::cout << "\nFull prediction details:"
+                                          << "\nInput: " << test_input
+                                          << "\nPredicted text: " << prediction
+                                          << "\nTarget: " << test_target << "\n"
+                                          << "======================================\n";
+                                
+                                // Reset to training mode
+                                transformer.set_training(true);
+                                
+                            } catch (const std::exception& e) {
+                                std::cerr << "Error generating test prediction: " << e.what() << std::endl;
+                                std::cout << "======================================\n";
+                                transformer.set_training(true);  // Ensure we reset to training mode even on error
+                            }
+                        }
+                    }
+                    
                     if (processed_examples % 10 == 0) {
                         std::cout << "\nBatch " << processed_examples/10 << " stats:"
                                  << "\n- Current example: " << processed_examples << "/" << train_data.size()
@@ -1379,4 +1435,21 @@ void Utils::generate_predictions(Transformer& transformer, const std::string& in
     
     std::cout << "===" << std::endl;
     transformer.set_training(true);  // Reset to training mode
+}
+
+std::vector<int> Utils::get_most_likely_tokens(const Matrix& logits) {
+    std::vector<int> tokens;
+    for (size_t i = 0; i < logits.rows(); i++) {
+        // Find the token with highest probability for each position
+        int best_token = 0;
+        float best_prob = logits(i, 0);
+        for (size_t j = 1; j < logits.cols(); j++) {
+            if (logits(i, j) > best_prob) {
+                best_prob = logits(i, j);
+                best_token = j;
+            }
+        }
+        tokens.push_back(best_token);
+    }
+    return tokens;
 }
