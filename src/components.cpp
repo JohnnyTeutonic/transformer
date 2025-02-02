@@ -386,7 +386,9 @@ Matrix operator*(const Matrix& a, const Matrix& b) {
 
 Matrix matmul(const Matrix& A, const Matrix& B) {
     #ifdef USE_CUDA
+    std::cout << "Using CUDA for matrix multiplication" << std::endl;
     Matrix C(A.rows(), B.cols());
+    std::cout << "C dims: " << C.rows() << "x" << C.cols() << std::endl;
     cuda::matmul(A, B, C);
     return C;
     #else

@@ -3,7 +3,6 @@
 #include <cuda_runtime.h>
 
 namespace cuda {
-    void initialize_cuda();
     void cleanup_cuda();
     void launch_softmax_kernel(float* scores, int seq_len, cudaStream_t stream);
 }

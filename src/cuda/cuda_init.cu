@@ -6,7 +6,7 @@
 
 cublasHandle_t cublas_handle;
 
-void initialize_cuda() {
+void initialize_cuda_base() {
     // Get number of devices
     int deviceCount;
     cudaError_t error = cudaGetDeviceCount(&deviceCount);

@@ -1,5 +1,10 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <mutex>
+#include <thread>  // Add this for sleep_for
+#include <chrono>  // Add this for milliseconds
+#include <queue>
+#include <vector>
 #include "../../include/cuda/matrix_ops.cuh"
 #include "../../include/cuda/cuda_check.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
@@ -10,122 +15,429 @@ __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C,
 __global__ void gelu_forward_kernel(float* x, int size);
 
 namespace cuda {
-    // Global cuBLAS handle with proper initialization
+    // Global state management
     static cublasHandle_t cublas_handle = nullptr;
     static bool cuda_initialized = false;
+    static std::mutex cuda_mutex;
+    
+    // Stream pool management
+    static const int MAX_STREAMS = 8;
+    static std::vector<cudaStream_t> stream_pool;
+    static std::queue<cudaStream_t> available_streams;
+    static std::mutex stream_mutex;
 
-    void initialize_cuda() {
-        if (cuda_initialized) {
-            return;
+    // Add the forward declaration here
+    void cleanup_stream_pool();
+
+    // Stream management functions
+    bool initialize_stream_pool() {
+        std::lock_guard<std::mutex> lock(stream_mutex);
+        
+        if (!stream_pool.empty()) {
+            return true;  // Already initialized
         }
 
-        // Set CUDA device
-        cudaError_t err = cudaSetDevice(0);
+        try {
+            // Create all streams upfront
+            for (int i = 0; i < MAX_STREAMS; i++) {
+                cudaStream_t stream;
+                cudaError_t err = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+                if (err != cudaSuccess) {
+                    std::cout << "Failed to create stream " << i << ": " << cudaGetErrorString(err) << std::endl;
+                    cleanup_stream_pool();
+                    return false;
+                }
+                stream_pool.push_back(stream);
+                available_streams.push(stream);
+            }
+            return true;
+        } catch (const std::exception& e) {
+            std::cout << "Exception in stream pool initialization: " << e.what() << std::endl;
+            cleanup_stream_pool();
+            return false;
+        }
+    }
+
+    void cleanup_stream_pool() {
+        // Synchronize and destroy all streams in the pool
+        for (cudaStream_t& stream : stream_pool) {
+            if (stream != nullptr) {
+                cudaStreamSynchronize(stream);
+                cudaStreamDestroy(stream);
+            }
+        }
+        stream_pool.clear();
+    }
+
+    // RAII stream handler
+    class StreamGuard {
+        cudaStream_t stream;
+        bool valid;
+
+    public:
+        StreamGuard() : stream(nullptr), valid(false) {
+            std::lock_guard<std::mutex> lock(stream_mutex);
+            if (!available_streams.empty()) {
+                stream = available_streams.front();
+                available_streams.pop();
+                valid = true;
+            }
+        }
+
+        ~StreamGuard() {
+            if (valid) {
+                cudaStreamSynchronize(stream);
+                std::lock_guard<std::mutex> lock(stream_mutex);
+                available_streams.push(stream);
+            }
+        }
+
+        bool is_valid() const { return valid; }
+        cudaStream_t get() const { return stream; }
+    };
+
+    // CPU fallback implementation
+    static void cpu_matmul(const Matrix& A, const Matrix& B, Matrix& C) {
+        if (A.cols() != B.rows()) {
+            throw std::runtime_error("Matrix multiplication dimension mismatch");
+        }
+        
+        #pragma omp parallel for collapse(2)
+        for (size_t i = 0; i < A.rows(); i++) {
+            for (size_t j = 0; j < B.cols(); j++) {
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
+                for (size_t k = 0; k < A.cols(); k++) {
+                    sum += A(i, k) * B(k, j);
+                }
+                C(i, j) = sum;
+            }
+        }
+    }
+
+    // Enhanced context validation
+    bool validate_cuda_context() {
+        cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            throw std::runtime_error("Failed to set CUDA device: " + std::string(cudaGetErrorString(err)));
+            std::cout << "CUDA context validation failed: " << cudaGetErrorString(err) << std::endl;
+            return false;
         }
-        std::cout << "CUDA device set successfully" << std::endl;
 
-        // Print CUDA device properties
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
-        std::cout << "Using CUDA device: " << prop.name << std::endl;
-        std::cout << "Compute capability: " << prop.major << "." << prop.minor << std::endl;
+        int device;
+        err = cudaGetDevice(&device);
+        if (err != cudaSuccess) {
+            std::cout << "Failed to get CUDA device: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
 
-        // Initialize cuBLAS
+        cudaDeviceProp props;
+        err = cudaGetDeviceProperties(&props, device);
+        if (err != cudaSuccess) {
+            std::cout << "Failed to get device properties: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+
+        size_t free_mem, total_mem;
+        err = cudaMemGetInfo(&free_mem, &total_mem);
+        if (err != cudaSuccess || free_mem == 0 || total_mem == 0) {
+            std::cout << "Cannot access GPU memory: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+
+    bool recover_cuda_context() {
+        std::cout << "Attempting to recover CUDA context..." << std::endl;
+        
+        // First, try to reset the device
+        cudaError_t err = cudaDeviceReset();
+        if (err != cudaSuccess) {
+            std::cout << "Device reset failed: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+
+        // Clear any existing errors
+        cudaGetLastError();
+
+        // Reinitialize CUDA
+        err = cudaSetDevice(0);
+        if (err != cudaSuccess) {
+            std::cout << "Failed to set CUDA device: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+
+        // Recreate cuBLAS handle
+        if (cublas_handle) {
+            cublasDestroy(cublas_handle);
+            cublas_handle = nullptr;
+        }
+
         cublasStatus_t status = cublasCreate(&cublas_handle);
         if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to create cuBLAS handle: " + std::to_string(status));
+            std::cout << "Failed to create cuBLAS handle: " << status << std::endl;
+            return false;
         }
-        std::cout << "cuBLAS handle created successfully" << std::endl;
 
-        cuda_initialized = true;
+        // Reinitialize stream pool
+        cleanup_stream_pool();
+        if (!initialize_stream_pool()) {
+            std::cout << "Failed to reinitialize stream pool" << std::endl;
+            return false;
+        }
+
+        return validate_cuda_context();
+    }
+
+    bool initialize_cuda() {
+        std::lock_guard<std::mutex> lock(cuda_mutex);
+        static int failure_count = 0;
+        const int MAX_GLOBAL_FAILURES = 3;
+        const int MAX_RETRY_ATTEMPTS = 3;
+        const int BASE_DELAY_MS = 100;
+
+        if (failure_count >= MAX_GLOBAL_FAILURES) {
+            std::cerr << "Too many CUDA failures, disabling CUDA operations" << std::endl;
+            return false;
+        }
+
+        if (cuda_initialized) {
+            if (!validate_cuda_context()) {
+                std::cout << "Existing CUDA context invalid, attempting recovery..." << std::endl;
+                if (!recover_cuda_context()) {
+                    cuda_initialized = false;
+                    failure_count++;
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        for (int attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt++) {
+            try {
+                if (attempt > 0) {
+                    int delay_ms = BASE_DELAY_MS * (1 << attempt);
+                    std::cout << "Attempt " << (attempt + 1) << ", waiting " << delay_ms << "ms..." << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                }
+
+                // Get number of devices
+                int deviceCount;
+                cudaError_t error = cudaGetDeviceCount(&deviceCount);
+                if (error != cudaSuccess) {
+                    std::cerr << "Failed to get CUDA device count: " << cudaGetErrorString(error) << std::endl;
+                    continue;
+                }
+
+                if (deviceCount == 0) {
+                    std::cerr << "No CUDA-capable devices found" << std::endl;
+                    continue;
+                }
+
+                // Get device properties
+                cudaDeviceProp deviceProp;
+                error = cudaGetDeviceProperties(&deviceProp, 0); // Use first device
+                if (error != cudaSuccess) {
+                    std::cerr << "Failed to get device properties: " << cudaGetErrorString(error) << std::endl;
+                    continue;
+                }
+
+                // Print device info
+                std::cout << "Using CUDA Device " << 0 << ": " << deviceProp.name << std::endl;
+
+                // Set device
+                error = cudaSetDevice(0);
+                if (error != cudaSuccess) {
+                    std::cerr << "Failed to set CUDA device: " << cudaGetErrorString(error) << std::endl;
+                    continue;
+                }
+
+                // Initialize cuBLAS handle
+                if (cublas_handle == nullptr) {
+                    cublasStatus_t status = cublasCreate(&cublas_handle);
+                    if (status != CUBLAS_STATUS_SUCCESS) {
+                        std::cerr << "Failed to create cuBLAS handle" << std::endl;
+                        continue;
+                    }
+                }
+
+                // Initialize stream pool
+                if (!initialize_stream_pool()) {
+                    if (cublas_handle) {
+                        cublasDestroy(cublas_handle);
+                        cublas_handle = nullptr;
+                    }
+                    continue;
+                }
+
+                // Ensure device is ready
+                error = cudaDeviceSynchronize();
+                if (error != cudaSuccess) {
+                    std::cerr << "Failed to synchronize device: " << cudaGetErrorString(error) << std::endl;
+                    cleanup_cuda();
+                    continue;
+                }
+
+                cuda_initialized = true;
+                failure_count = 0;
+                return true;
+
+            } catch (const std::exception& e) {
+                std::cout << "CUDA initialization attempt " << (attempt + 1) 
+                         << " failed: " << e.what() << std::endl;
+                cleanup_cuda();
+            }
+        }
+
+        failure_count++;
+        return false;
     }
 
     void cleanup_cuda() {
+        std::lock_guard<std::mutex> lock(cuda_mutex);
+        
+        // First synchronize all streams
+        for (auto& stream : stream_pool) {
+            if (stream != nullptr) {
+                cudaStreamSynchronize(stream);
+            }
+        }
+
+        // Then cleanup streams
+        cleanup_stream_pool();
+
+        // Finally destroy cuBLAS handle
         if (cublas_handle != nullptr) {
             cublasDestroy(cublas_handle);
             cublas_handle = nullptr;
-            cuda_initialized = false;
-            std::cout << "cuBLAS handle destroyed successfully" << std::endl;
         }
+
+        cuda_initialized = false;
+        
+        // Reset device last
+        cudaDeviceReset();
+        
+        // Clear any remaining errors
+        cudaGetLastError();
+    }
+
+    // Add a function to check if CUDA is usable
+    bool is_cuda_available() {
+        if (!cuda_initialized) {
+            try {
+                initialize_cuda();
+            } catch (const std::exception& e) {
+                std::cout << "CUDA initialization check failed: " << e.what() << std::endl;
+                return false;
+            }
+        }
+        return cuda_initialized;
     }
 
     void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
-        // Ensure CUDA is initialized
-        if (!cuda_initialized || cublas_handle == nullptr) {
-            initialize_cuda();
+        std::cout << "\nEntering cuda::matmul..." << std::endl;
+        
+        // First check if CUDA is available
+        if (!is_cuda_available()) {
+            std::cout << "CUDA not available, falling back to CPU implementation" << std::endl;
+            cpu_matmul(A, B, C);
+            return;
+        }
+
+        // Get a stream from the pool
+        StreamGuard stream_guard;
+        if (!stream_guard.is_valid()) {
+            std::cout << "No available CUDA streams, falling back to CPU implementation" << std::endl;
+            cpu_matmul(A, B, C);
+            return;
         }
 
         // Verify dimensions
         if (A.cols() != B.rows()) {
-            throw std::runtime_error("Matrix multiplication dimension mismatch: " +
-                std::to_string(A.rows()) + "x" + std::to_string(A.cols()) + " * " +
-                std::to_string(B.rows()) + "x" + std::to_string(B.cols()));
-        }
-        // Ensure output matrix has correct dimensions
-        if (C.rows() != A.rows() || C.cols() != B.cols()) {
-            throw std::runtime_error("Output matrix has wrong dimensions: expected " +
-                std::to_string(A.rows()) + "x" + std::to_string(B.cols()) + " got " +
-                std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
+            throw std::runtime_error("Matrix multiplication dimension mismatch");
         }
 
         float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-        
+
+        // Helper lambda for cleanup
+        auto cleanup = [&]() {
+            if (d_A) cudaFree(d_A);
+            if (d_B) cudaFree(d_B);
+            if (d_C) cudaFree(d_C);
+        };
+
         try {
-            // Calculate sizes
+            // Add synchronization point before validation
+            cudaStreamSynchronize(stream_guard.get());
+            
+            if (!validate_cuda_context()) {
+                std::cout << "CUDA context validation failed, resetting device..." << std::endl;
+                cleanup_cuda();  // Proper cleanup before reset
+                initialize_cuda();  // Reinitialize everything
+                
+                if (!validate_cuda_context()) {
+                    throw std::runtime_error("CUDA context validation failed after reset");
+                }
+            }
+
+            // Calculate sizes and allocate memory
             size_t A_size = A.rows() * A.cols() * sizeof(float);
             size_t B_size = B.rows() * B.cols() * sizeof(float);
-            size_t C_size = A.rows() * B.cols() * sizeof(float);
+            size_t C_size = C.rows() * C.cols() * sizeof(float);
 
-            // Allocate device memory
             CUDA_CHECK(cudaMalloc(&d_A, A_size));
             CUDA_CHECK(cudaMalloc(&d_B, B_size));
             CUDA_CHECK(cudaMalloc(&d_C, C_size));
 
-            if (!d_A || !d_B || !d_C) {
-                throw std::runtime_error("CUDA memory allocation failed");
-            }
+            // Copy data using the stream
+            CUDA_CHECK(cudaMemcpyAsync(d_A, A.data(), A_size, cudaMemcpyHostToDevice, stream_guard.get()));
+            CUDA_CHECK(cudaMemcpyAsync(d_B, B.data(), B_size, cudaMemcpyHostToDevice, stream_guard.get()));
 
-            // Copy input matrices to device
-            CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
+            // Set stream for cuBLAS
+            cublasStatus_t cublas_status = cublasSetStream(cublas_handle, stream_guard.get());
+            if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("Failed to set cuBLAS stream");
+            }
 
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            // Perform matrix multiplication using cuBLAS
-            cublasStatus_t status = cublasSgemm(cublas_handle,
-                                              CUBLAS_OP_N, CUBLAS_OP_N,
-                                              B.cols(), A.rows(), A.cols(),
-                                              &alpha,
-                                              d_B, B.cols(),
-                                              d_A, A.cols(),
-                                              &beta,
-                                              d_C, B.cols());
+            // Perform multiplication
+            cublasStatus_t status = cublasSgemm(
+                cublas_handle,
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                B.cols(), A.rows(), A.cols(),
+                &alpha,
+                d_B, B.cols(),
+                d_A, A.cols(),
+                &beta,
+                d_C, C.cols()
+            );
 
             if (status != CUBLAS_STATUS_SUCCESS) {
-                throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+                throw std::runtime_error("cuBLAS matrix multiplication failed");
             }
 
-            // Synchronize to ensure computation is complete
-            CUDA_CHECK(cudaDeviceSynchronize());
+            // Copy result back
+            CUDA_CHECK(cudaMemcpyAsync(C.data(), d_C, C_size, cudaMemcpyDeviceToHost, stream_guard.get()));
 
-            // Copy result back to host
-            CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
+            // Add synchronization point after computation
+            cudaStreamSynchronize(stream_guard.get());
+            
+            cleanup();
 
         } catch (const std::exception& e) {
-            // Clean up on error
-            if (d_A) cudaFree(d_A);
-            if (d_B) cudaFree(d_B);
-            if (d_C) cudaFree(d_C);
-            throw;
+            std::cout << "Exception in matrix multiplication: " << e.what() << std::endl;
+            cleanup();
+            
+            // Try to recover context and fall back to CPU if needed
+            if (!recover_cuda_context()) {
+                std::cout << "Failed to recover CUDA context, falling back to CPU implementation" << std::endl;
+                cpu_matmul(A, B, C);
+            } else {
+                throw; // Re-throw if recovery succeeded but operation still failed
+            }
         }
-
-        // Clean up
-        if (d_A) cudaFree(d_A);
-        if (d_B) cudaFree(d_B);
-        if (d_C) cudaFree(d_C);
     }
 
     void gelu_forward(Matrix& x) {

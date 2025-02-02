@@ -43,21 +43,56 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
 #ifdef USE_CUDA
     // Helper lambda for cleanup
     auto cleanup = [&]() {
-        if (d_grad_output) cudaFree(d_grad_output);
-        if (d_grad_proj) cudaFree(d_grad_proj);
-        if (d_projection) cudaFree(d_projection);
+        if (d_grad_output) {
+            cudaFree(d_grad_output);
+            d_grad_output = nullptr;
+        }
+        if (d_grad_proj) {
+            cudaFree(d_grad_proj);
+            d_grad_proj = nullptr;
+        }
+        if (d_projection) {
+            cudaFree(d_projection);
+            d_projection = nullptr;
+        }
+        // Synchronize to ensure all memory is freed
+        cudaDeviceSynchronize();
     };
     
     try {
+        // Print initial GPU memory state
+        size_t free_mem, total_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cout << "GPU memory before allocation: Free=" << (free_mem/1024/1024) 
+                  << "MB, Total=" << (total_mem/1024/1024) << "MB" << std::endl;
+        
         // Calculate memory sizes with proper alignment
         size_t grad_output_size = grad_output.rows() * grad_output.cols() * sizeof(float);
         size_t projection_size = projection.rows() * projection.cols() * sizeof(float);
         size_t grad_proj_size = grad_proj.rows() * grad_proj.cols() * sizeof(float);
         
+        // Check if we have enough memory
+        if (grad_output_size + projection_size + grad_proj_size > free_mem) {
+            throw std::runtime_error("Not enough GPU memory for allocation");
+        }
+        
         // Allocate device memory
-        cudaMalloc(&d_grad_output, grad_output_size);
-        cudaMalloc(&d_projection, projection_size);
-        cudaMalloc(&d_grad_proj, grad_proj_size);
+        cudaError_t err = cudaMalloc(&d_grad_output, grad_output_size);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to allocate d_grad_output: " + std::string(cudaGetErrorString(err)));
+        }
+        
+        err = cudaMalloc(&d_projection, projection_size);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to allocate d_projection: " + std::string(cudaGetErrorString(err)));
+        }
+        
+        err = cudaMalloc(&d_grad_proj, grad_proj_size);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to allocate d_grad_proj: " + std::string(cudaGetErrorString(err)));
+        }
         
         // Copy data to device
         cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
@@ -72,11 +107,6 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
         }
         
         // For cuBLAS SGEMM: C = α * op(A) * op(B) + β * C
-        // We want: grad_proj = grad_output * projection
-        // grad_output: [batch_size x vocab_size]
-        // projection: [vocab_size x hidden_size]
-        // grad_proj: [batch_size x hidden_size]
-        
         cublasStatus_t status = cublasSgemm(cublas_handle,
                     CUBLAS_OP_N, CUBLAS_OP_N,     // No transpositions needed
                     hidden_size_,                  // M: number of rows of projection (hidden_size)
@@ -92,17 +122,23 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
                     hidden_size_);                 // ldc: leading dimension of grad_proj
         
         if (status != CUBLAS_STATUS_SUCCESS) {
+            cleanup();
             throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
         }
+        
+        // Synchronize before copy
+        cudaDeviceSynchronize();
         
         // Copy result back to host
         cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
         
-        // Cleanup
+        // Cleanup and synchronize
         cleanup();
         
-        std::cout << "Gradient projection complete. Output dimensions: ["
-                  << grad_proj.rows() << " x " << grad_proj.cols() << "]" << std::endl;
+        // Check final memory state
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cout << "GPU memory after cleanup: Free=" << (free_mem/1024/1024) 
+                  << "MB, Total=" << (total_mem/1024/1024) << "MB" << std::endl;
         
         return grad_proj;
         

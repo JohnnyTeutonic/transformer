@@ -3,7 +3,7 @@
 
 namespace cuda {
     // Initialize and cleanup
-    void initialize_cuda();
+    bool initialize_cuda();
     void cleanup_cuda();
 
     // Matrix operations
