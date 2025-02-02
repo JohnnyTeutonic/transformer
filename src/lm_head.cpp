@@ -16,6 +16,7 @@ constexpr size_t MIN_ACTIVE_TOKENS = 1000;  // Reasonable default value
 #if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cublas_v2.h>
 #endif
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
@@ -86,6 +87,7 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     size_t proj_size = projection.rows() * projection.cols() * sizeof(float);
     size_t logits_size = logits.rows() * logits.cols() * sizeof(float);
     
+#ifdef USE_CUDA
     cudaMalloc(&d_hidden, hidden_size);
     cudaMalloc(&d_proj, proj_size);
     cudaMalloc(&d_logits, logits_size);
@@ -96,25 +98,30 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     float alpha = 1.0f;
     float beta = 0.0f;
     
+    // Ensure we have a valid cuBLAS handle
+    if (!cublas_handle) {
+        cublasCreate(&cublas_handle);
+    }
+    
     // Use cuBLAS to perform the matrix multiplication with transpose
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-    cublasSgemm(handle,
-                CUBLAS_OP_T, CUBLAS_OP_N,  // Transpose projection, no transpose for hidden states
+    cublasSgemm(cublas_handle,
+                CUBLAS_OP_T, CUBLAS_OP_N,
                 vocab_size_, hidden_states.rows(), hidden_size_,
                 &alpha,
-                d_proj, hidden_size_,  // Leading dimension is hidden_size for projection
-                d_hidden, hidden_size_,  // Leading dimension is hidden_size for hidden states
+                d_proj, hidden_size_,
+                d_hidden, hidden_size_,
                 &beta,
-                d_logits, vocab_size_);  // Leading dimension is vocab_size for output
+                d_logits, vocab_size_);
     
+    cudaDeviceSynchronize();
     cudaMemcpy(logits.data(), d_logits, logits_size, cudaMemcpyDeviceToHost);
     
-    // Cleanup
     cudaFree(d_hidden);
     cudaFree(d_proj);
     cudaFree(d_logits);
-    cublasDestroy(handle);
+#else
+    throw std::runtime_error("CUDA support not enabled");
+#endif
     
     std::cout << "after matmul logits: " << logits.rows() << "x" << logits.cols() << std::endl;
     
@@ -306,82 +313,147 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     std::cout << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl;
     std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
     std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
-    
+
     // Compute gradients for projection matrix using cuBLAS
-    // hidden_states: [batch_size x hidden_size]
-    // grad_output: [batch_size x vocab_size]
-    // grad_proj: [vocab_size x hidden_size]
-    
     Matrix grad_proj(vocab_size_, hidden_size_);
     
-    float* d_hidden, *d_grad_output, *d_grad_proj;
-    size_t hidden_size = hidden_states.rows() * hidden_states.cols() * sizeof(float);
-    size_t grad_output_size = grad_output.rows() * grad_output.cols() * sizeof(float);
-    size_t grad_proj_size = grad_proj.rows() * grad_proj.cols() * sizeof(float);
+    // Allocate device memory
+    float *d_hidden = nullptr, *d_grad_output = nullptr, *d_grad_proj = nullptr;
     
-    cudaMalloc(&d_hidden, hidden_size);
-    cudaMalloc(&d_grad_output, grad_output_size);
-    cudaMalloc(&d_grad_proj, grad_proj_size);
-    
-    cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
-    
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    
-    // Use cuBLAS to compute grad_proj = grad_output.T @ hidden_states
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-    cublasSgemm(handle,
-                CUBLAS_OP_T, CUBLAS_OP_N,  // Transpose grad_output, no transpose for hidden_states
-                vocab_size_, hidden_size_, grad_output.rows(),
-                &alpha,
-                d_grad_output, grad_output.cols(),  // Leading dimension is vocab_size
-                d_hidden, hidden_states.cols(),  // Leading dimension is hidden_size
-                &beta,
-                d_grad_proj, vocab_size_);  // Leading dimension is vocab_size
-    
-    cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
-    
-    // Compute bias gradients
-    Vector grad_bias = grad_output.row_sum();
-    
-    // Update parameters using Adam optimizer
-    t++;  // Increment time step
-    
-    // Constants for gradient clipping and stability
-    const float clip_threshold = 5.0f;
-    const float max_allowed_value = 100.0f;
-    const float scale_factor = std::sqrt(1.0f / hidden_size_);
-    const float max_update = 0.05f * scale_factor;
-    
-    bool has_unstable_update = false;
-    
-    // Update projection matrix using Adam optimizer
-    #pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
-    for (size_t i = 0; i < grad_proj.rows(); ++i) {
-        for (size_t j = 0; j < grad_proj.cols(); ++j) {
-            if (!std::isfinite(grad_proj(i, j))) {
+    try {
+        // First operation: compute grad_proj
+        {
+            size_t hidden_size = hidden_states.rows() * hidden_states.cols() * sizeof(float);
+            size_t grad_output_size = grad_output.rows() * grad_output.cols() * sizeof(float);
+            size_t grad_proj_size = grad_proj.rows() * grad_proj.cols() * sizeof(float);
+            
+#ifdef USE_CUDA
+            // Allocate device memory for first operation
+            cudaMalloc(&d_hidden, hidden_size);
+            cudaMalloc(&d_grad_output, grad_output_size);
+            cudaMalloc(&d_grad_proj, grad_proj_size);
+            
+            if (!d_hidden || !d_grad_output || !d_grad_proj) {
+                throw std::runtime_error("CUDA memory allocation failed");
+            }
+            
+            // Copy data to device
+            cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
+            cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
+            
+            float alpha = 1.0f;
+            float beta = 0.0f;
+            
+            // Ensure we have a valid cuBLAS handle
+            if (!cublas_handle) {
+                cublasCreate(&cublas_handle);
+            }
+            
+            // Compute grad_proj = grad_output.T @ hidden_states
+            cublasSgemm(cublas_handle,
+                        CUBLAS_OP_T, CUBLAS_OP_N,
+                        vocab_size_, hidden_size_, grad_output.rows(),
+                        &alpha,
+                        d_grad_output, grad_output.cols(),
+                        d_hidden, hidden_states.cols(),
+                        &beta,
+                        d_grad_proj, vocab_size_);
+            
+            cudaDeviceSynchronize();
+            
+            // Copy result back to host
+            cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
+            
+            // Free memory from first operation
+            cudaFree(d_hidden);
+            cudaFree(d_grad_proj);
+            // Keep d_grad_output as we need it for the second operation
+            d_hidden = nullptr;
+            d_grad_proj = nullptr;
+#else
+            throw std::runtime_error("CUDA support not enabled");
+#endif
+        }
+        
+        // Update parameters using Adam optimizer
+        t++;  // Increment time step
+        
+        // Constants for gradient clipping and stability
+        const float clip_threshold = 5.0f;
+        const float max_allowed_value = 100.0f;
+        const float scale_factor = std::sqrt(1.0f / hidden_size_);
+        const float max_update = 0.05f * scale_factor;
+        
+        bool has_unstable_update = false;
+        
+        // Update projection matrix using Adam optimizer
+        #pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
+        for (size_t i = 0; i < grad_proj.rows(); ++i) {
+            for (size_t j = 0; j < grad_proj.cols(); ++j) {
+                if (!std::isfinite(grad_proj(i, j))) {
+                    continue;
+                }
+                
+                // Clip gradient
+                float clipped_grad = grad_proj(i, j);
+                if (std::abs(clipped_grad) > clip_threshold) {
+                    clipped_grad = (clipped_grad > 0) ? clip_threshold : -clip_threshold;
+                }
+                
+                // Update first moment estimate
+                m_proj(i, j) = beta1 * m_proj(i, j) + (1 - beta1) * clipped_grad;
+                
+                // Update second moment estimate
+                v_proj(i, j) = beta2 * v_proj(i, j) + (1 - beta2) * clipped_grad * clipped_grad;
+                
+                // Compute bias-corrected first moment estimate
+                float m_hat = m_proj(i, j) / (1 - std::pow(beta1, t));
+                
+                // Compute bias-corrected second moment estimate
+                float v_hat = v_proj(i, j) / (1 - std::pow(beta2, t));
+                
+                // Compute update
+                float update = current_lr * m_hat / (std::sqrt(v_hat) + eps);
+                
+                // Clip update
+                if (std::abs(update) > max_update) {
+                    update = (update > 0) ? max_update : -max_update;
+                }
+                
+                // Apply update
+                projection(i, j) -= update;
+                
+                // Check for instability
+                if (std::abs(projection(i, j)) > max_allowed_value) {
+                    has_unstable_update = true;
+                }
+            }
+        }
+        
+        // Update bias using Adam optimizer
+        #pragma omp parallel for reduction(|:has_unstable_update)
+        for (size_t i = 0; i < grad_output.row_sum().size(); ++i) {
+            if (!std::isfinite(grad_output.row_sum()[i])) {
                 continue;
             }
             
             // Clip gradient
-            float clipped_grad = grad_proj(i, j);
+            float clipped_grad = grad_output.row_sum()[i];
             if (std::abs(clipped_grad) > clip_threshold) {
                 clipped_grad = (clipped_grad > 0) ? clip_threshold : -clip_threshold;
             }
             
             // Update first moment estimate
-            m_proj(i, j) = beta1 * m_proj(i, j) + (1 - beta1) * clipped_grad;
+            m_bias[i] = beta1 * m_bias[i] + (1 - beta1) * clipped_grad;
             
             // Update second moment estimate
-            v_proj(i, j) = beta2 * v_proj(i, j) + (1 - beta2) * clipped_grad * clipped_grad;
+            v_bias[i] = beta2 * v_bias[i] + (1 - beta2) * clipped_grad * clipped_grad;
             
             // Compute bias-corrected first moment estimate
-            float m_hat = m_proj(i, j) / (1 - std::pow(beta1, t));
+            float m_hat = m_bias[i] / (1 - std::pow(beta1, t));
             
             // Compute bias-corrected second moment estimate
-            float v_hat = v_proj(i, j) / (1 - std::pow(beta2, t));
+            float v_hat = v_bias[i] / (1 - std::pow(beta2, t));
             
             // Compute update
             float update = current_lr * m_hat / (std::sqrt(v_hat) + eps);
@@ -392,105 +464,77 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
             }
             
             // Apply update
-            projection(i, j) -= update;
+            bias[i] -= update;
             
             // Check for instability
-            if (std::abs(projection(i, j)) > max_allowed_value) {
+            if (std::abs(bias[i]) > max_allowed_value) {
                 has_unstable_update = true;
             }
         }
-    }
-    
-    // Update bias using Adam optimizer
-    #pragma omp parallel for reduction(|:has_unstable_update)
-    for (size_t i = 0; i < grad_bias.size(); ++i) {
-        if (!std::isfinite(grad_bias[i])) {
-            continue;
+        
+        if (has_unstable_update) {
+            std::cout << "Warning: Unstable updates detected in backward pass" << std::endl;
         }
         
-        // Clip gradient
-        float clipped_grad = grad_bias[i];
-        if (std::abs(clipped_grad) > clip_threshold) {
-            clipped_grad = (clipped_grad > 0) ? clip_threshold : -clip_threshold;
+        // Second operation: compute grad_input
+        {
+            Matrix grad_input(grad_output.rows(), hidden_size_);
+            size_t grad_input_size = grad_input.rows() * grad_input.cols() * sizeof(float);
+            size_t proj_size = projection.rows() * projection.cols() * sizeof(float);
+            
+            float *d_proj = nullptr, *d_grad_input = nullptr;
+            
+#ifdef USE_CUDA
+            // Allocate memory for second operation
+            cudaMalloc(&d_proj, proj_size);
+            cudaMalloc(&d_grad_input, grad_input_size);
+            
+            if (!d_proj || !d_grad_input) {
+                if (d_proj) cudaFree(d_proj);
+                if (d_grad_input) cudaFree(d_grad_input);
+                if (d_grad_output) cudaFree(d_grad_output);
+                throw std::runtime_error("CUDA memory allocation failed");
+            }
+            
+            // Copy projection matrix to device
+            cudaMemcpy(d_proj, projection.data(), proj_size, cudaMemcpyHostToDevice);
+            
+            float alpha = 1.0f;
+            float beta = 0.0f;
+            
+            // Compute grad_input = grad_output @ projection
+            cublasSgemm(cublas_handle,
+                        CUBLAS_OP_N, CUBLAS_OP_N,
+                        grad_output.rows(), hidden_size_, vocab_size_,
+                        &alpha,
+                        d_grad_output, grad_output.rows(),
+                        d_proj, vocab_size_,
+                        &beta,
+                        d_grad_input, grad_output.rows());
+            
+            cudaDeviceSynchronize();
+            
+            // Copy result back to host
+            cudaMemcpy(grad_input.data(), d_grad_input, grad_input_size, cudaMemcpyDeviceToHost);
+            
+            // Cleanup all device memory
+            cudaFree(d_grad_output);
+            cudaFree(d_proj);
+            cudaFree(d_grad_input);
+            
+            return grad_input;
+#else
+            throw std::runtime_error("CUDA support not enabled");
+#endif
         }
         
-        // Update first moment estimate
-        m_bias[i] = beta1 * m_bias[i] + (1 - beta1) * clipped_grad;
-        
-        // Update second moment estimate
-        v_bias[i] = beta2 * v_bias[i] + (1 - beta2) * clipped_grad * clipped_grad;
-        
-        // Compute bias-corrected first moment estimate
-        float m_hat = m_bias[i] / (1 - std::pow(beta1, t));
-        
-        // Compute bias-corrected second moment estimate
-        float v_hat = v_bias[i] / (1 - std::pow(beta2, t));
-        
-        // Compute update
-        float update = current_lr * m_hat / (std::sqrt(v_hat) + eps);
-        
-        // Clip update
-        if (std::abs(update) > max_update) {
-            update = (update > 0) ? max_update : -max_update;
-        }
-        
-        // Apply update
-        bias[i] -= update;
-        
-        // Check for instability
-        if (std::abs(bias[i]) > max_allowed_value) {
-            has_unstable_update = true;
-        }
+    } catch (const std::exception& e) {
+        // Clean up on error
+        if (d_hidden) cudaFree(d_hidden);
+        if (d_grad_output) cudaFree(d_grad_output);
+        if (d_grad_proj) cudaFree(d_grad_proj);
+        throw;  // Re-throw the exception
     }
-    
-    if (has_unstable_update) {
-        std::cout << "Warning: Unstable updates detected in backward pass" << std::endl;
-    }
-    
-    // Compute gradient with respect to input using cuBLAS
-    // grad_output: [batch_size x vocab_size]
-    // projection: [vocab_size x hidden_size]
-    // grad_input: [batch_size x hidden_size]
-    Matrix grad_input(grad_output.rows(), hidden_size_);
-    size_t grad_input_size = grad_input.rows() * grad_input.cols() * sizeof(float);
-    
-    float* d_grad_input, *d_proj;
-    cudaMalloc(&d_grad_input, grad_input_size);
-    cudaMalloc(&d_proj, projection.rows() * projection.cols() * sizeof(float));
-    
-    // Copy projection matrix to GPU
-    cudaMemcpy(d_proj, projection.data(), projection.rows() * projection.cols() * sizeof(float), cudaMemcpyHostToDevice);
-    
-    // Use cuBLAS to compute grad_input = grad_output @ projection
-    cublasSgemm(handle,
-                CUBLAS_OP_N, CUBLAS_OP_N,  // No transpose for either matrix
-                grad_output.rows(), hidden_size_, vocab_size_,
-                &alpha,
-                d_grad_output, grad_output.rows(),  // Leading dimension is batch_size
-                d_proj, vocab_size_,  // Leading dimension is vocab_size
-                &beta,
-                d_grad_input, grad_output.rows());  // Leading dimension is batch_size
-    
-    cudaMemcpy(grad_input.data(), d_grad_input, grad_input_size, cudaMemcpyDeviceToHost);
-    
-    // Cleanup
-    cudaFree(d_hidden);
-    cudaFree(d_grad_output);
-    cudaFree(d_grad_proj);
-    cudaFree(d_grad_input);
-    cudaFree(d_proj);  // Free the projection matrix memory
-    cublasDestroy(handle);
-    
-    // Verify output dimensions
-    if (grad_input.cols() != hidden_size_) {
-        throw std::runtime_error("Output gradient dimension mismatch. Expected hidden_size: " + 
-                               std::to_string(hidden_size_) + ", got: " + std::to_string(grad_input.cols()));
-    }
-    
-    std::cout << "Gradient propagation dimensions:" << std::endl;
-    std::cout << "- Input gradient: [" << grad_input.rows() << " x " << grad_input.cols() << "]" << std::endl;
-    
-    return grad_input;
 }
 
 void LanguageModelHead::bias_completion_format(Matrix& logits) {

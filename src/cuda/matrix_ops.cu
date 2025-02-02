@@ -70,50 +70,62 @@ namespace cuda {
                 std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
         }
 
-        float* d_A, *d_B, *d_C;
-        size_t A_size = A.rows() * A.cols() * sizeof(float);
-        size_t B_size = B.rows() * B.cols() * sizeof(float);
-        size_t C_size = A.rows() * B.cols() * sizeof(float);
+        float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+        
+        try {
+            // Calculate sizes
+            size_t A_size = A.rows() * A.cols() * sizeof(float);
+            size_t B_size = B.rows() * B.cols() * sizeof(float);
+            size_t C_size = A.rows() * B.cols() * sizeof(float);
 
-        CUDA_CHECK(cudaMalloc(&d_A, A_size));
-        CUDA_CHECK(cudaMalloc(&d_B, B_size));
-        CUDA_CHECK(cudaMalloc(&d_C, C_size));
+            // Allocate device memory
+            CUDA_CHECK(cudaMalloc(&d_A, A_size));
+            CUDA_CHECK(cudaMalloc(&d_B, B_size));
+            CUDA_CHECK(cudaMalloc(&d_C, C_size));
 
-        CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
+            if (!d_A || !d_B || !d_C) {
+                throw std::runtime_error("CUDA memory allocation failed");
+            }
 
-        float alpha = 1.0f;
-        float beta = 0.0f;
+            // Copy input matrices to device
+            CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
 
-        // For row-major matrices A[m,k] * B[k,n] = C[m,n], we compute:
-        // C = A * B in column-major order
-        cublasStatus_t status = cublasSgemm(cublas_handle,
-                                          CUBLAS_OP_N, CUBLAS_OP_N,  // No transposition needed
-                                          B.cols(), A.rows(), A.cols(),  // Dimensions for the operation
-                                          &alpha,
-                                          d_B, B.cols(),  // Leading dimension is cols for B
-                                          d_A, A.cols(),  // Leading dimension is cols for A
-                                          &beta,
-                                          d_C, B.cols()); // Leading dimension is cols for C
+            float alpha = 1.0f;
+            float beta = 0.0f;
 
-        // Print dimensions for debugging
-        std::cout << "Matrix multiplication dimensions:" << std::endl;
-        std::cout << "A: " << A.rows() << "x" << A.cols() << std::endl;
-        std::cout << "B: " << B.rows() << "x" << B.cols() << std::endl;
-        std::cout << "C: " << C.rows() << "x" << C.cols() << std::endl;
+            // Perform matrix multiplication using cuBLAS
+            cublasStatus_t status = cublasSgemm(cublas_handle,
+                                              CUBLAS_OP_N, CUBLAS_OP_N,
+                                              B.cols(), A.rows(), A.cols(),
+                                              &alpha,
+                                              d_B, B.cols(),
+                                              d_A, A.cols(),
+                                              &beta,
+                                              d_C, B.cols());
 
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            cudaFree(d_A);
-            cudaFree(d_B);
-            cudaFree(d_C);
-            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+            }
+
+            // Synchronize to ensure computation is complete
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy result back to host
+            CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
+
+        } catch (const std::exception& e) {
+            // Clean up on error
+            if (d_A) cudaFree(d_A);
+            if (d_B) cudaFree(d_B);
+            if (d_C) cudaFree(d_C);
+            throw;
         }
 
-        CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
-
-        CUDA_CHECK(cudaFree(d_A));
-        CUDA_CHECK(cudaFree(d_B));
-        CUDA_CHECK(cudaFree(d_C));
+        // Clean up
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
     }
 
     void gelu_forward(Matrix& x) {

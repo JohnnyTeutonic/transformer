@@ -1,5 +1,6 @@
 #include "../../include/cuda/cuda_utils.cuh"
 #include "../../include/cuda/cuda_check.cuh"
+#include "../../include/cuda/matrix_ops.cuh"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -33,49 +34,8 @@ namespace cuda {
     }
 
     Matrix cuda_matmul(const Matrix& A, const Matrix& B) {
-        std::cout << "Starting CUDA matrix multiplication..." << std::endl;
-        std::cout << "Matrix A: " << A.rows() << "x" << A.cols() << std::endl;
-        std::cout << "Matrix B: " << B.rows() << "x" << B.cols() << std::endl;
-
-        cublasHandle_t handle;
-        cublasStatus_t status;
-        cudaError_t err;
-
-        status = cublasCreate(&handle);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to create cuBLAS handle");
-        }
-
-        float alpha = 1.0f;
-        float beta = 0.0f;
-
-        Matrix C(A.rows(), B.cols(), 0.0f);
-        Matrix C_gpu = C.to_gpu();
-        std::cout << "Created output matrix C: " << C.rows() << "x" << C.cols() << std::endl;
-
-        try {
-            status = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, B.cols(), A.rows(), A.cols(), &alpha,
-                                 B.get_data(), B.cols(), A.get_data(), A.cols(), &beta,
-                                 C_gpu.get_data(), C_gpu.cols());
-
-            if (status != CUBLAS_STATUS_SUCCESS) {
-                throw std::runtime_error("cuBLAS SGEMM failed with status: " + std::to_string(status));
-            }
-
-            // Synchronize to catch any asynchronous errors
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                throw std::runtime_error("CUDA sync failed: " + std::string(cudaGetErrorString(err)));
-            }
-
-            std::cout << "CUDA matrix multiplication completed successfully" << std::endl;
-            C = C_gpu.to_cpu();
-        } catch (const std::exception& e) {
-            cublasDestroy(handle);
-            throw;
-        }
-
-        cublasDestroy(handle);
+        Matrix C(A.rows(), B.cols());
+        cuda::matmul(A, B, C);  // Use the safer implementation
         return C;
     }
 }

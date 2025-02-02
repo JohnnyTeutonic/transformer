@@ -1,5 +1,6 @@
 #pragma once
 #include "components.hpp"
+#include "cuda/matrix_ops.cuh"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -15,7 +16,13 @@ class CudaMatrix {
     ~CudaMatrix();
 
     // CUDA operations
-    static CudaMatrix matmul(const CudaMatrix& a, const CudaMatrix& b);
+    static CudaMatrix matmul(const CudaMatrix& a, const CudaMatrix& b) {
+        Matrix host_a = a.to_host();
+        Matrix host_b = b.to_host();
+        Matrix result(a.rows(), b.cols());
+        cuda::matmul(host_a, host_b, result);  // Use the safer implementation
+        return CudaMatrix(result);
+    }
     void apply_softmax();
     void apply_relu();
     void scale(float factor);
