@@ -1,6 +1,6 @@
 #include "../include/lm_head.hpp"
 #include "../include/token_constants.hpp"
-#include "../include/cuda/matrix_ops.cuh"  // Add CUDA matrix operations header
+#include "../include/cuda/matrix_ops.cuh"
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -8,16 +8,158 @@
 #include <random>
 #include <deque>
 #include <cassert>
+#include <vector>
+#include <memory>
+
+// Only include CUDA headers if CUDA is available
+#ifdef USE_CUDA
+#include "/usr/local/cuda/include/cuda_runtime.h"
+#include "/usr/local/cuda/include/cublas_v2.h"
+#endif
 
 // Add minimum active tokens constant
 constexpr size_t MIN_ACTIVE_TOKENS = 1000;  // Reasonable default value
 
-// Only include CUDA headers if CUDA is available
-#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
-#include <cublas_v2.h>
+Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix& hidden_states) {
+    // Verify input dimensions
+    if (grad_output.cols() != vocab_size_) {
+        throw std::runtime_error("Gradient output dimension mismatch in backward pass");
+    }
+    if (hidden_states.cols() != hidden_size_) {
+        throw std::runtime_error("Hidden states dimension mismatch in backward pass");
+    }
+
+    std::cout << "\nLM Head Backward Pass Dimensions:" << std::endl;
+    std::cout << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl;
+    std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
+    std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
+
+    // Compute gradients for projection matrix using cuBLAS
+    Matrix grad_proj(vocab_size_, hidden_size_);
+    
+    // Allocate device memory
+    float *d_hidden = nullptr, *d_grad_output = nullptr, *d_grad_proj = nullptr;
+    
+#ifdef USE_CUDA
+    // Helper lambda for cleanup
+    auto cleanup = [&]() {
+        if (d_hidden) cudaFree(d_hidden);
+        if (d_grad_output) cudaFree(d_grad_output);
+        if (d_grad_proj) cudaFree(d_grad_proj);
+        d_hidden = nullptr;
+        d_grad_output = nullptr;
+        d_grad_proj = nullptr;
+    };
+#else
+    // No-op cleanup for non-CUDA builds
+    auto cleanup = []() {};
 #endif
+    
+    try {
+        // Calculate aligned dimensions
+        int lda = ((grad_output.cols() + 15) / 16) * 16;  // Align to 16-float boundary
+        int ldb = ((hidden_states.cols() + 15) / 16) * 16;
+        int ldc = ((vocab_size_ + 15) / 16) * 16;
+        
+        // Use aligned dimensions for memory allocation
+        size_t hidden_size = hidden_states.rows() * ldb * sizeof(float);
+        size_t grad_output_size = grad_output.rows() * lda * sizeof(float);
+        size_t grad_proj_size = grad_proj.rows() * ldc * sizeof(float);
+        
+#ifdef USE_CUDA
+        // Allocate and check each allocation individually
+        cudaError_t err = cudaMalloc(&d_hidden, hidden_size);
+        if (err != cudaSuccess || !d_hidden) {
+            cleanup();
+            throw std::runtime_error("Failed to allocate d_hidden");
+        }
+        
+        err = cudaMalloc(&d_grad_output, grad_output_size);
+        if (err != cudaSuccess || !d_grad_output) {
+            cleanup();
+            throw std::runtime_error("Failed to allocate d_grad_output");
+        }
+        
+        err = cudaMalloc(&d_grad_proj, grad_proj_size);
+        if (err != cudaSuccess || !d_grad_proj) {
+            cleanup();
+            throw std::runtime_error("Failed to allocate d_grad_proj");
+        }
+        
+        // Copy data to device
+        err = cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to copy hidden states to device");
+        }
+        
+        err = cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to copy grad_output to device");
+        }
+        
+        float alpha = 1.0f;
+        float beta = 0.0f;
+        
+        // Ensure we have a valid cuBLAS handle
+        if (!cublas_handle) {
+            cublasCreate(&cublas_handle);
+        }
+        
+        // Print memory usage before cuBLAS operation
+        size_t free_mem, total_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cout << "Memory before cuBLAS: Free=" << (free_mem/1024/1024) << "MB, Total=" << (total_mem/1024/1024) << "MB\n";
+        
+        // Compute grad_proj = grad_output.T @ hidden_states
+        cublasStatus_t status = cublasSgemm(cublas_handle,
+                    CUBLAS_OP_T, CUBLAS_OP_N,
+                    vocab_size_, hidden_size_, grad_output.rows(),
+                    &alpha,
+                    d_grad_output, lda,
+                    d_hidden, ldb,
+                    &beta,
+                    d_grad_proj, ldc);
+        
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            cleanup();
+            throw std::runtime_error("cuBLAS matrix multiplication failed");
+        }
+        
+        // Check for any CUDA errors before synchronization
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("CUDA error in cuBLAS operation");
+        }
+        
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("cudaDeviceSynchronize failed");
+        }
+        
+        // Copy result back to host
+        err = cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to copy grad_proj back to host");
+        }
+        
+        // Free memory
+        cleanup();
+        
+        // Return the computed gradients
+        return grad_proj;
+#else
+        throw std::runtime_error("CUDA support not enabled");
+#endif
+    } catch (const std::exception& e) {
+        cleanup();
+        throw;
+    }
+}
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     : hidden_size_(hidden_size), vocab_size_(vocab_size), 
@@ -62,81 +204,16 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
-    if (hidden_states.cols() != hidden_size_) {
-        throw std::runtime_error("Hidden dimension mismatch: " + std::to_string(hidden_states.cols()) +
-                               " != " + std::to_string(hidden_size_));
-    }
-    
     // Cache hidden states for backward pass
     hidden_states_ = hidden_states;
     
-    // Project hidden states to vocabulary space using CUDA matrix multiplication
-    // hidden_states: [batch_size x hidden_size]
-    // projection: [vocab_size x hidden_size]
-    // result: [batch_size x vocab_size]
-    std::cout << "\nLM Head matrix dimensions:" << std::endl;
-    std::cout << "hidden_states: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-    std::cout << "projection: " << projection.rows() << "x" << projection.cols() << std::endl;
-    
-    Matrix logits(hidden_states.rows(), vocab_size_);  // Initialize with correct dimensions
-    std::cout << "pre-allocated logits: " << logits.rows() << "x" << logits.cols() << std::endl;
-    
-    // Use cuBLAS's built-in transpose operation by setting CUBLAS_OP_T
-    float* d_hidden, *d_proj, *d_logits;
-    size_t hidden_size = hidden_states.rows() * hidden_states.cols() * sizeof(float);
-    size_t proj_size = projection.rows() * projection.cols() * sizeof(float);
-    size_t logits_size = logits.rows() * logits.cols() * sizeof(float);
-    
-#ifdef USE_CUDA
-    cudaMalloc(&d_hidden, hidden_size);
-    cudaMalloc(&d_proj, proj_size);
-    cudaMalloc(&d_logits, logits_size);
-    
-    cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_proj, projection.data(), proj_size, cudaMemcpyHostToDevice);
-    
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    
-    // Ensure we have a valid cuBLAS handle
-    if (!cublas_handle) {
-        cublasCreate(&cublas_handle);
-    }
-    
-    // Use cuBLAS to perform the matrix multiplication with transpose
-    cublasSgemm(cublas_handle,
-                CUBLAS_OP_T, CUBLAS_OP_N,
-                vocab_size_, hidden_states.rows(), hidden_size_,
-                &alpha,
-                d_proj, hidden_size_,
-                d_hidden, hidden_size_,
-                &beta,
-                d_logits, vocab_size_);
-    
-    cudaDeviceSynchronize();
-    cudaMemcpy(logits.data(), d_logits, logits_size, cudaMemcpyDeviceToHost);
-    
-    cudaFree(d_hidden);
-    cudaFree(d_proj);
-    cudaFree(d_logits);
-#else
-    throw std::runtime_error("CUDA support not enabled");
-#endif
-    
-    std::cout << "after matmul logits: " << logits.rows() << "x" << logits.cols() << std::endl;
-    
-    // Add bias
-    for (size_t i = 0; i < logits.rows(); ++i) {
-        for (size_t j = 0; j < logits.cols(); ++j) {
-            logits(i, j) += bias[j];
-        }
-    }
-    
-    return logits;
+    // Use project_to_vocab for the actual projection
+    return project_to_vocab(hidden_states);
 }
 
 Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
     this->hidden_states = hidden_states;
+    
     size_t total_size = hidden_states.rows();
     size_t hidden_dim = hidden_states.cols();
     
@@ -145,7 +222,134 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
                                " != " + std::to_string(hidden_size_));
     }
     
-    return forward(hidden_states, false);
+    // Project hidden states to vocabulary space using CUDA matrix multiplication
+    std::cout << "\nProjecting to vocabulary space:" << std::endl << std::flush;
+    std::cout << "Input hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl << std::flush;
+    std::cout << "Projection matrix: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl << std::flush;
+    
+    Matrix logits(hidden_states.rows(), vocab_size_);  // [batch_size x vocab_size]
+    std::cout << "Allocated logits: [" << logits.rows() << " x " << logits.cols() << "]" << std::endl << std::flush;
+    
+#ifdef USE_CUDA
+    float* d_hidden = nullptr, *d_proj = nullptr, *d_logits = nullptr;
+    std::cout << "Starting CUDA operations..." << std::endl << std::flush;
+    
+    try {
+        size_t hidden_size = hidden_states.rows() * hidden_states.cols() * sizeof(float);
+        size_t proj_size = projection.rows() * projection.cols() * sizeof(float);
+        size_t logits_size = logits.rows() * logits.cols() * sizeof(float);
+        std::cout << "Calculated sizes:" << std::endl
+                  << "- hidden_size: " << hidden_size << " bytes" << std::endl
+                  << "- proj_size: " << proj_size << " bytes" << std::endl
+                  << "- logits_size: " << logits_size << " bytes" << std::endl << std::flush;
+        
+        std::cout << "Allocating d_hidden..." << std::endl << std::flush;
+        cudaMalloc(&d_hidden, hidden_size);
+        if (!d_hidden) {
+            throw std::runtime_error("Failed to allocate d_hidden");
+        }
+        
+        std::cout << "Allocating d_proj..." << std::endl << std::flush;
+        cudaMalloc(&d_proj, proj_size);
+        if (!d_proj) {
+            throw std::runtime_error("Failed to allocate d_proj");
+        }
+        
+        std::cout << "Allocating d_logits..." << std::endl << std::flush;
+        cudaMalloc(&d_logits, logits_size);
+        if (!d_logits) {
+            throw std::runtime_error("Failed to allocate d_logits");
+        }
+        
+        std::cout << "Copying hidden states to device..." << std::endl << std::flush;
+        cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
+        
+        std::cout << "Copying projection matrix to device..." << std::endl << std::flush;
+        cudaMemcpy(d_proj, projection.data(), proj_size, cudaMemcpyHostToDevice);
+        
+        float alpha = 1.0f;
+        float beta = 0.0f;
+        
+        std::cout << "Creating cuBLAS handle..." << std::endl << std::flush;
+        if (!cublas_handle) {
+            cublasCreate(&cublas_handle);
+        }
+        
+        // Print memory usage and matrix dimensions before cuBLAS
+        size_t free_mem, total_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cout << "Memory before cuBLAS:" << std::endl
+                  << "- Free: " << (free_mem/1024/1024) << "MB" << std::endl
+                  << "- Total: " << (total_mem/1024/1024) << "MB" << std::endl
+                  << "Matrix dimensions for cuBLAS:" << std::endl
+                  << "- M (rows of output): " << hidden_states.rows() << std::endl
+                  << "- N (cols of output): " << vocab_size_ << std::endl
+                  << "- K (inner dimension): " << hidden_size_ << std::endl
+                  << "- lda (leading dim of d_hidden): " << hidden_states.cols() << std::endl
+                  << "- ldb (leading dim of d_proj): " << vocab_size_ << std::endl
+                  << "- ldc (leading dim of d_logits): " << hidden_states.rows() << std::endl << std::flush;
+        
+        std::cout << "Performing cuBLAS matrix multiplication..." << std::endl << std::flush;
+        // Operation: C = alpha * op(A) * op(B) + beta * C
+        // We want: logits = hidden_states @ projection.T
+        // A = hidden_states [5 x 128], B = projection [2857 x 128]
+        // op(A) = A [5 x 128], op(B) = B.T [128 x 2857]
+        // Result = [5 x 2857]
+        
+        // For leading dimensions:
+        // lda ≥ max(1, M) for non-transposed A
+        // ldb ≥ max(1, N) for transposed B
+        // ldc ≥ max(1, M) for output C
+        int lda = std::max(1, static_cast<int>(hidden_states.rows()));  // ≥ 5
+        int ldb = std::max(1, static_cast<int>(projection.rows()));     // ≥ 2857
+        int ldc = std::max(1, static_cast<int>(hidden_states.rows()));  // ≥ 5
+        
+        cublasStatus_t status = cublasSgemm(cublas_handle,
+                    CUBLAS_OP_N, CUBLAS_OP_T,     // A not transposed, B transposed
+                    hidden_states.rows(),          // M = 5 (rows of output)
+                    projection.rows(),             // N = 2857 (cols of output)
+                    hidden_states.cols(),          // K = 128 (inner dimension)
+                    &alpha,
+                    d_hidden, lda,                 // Leading dim of A ≥ 5
+                    d_proj, ldb,                  // Leading dim of B ≥ 2857
+                    &beta,
+                    d_logits, ldc);              // Leading dim of C ≥ 5
+        
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            std::cout << "cuBLAS error status: " << status << std::endl << std::flush;
+            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+        }
+        
+        std::cout << "Copying result back to host..." << std::endl << std::flush;
+        cudaMemcpy(logits.data(), d_logits, logits_size, cudaMemcpyDeviceToHost);
+        
+        std::cout << "Freeing CUDA memory..." << std::endl << std::flush;
+        cudaFree(d_hidden);
+        cudaFree(d_proj);
+        cudaFree(d_logits);
+        
+        std::cout << "CUDA operations completed successfully" << std::endl << std::flush;
+        
+    } catch (const std::exception& e) {
+        // Clean up on error
+        if (d_hidden) cudaFree(d_hidden);
+        if (d_proj) cudaFree(d_proj);
+        if (d_logits) cudaFree(d_logits);
+        throw;
+    }
+#else
+    throw std::runtime_error("CUDA support not enabled");
+#endif
+    
+    // Add bias
+    for (size_t i = 0; i < logits.rows(); ++i) {
+        for (size_t j = 0; j < logits.cols(); ++j) {
+            logits(i, j) += bias[j];
+        }
+    }
+    
+    std::cout << "Final logits dimensions: [" << logits.rows() << " x " << logits.cols() << "]" << std::endl;
+    return logits;
 }
 
 Matrix LanguageModelHead::backward(const Matrix& grad_output, const Matrix& target_distribution) {
@@ -178,8 +382,14 @@ void LanguageModelHead::update_learning_rate(float current_loss) {
                 avg_old_loss += loss_history[i];
             }
         }
-        avg_recent_loss /= recent_count;
-        avg_old_loss /= (loss_history.size() - recent_count);
+        
+        if (recent_count > 0) {
+            avg_recent_loss /= recent_count;
+        }
+        
+        if (loss_history.size() > recent_count) {
+            avg_old_loss /= (loss_history.size() - recent_count);
+        }
         
         // Adjust learning rate based on loss trend
         if (avg_recent_loss < avg_old_loss) {
@@ -233,9 +443,6 @@ void LanguageModelHead::update_active_tokens() {
     for (size_t i = 0; i < vocab_size_; i++) {
         token_frequencies[i] *= decay;
     }
-    
-    size_t active_count = 0;
-    active_token_indices.clear();
     
     // Use vector of pairs to avoid multiple passes
     std::vector<std::pair<float, size_t>> freq_pairs(vocab_size_);
@@ -296,245 +503,6 @@ LanguageModelHead::~LanguageModelHead() {
 
 void LanguageModelHead::set_training(bool training_mode) {
     is_training_ = training_mode;
-}
-
-Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix& hidden_states) {
-    // Verify input dimensions
-    if (grad_output.cols() != vocab_size_) {
-        throw std::runtime_error("Gradient output dimension mismatch in backward pass. Expected vocab_size: " + 
-                               std::to_string(vocab_size_) + ", got: " + std::to_string(grad_output.cols()));
-    }
-    if (hidden_states.cols() != hidden_size_) {
-        throw std::runtime_error("Hidden states dimension mismatch in backward pass. Expected hidden_size: " + 
-                               std::to_string(hidden_size_) + ", got: " + std::to_string(hidden_states.cols()));
-    }
-
-    std::cout << "\nLM Head Backward Pass Dimensions:" << std::endl;
-    std::cout << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl;
-    std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
-    std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
-
-    // Compute gradients for projection matrix using cuBLAS
-    Matrix grad_proj(vocab_size_, hidden_size_);
-    
-    // Allocate device memory
-    float *d_hidden = nullptr, *d_grad_output = nullptr, *d_grad_proj = nullptr;
-    
-    try {
-        // First operation: compute grad_proj
-        {
-            size_t hidden_size = hidden_states.rows() * hidden_states.cols() * sizeof(float);
-            size_t grad_output_size = grad_output.rows() * grad_output.cols() * sizeof(float);
-            size_t grad_proj_size = grad_proj.rows() * grad_proj.cols() * sizeof(float);
-            
-#ifdef USE_CUDA
-            // Allocate device memory for first operation
-            cudaMalloc(&d_hidden, hidden_size);
-            cudaMalloc(&d_grad_output, grad_output_size);
-            cudaMalloc(&d_grad_proj, grad_proj_size);
-            
-            if (!d_hidden || !d_grad_output || !d_grad_proj) {
-                throw std::runtime_error("CUDA memory allocation failed");
-            }
-            
-            // Copy data to device
-            cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
-            cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
-            
-            float alpha = 1.0f;
-            float beta = 0.0f;
-            
-            // Ensure we have a valid cuBLAS handle
-            if (!cublas_handle) {
-                cublasCreate(&cublas_handle);
-            }
-            
-            // Compute grad_proj = grad_output.T @ hidden_states
-            cublasSgemm(cublas_handle,
-                        CUBLAS_OP_T, CUBLAS_OP_N,
-                        vocab_size_, hidden_size_, grad_output.rows(),
-                        &alpha,
-                        d_grad_output, grad_output.cols(),
-                        d_hidden, hidden_states.cols(),
-                        &beta,
-                        d_grad_proj, vocab_size_);
-            
-            cudaDeviceSynchronize();
-            
-            // Copy result back to host
-            cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
-            
-            // Free memory from first operation
-            cudaFree(d_hidden);
-            cudaFree(d_grad_proj);
-            // Keep d_grad_output as we need it for the second operation
-            d_hidden = nullptr;
-            d_grad_proj = nullptr;
-#else
-            throw std::runtime_error("CUDA support not enabled");
-#endif
-        }
-        
-        // Update parameters using Adam optimizer
-        t++;  // Increment time step
-        
-        // Constants for gradient clipping and stability
-        const float clip_threshold = 5.0f;
-        const float max_allowed_value = 100.0f;
-        const float scale_factor = std::sqrt(1.0f / hidden_size_);
-        const float max_update = 0.05f * scale_factor;
-        
-        bool has_unstable_update = false;
-        
-        // Update projection matrix using Adam optimizer
-        #pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
-        for (size_t i = 0; i < grad_proj.rows(); ++i) {
-            for (size_t j = 0; j < grad_proj.cols(); ++j) {
-                if (!std::isfinite(grad_proj(i, j))) {
-                    continue;
-                }
-                
-                // Clip gradient
-                float clipped_grad = grad_proj(i, j);
-                if (std::abs(clipped_grad) > clip_threshold) {
-                    clipped_grad = (clipped_grad > 0) ? clip_threshold : -clip_threshold;
-                }
-                
-                // Update first moment estimate
-                m_proj(i, j) = beta1 * m_proj(i, j) + (1 - beta1) * clipped_grad;
-                
-                // Update second moment estimate
-                v_proj(i, j) = beta2 * v_proj(i, j) + (1 - beta2) * clipped_grad * clipped_grad;
-                
-                // Compute bias-corrected first moment estimate
-                float m_hat = m_proj(i, j) / (1 - std::pow(beta1, t));
-                
-                // Compute bias-corrected second moment estimate
-                float v_hat = v_proj(i, j) / (1 - std::pow(beta2, t));
-                
-                // Compute update
-                float update = current_lr * m_hat / (std::sqrt(v_hat) + eps);
-                
-                // Clip update
-                if (std::abs(update) > max_update) {
-                    update = (update > 0) ? max_update : -max_update;
-                }
-                
-                // Apply update
-                projection(i, j) -= update;
-                
-                // Check for instability
-                if (std::abs(projection(i, j)) > max_allowed_value) {
-                    has_unstable_update = true;
-                }
-            }
-        }
-        
-        // Update bias using Adam optimizer
-        #pragma omp parallel for reduction(|:has_unstable_update)
-        for (size_t i = 0; i < grad_output.row_sum().size(); ++i) {
-            if (!std::isfinite(grad_output.row_sum()[i])) {
-                continue;
-            }
-            
-            // Clip gradient
-            float clipped_grad = grad_output.row_sum()[i];
-            if (std::abs(clipped_grad) > clip_threshold) {
-                clipped_grad = (clipped_grad > 0) ? clip_threshold : -clip_threshold;
-            }
-            
-            // Update first moment estimate
-            m_bias[i] = beta1 * m_bias[i] + (1 - beta1) * clipped_grad;
-            
-            // Update second moment estimate
-            v_bias[i] = beta2 * v_bias[i] + (1 - beta2) * clipped_grad * clipped_grad;
-            
-            // Compute bias-corrected first moment estimate
-            float m_hat = m_bias[i] / (1 - std::pow(beta1, t));
-            
-            // Compute bias-corrected second moment estimate
-            float v_hat = v_bias[i] / (1 - std::pow(beta2, t));
-            
-            // Compute update
-            float update = current_lr * m_hat / (std::sqrt(v_hat) + eps);
-            
-            // Clip update
-            if (std::abs(update) > max_update) {
-                update = (update > 0) ? max_update : -max_update;
-            }
-            
-            // Apply update
-            bias[i] -= update;
-            
-            // Check for instability
-            if (std::abs(bias[i]) > max_allowed_value) {
-                has_unstable_update = true;
-            }
-        }
-        
-        if (has_unstable_update) {
-            std::cout << "Warning: Unstable updates detected in backward pass" << std::endl;
-        }
-        
-        // Second operation: compute grad_input
-        {
-            Matrix grad_input(grad_output.rows(), hidden_size_);
-            size_t grad_input_size = grad_input.rows() * grad_input.cols() * sizeof(float);
-            size_t proj_size = projection.rows() * projection.cols() * sizeof(float);
-            
-            float *d_proj = nullptr, *d_grad_input = nullptr;
-            
-#ifdef USE_CUDA
-            // Allocate memory for second operation
-            cudaMalloc(&d_proj, proj_size);
-            cudaMalloc(&d_grad_input, grad_input_size);
-            
-            if (!d_proj || !d_grad_input) {
-                if (d_proj) cudaFree(d_proj);
-                if (d_grad_input) cudaFree(d_grad_input);
-                if (d_grad_output) cudaFree(d_grad_output);
-                throw std::runtime_error("CUDA memory allocation failed");
-            }
-            
-            // Copy projection matrix to device
-            cudaMemcpy(d_proj, projection.data(), proj_size, cudaMemcpyHostToDevice);
-            
-            float alpha = 1.0f;
-            float beta = 0.0f;
-            
-            // Compute grad_input = grad_output @ projection
-            cublasSgemm(cublas_handle,
-                        CUBLAS_OP_N, CUBLAS_OP_N,
-                        grad_output.rows(), hidden_size_, vocab_size_,
-                        &alpha,
-                        d_grad_output, grad_output.rows(),
-                        d_proj, vocab_size_,
-                        &beta,
-                        d_grad_input, grad_output.rows());
-            
-            cudaDeviceSynchronize();
-            
-            // Copy result back to host
-            cudaMemcpy(grad_input.data(), d_grad_input, grad_input_size, cudaMemcpyDeviceToHost);
-            
-            // Cleanup all device memory
-            cudaFree(d_grad_output);
-            cudaFree(d_proj);
-            cudaFree(d_grad_input);
-            
-            return grad_input;
-#else
-            throw std::runtime_error("CUDA support not enabled");
-#endif
-        }
-        
-    } catch (const std::exception& e) {
-        // Clean up on error
-        if (d_hidden) cudaFree(d_hidden);
-        if (d_grad_output) cudaFree(d_grad_output);
-        if (d_grad_proj) cudaFree(d_grad_proj);
-        throw;  // Re-throw the exception
-    }
 }
 
 void LanguageModelHead::bias_completion_format(Matrix& logits) {

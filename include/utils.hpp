@@ -215,8 +215,8 @@ public:
 
     // Initialize random generator with time-based seed
     static void initialize_random() {
-        auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        std::seed_seq seq{static_cast<uint32_t>(time_seed & 0xFFFFFFFF)};
+        std::random_device rd;
+        std::seed_seq seq{rd(), rd(), rd(), static_cast<unsigned int>(std::time(nullptr))};
         random_generator = std::mt19937(seq);
         prediction_counter = 0;
     }
@@ -229,4 +229,34 @@ public:
      * @return Vector of most likely token indices
      */
     static std::vector<int> get_most_likely_tokens(const Matrix& logits);
+
+    /**
+     * @brief Process a single validation example during training
+     * @param transformer The transformer model
+     * @param input Input text
+     * @param target Target text
+     * @param tokenizer Tokenizer instance
+     */
+    static void process_validation_example(Transformer& transformer, 
+                                         const std::string& input, 
+                                         const std::string& target, 
+                                         const Tokenizer& tokenizer);
+
+    /**
+     * @brief Perform a single training step
+     * @param transformer The transformer model
+     * @param input_tokens Batch of input token sequences
+     * @param target_distribution Target probability distribution
+     * @param tokenizer Tokenizer instance
+     * @param processed_examples Counter for processed examples
+     * @param global_step Global step counter
+     * @param val_data Validation dataset
+     */
+    static void train_step(Transformer& transformer,
+                          const std::vector<std::vector<int>>& input_tokens,
+                          const Matrix& target_distribution,
+                          const Tokenizer& tokenizer,
+                          size_t& processed_examples,
+                          size_t& global_step,
+                          const std::vector<std::pair<std::string, std::string>>& val_data);
 };

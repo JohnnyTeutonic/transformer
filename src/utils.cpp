@@ -876,7 +876,7 @@ float Utils::evaluate_validation(
             if (!lm_head) {
                 throw std::runtime_error("Language model head is not initialized");
             }
-            Matrix logits = lm_head->forward(hidden_states);
+            Matrix logits = lm_head->project_to_vocab(hidden_states);
             std::cout << "Logits dimensions: " << logits.rows() << "x" << logits.cols() << std::endl;
             
             // Get the last token's logits
@@ -1185,15 +1185,20 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
                               << " (Fold " << fold + 1 << "/" << num_folds 
                               << ", Epoch " << epoch + 1 << "/" << config.num_epochs << ")" << std::flush;
                     
-                    // Forward pass
+                    // Forward pass through transformer to get hidden states
                     current_input_tokens = tokenizer.encode(pair.first);
-                    Matrix output = transformer.forward(current_input_tokens, "", tokenizer);
+                    Matrix hidden_states = transformer.forward(current_input_tokens, "", tokenizer);
+                    
+                    // Project hidden states to vocabulary space through language model head
+                    Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden_states);
+                    
+                    // Create target distribution
                     Matrix target_distribution = create_batch_target_distribution(
                         {tokenizer.encode(pair.second)}, tokenizer, tokenizer.vocab_size(), current_input_tokens.size());
                     
                     // Compute loss and gradients
-                    float example_loss = compute_batch_loss(output, target_distribution, tokenizer);
-                    current_loss_gradients = compute_loss_gradient(output, target_distribution);
+                    float example_loss = compute_batch_loss(logits, target_distribution, tokenizer);
+                    current_loss_gradients = compute_loss_gradient(logits, target_distribution);
                     
                     // Apply gradient clipping
                     float grad_norm = 0.0f;
@@ -1244,7 +1249,6 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
                     // Show test predictions every 50 examples
                     if (processed_examples % 50 == 0) {
                         std::cout << "\n=== Test Predictions (Example " << processed_examples << ") ===\n";
-                        // Get a random validation example
                         if (!val_data.empty()) {
                             try {
                                 size_t test_idx = global_step % val_data.size();
@@ -1269,7 +1273,7 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
                                 }
                                 
                                 // Project hidden states to vocabulary space
-                                Matrix logits = lm_head->forward(hidden_states);
+                                Matrix logits = lm_head->project_to_vocab(hidden_states);
                                 std::cout << "Logits shape: " << logits.rows() << "x" << logits.cols() << std::endl;
                                 
                                 // Print detailed prediction information
@@ -1388,7 +1392,7 @@ void Utils::generate_predictions(Transformer& transformer, const std::string& in
     // Get model prediction
     transformer.set_training(false);  // Set to evaluation mode
     Matrix hidden_states = transformer.forward(input_tokens, processed_input, *tokenizer);
-    Matrix logits = transformer.get_lm_head()->forward(hidden_states);
+    Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden_states);
     
     // Get probabilities for last token
     Vector last_logits = logits.row(logits.rows() - 1);
@@ -1452,4 +1456,118 @@ std::vector<int> Utils::get_most_likely_tokens(const Matrix& logits) {
         tokens.push_back(best_token);
     }
     return tokens;
+}
+
+void Utils::process_validation_example(Transformer& transformer, const std::string& input, const std::string& target, const Tokenizer& tokenizer) {
+    try {
+        // Preprocess input
+        std::string processed_input = input;
+        tokenizer.preprocess_text(processed_input);
+        std::vector<int> input_tokens = tokenizer.encode(processed_input);
+        
+        // Get hidden states from transformer
+        Matrix hidden_states = transformer.forward(input_tokens, processed_input, tokenizer);
+        std::cout << "Hidden states from transformer: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
+        
+        // Project through language model head to get logits
+        auto lm_head = transformer.get_lm_head();
+        if (!lm_head) {
+            throw std::runtime_error("Language model head is not initialized");
+        }
+        Matrix logits = lm_head->project_to_vocab(hidden_states);
+        std::cout << "Final logits after LM head: [" << logits.rows() << " x " << logits.cols() << "]" << std::endl;
+        
+        // Create target distribution using the correct function signature
+        std::string processed_target = target;
+        tokenizer.preprocess_text(processed_target);
+        std::vector<int> target_tokens = tokenizer.encode(processed_target);
+        std::vector<std::vector<int>> target_batch = {target_tokens};  // Single example batch
+        
+        // Get the actual vocabulary size from the tokenizer
+        size_t vocab_size = tokenizer.vocab_size();
+        
+        Matrix target_distribution = create_batch_target_distribution(
+            target_batch,
+            tokenizer,
+            vocab_size,      // Use actual vocab size from tokenizer
+            logits.rows()    // sequence_length
+        );
+        std::cout << "Target distribution shape: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
+        
+        // Compute loss using the logits (not hidden states)
+        float batch_loss = compute_batch_loss(logits, target_distribution, tokenizer);
+        std::cout << "Batch loss: " << batch_loss << std::endl;
+        
+        // Print detailed prediction information
+        std::cout << "\nTop 5 token predictions:\n";
+        print_top_predictions(logits, tokenizer, transformer, 5);
+        
+        // Get most likely sequence
+        std::vector<int> predicted_tokens = get_most_likely_tokens(logits);
+        std::string prediction = tokenizer.decode(predicted_tokens);
+        
+        std::cout << "\nFull prediction details:"
+                  << "\nInput: " << input
+                  << "\nPredicted text: " << prediction
+                  << "\nTarget: " << target << "\n"
+                  << "======================================\n";
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error processing validation example: " << e.what() << std::endl;
+        throw;
+    }
+}
+
+void Utils::train_step(Transformer& transformer, const std::vector<std::vector<int>>& input_tokens,
+                     const Matrix& target_distribution, const Tokenizer& tokenizer,
+                     size_t& processed_examples, size_t& global_step,
+                     const std::vector<std::pair<std::string, std::string>>& val_data) {
+    try {
+        // Process each example in the batch
+        for (size_t i = 0; i < input_tokens.size(); i++) {
+            // Get hidden states from transformer
+            Matrix hidden_states = transformer.forward(input_tokens[i], "", tokenizer);
+            
+            // Project hidden states to vocabulary space using LM head
+            auto lm_head = transformer.get_lm_head();
+            if (!lm_head) {
+                throw std::runtime_error("Language model head not initialized");
+            }
+            Matrix logits = lm_head->project_to_vocab(hidden_states);
+            
+            // Compute batch loss using logits
+            float batch_loss = compute_batch_loss(logits, target_distribution, tokenizer);
+            
+            // Compute loss gradients
+            Matrix loss_gradients = compute_loss_gradient(logits, target_distribution);
+            
+            // Backward pass through LM head first
+            Matrix hidden_grads = lm_head->backward_pass(loss_gradients, hidden_states);
+            
+            // Then backward through transformer with hidden state gradients
+            transformer.backward(hidden_grads, input_tokens[i], 0.001f);
+            
+            processed_examples++;
+            global_step++;
+            
+            // Show test predictions every 50 examples
+            if (processed_examples % 50 == 0) {
+                std::cout << "\n=== Test Predictions (Example " << processed_examples << ") ===\n";
+                if (!val_data.empty()) {
+                    try {
+                        size_t test_idx = global_step % val_data.size();
+                        const auto& [test_input, test_target] = val_data[test_idx];
+                        process_validation_example(transformer, test_input, test_target, tokenizer);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error generating test prediction: " << e.what() << std::endl;
+                        std::cout << "======================================\n";
+                    }
+                    transformer.set_training(true);  // Reset to training mode
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error processing example " << processed_examples << ": " << e.what() << std::endl;
+        throw;
+    }
 }

@@ -183,9 +183,9 @@ void generate_predictions(Transformer& transformer, const std::string& input_tex
     
     // Generate prediction
     Matrix hidden_states = transformer.forward(input_tokens, input_text, *tokenizer);
-    std::cout << "\nAbout to call lm_head->forward" << std::endl << std::flush;
-    Matrix logits = transformer.get_lm_head()->forward(hidden_states);
-    std::cout << "Finished lm_head->forward" << std::endl << std::flush;
+    std::cout << "\nAbout to call lm_head->project_to_vocab" << std::endl << std::flush;
+    Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden_states);
+    std::cout << "Finished lm_head->project_to_vocab" << std::endl << std::flush;
     
     // Get probabilities for last token with proper temperature scaling
     Vector last_row = logits.row(logits.rows() - 1);
@@ -449,7 +449,7 @@ void test_model_predictions(Transformer& transformer, std::unique_ptr<Tokenizer>
         // Get model prediction
         transformer.set_training(false);  // Set to evaluation mode
         Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-        Matrix logits = transformer.get_lm_head()->forward(test_hidden);
+        Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
         
         // Show the top predictions
         std::cout << "\nTop Predictions:\n";
@@ -833,7 +833,7 @@ int main(int argc, char* argv[]) {
                 Matrix hidden_states = transformer.forward(flattened_batch, "", *tokenizer);
 
                 // Project hidden states to vocabulary space using LM head
-                Matrix logits = transformer.get_lm_head()->forward(hidden_states);
+                Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden_states);
 
                 // Compute batch loss
                 float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
@@ -1034,7 +1034,7 @@ int main(int argc, char* argv[]) {
                 
                 // Get model prediction
                 Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-                Matrix logits = transformer.get_lm_head()->forward(test_hidden);
+                Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
                 
                 // For single token prediction, we don't need beam search
                 // Just show the top predictions
@@ -1077,7 +1077,7 @@ int main(int argc, char* argv[]) {
         // Get model prediction
         transformer.set_training(false);  // Set to evaluation mode
         Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-        Matrix logits = transformer.get_lm_head()->forward(test_hidden);
+        Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
         
         // Show the top predictions
         std::cout << "\nTop Predictions:\n";

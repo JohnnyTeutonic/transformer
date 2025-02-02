@@ -433,29 +433,33 @@ struct BatchSequence {
     std::vector<size_t> lengths;  // Original sequence lengths
 };
 
-Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& input_text, const Tokenizer& tokenizer) {
+Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& input_query, const Tokenizer& tokenizer) {
+    std::cout << "\n=== Transformer Forward Pass START ===" << std::endl;
+    
     // Get embeddings
     Matrix embeddings = token_embedding->forward(input_tokens);
+    std::cout << "Embeddings shape: [" << embeddings.rows() << " x " << embeddings.cols() << "]" << std::endl;
     
     // Pass through transformer layers
     Matrix hidden_states = embeddings;
-    for (auto& layer : layers) {
-        hidden_states = layer->forward(hidden_states, AttentionMask());
+    for (size_t i = 0; i < layers.size(); i++) {
+        std::cout << "\nProcessing Layer " << i + 1 << "/" << layers.size() << std::endl;
+        hidden_states = layers[i]->forward(hidden_states, AttentionMask());
+        std::cout << "Layer " << i + 1 << " output shape: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
     }
     
     // Apply final layer norm if present
     if (final_ln) {
+        std::cout << "\nApplying final layer normalization" << std::endl;
         hidden_states = final_ln->forward(hidden_states);
+        std::cout << "Final normalized shape: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
     }
     
     // Cache final hidden states for backward pass
     GradientCheckpoint::cache_activation("final_hidden_states", hidden_states);
     
-    // Project hidden states to vocabulary space using LM head
-    Matrix logits = lm_head->forward(hidden_states);
-    
-    // Return logits
-    return logits;
+    std::cout << "=== Transformer Forward Pass END ===" << std::endl;
+    return hidden_states;  // This will be [batch_size x hidden_size]
 }
 
 void Transformer::clear_kv_cache() {
@@ -956,8 +960,11 @@ std::pair<std::string, PhraseType> Transformer::predict_final_phrase(
     // Tokenize input without delimiter
     std::vector<int> tokens = tokenizer.encode(input_text);
     
-    // Forward pass
-    Matrix logits = forward(tokens, input_text, tokenizer);
+    // Forward pass through transformer to get hidden states
+    Matrix hidden_states = forward(tokens, input_text, tokenizer);
+    
+    // Project to vocabulary space through language model head
+    Matrix logits = lm_head->project_to_vocab(hidden_states);
     
     // Extract the prediction based on the predicted type
     std::string predicted_phrase = extract_prediction(logits, predicted_type, tokenizer);
@@ -972,8 +979,11 @@ PhraseType Transformer::predict_phrase_type(
     // Tokenize input
     std::vector<int> tokens = tokenizer.encode(input_text);
     
-    // Forward pass
-    Matrix logits = forward(tokens, input_text, tokenizer);
+    // Forward pass through transformer to get hidden states
+    Matrix hidden_states = forward(tokens, input_text, tokenizer);
+    
+    // Project to vocabulary space through language model head
+    Matrix logits = lm_head->project_to_vocab(hidden_states);
     
     // Analyze logits to determine phrase type
     return analyze_phrase_type(logits, tokenizer);
