@@ -34,275 +34,87 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
     std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
 
-    // Compute gradients for projection matrix using cuBLAS
-    Matrix grad_proj(vocab_size_, hidden_size_);
+    // Initialize output gradient with correct dimensions [batch_size x hidden_size]
+    Matrix grad_proj(grad_output.rows(), hidden_size_);
     
     // Allocate device memory
-    float *d_hidden = nullptr, *d_grad_output = nullptr, *d_grad_proj = nullptr;
+    float *d_grad_output = nullptr, *d_grad_proj = nullptr, *d_projection = nullptr;
     
 #ifdef USE_CUDA
     // Helper lambda for cleanup
     auto cleanup = [&]() {
-        if (d_hidden) {
-            std::cout << "Freeing d_hidden..." << std::endl << std::flush;
-            cudaFree(d_hidden);
-        }
-        if (d_grad_output) {
-            std::cout << "Freeing d_grad_output..." << std::endl << std::flush;
-            cudaFree(d_grad_output);
-        }
-        if (d_grad_proj) {
-            std::cout << "Freeing d_grad_proj..." << std::endl << std::flush;
-            cudaFree(d_grad_proj);
-        }
-        d_hidden = nullptr;
-        d_grad_output = nullptr;
-        d_grad_proj = nullptr;
+        if (d_grad_output) cudaFree(d_grad_output);
+        if (d_grad_proj) cudaFree(d_grad_proj);
+        if (d_projection) cudaFree(d_projection);
     };
-#else
-    // No-op cleanup for non-CUDA builds
-    auto cleanup = []() {};
-#endif
     
     try {
-        // Calculate aligned dimensions and print them
-        std::cout << "Original dimensions:" << std::endl
-                  << "grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl
-                  << "hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl
-                  << "grad_proj: [" << grad_proj.rows() << " x " << grad_proj.cols() << "]" << std::endl << std::flush;
-
-        int lda = ((grad_output.cols() + 15) / 16) * 16;  // Align to 16-float boundary
-        int ldb = ((hidden_states.cols() + 15) / 16) * 16;
-        int ldc = ((vocab_size_ + 15) / 16) * 16;
+        // Calculate memory sizes with proper alignment
+        size_t grad_output_size = grad_output.rows() * grad_output.cols() * sizeof(float);
+        size_t projection_size = projection.rows() * projection.cols() * sizeof(float);
+        size_t grad_proj_size = grad_proj.rows() * grad_proj.cols() * sizeof(float);
         
-        std::cout << "Aligned dimensions:" << std::endl
-                  << "lda (grad_output stride): " << lda << std::endl
-                  << "ldb (hidden_states stride): " << ldb << std::endl
-                  << "ldc (grad_proj stride): " << ldc << std::endl << std::flush;
+        // Allocate device memory
+        cudaMalloc(&d_grad_output, grad_output_size);
+        cudaMalloc(&d_projection, projection_size);
+        cudaMalloc(&d_grad_proj, grad_proj_size);
         
-        // Calculate memory sizes
-        size_t hidden_size = hidden_states.rows() * ldb * sizeof(float);
-        size_t grad_output_size = grad_output.rows() * lda * sizeof(float);
-        size_t grad_proj_size = grad_proj.rows() * ldc * sizeof(float);
-        
-        std::cout << "Memory sizes:" << std::endl
-                  << "hidden_size: " << hidden_size << " bytes" << std::endl
-                  << "grad_output_size: " << grad_output_size << " bytes" << std::endl
-                  << "grad_proj_size: " << grad_proj_size << " bytes" << std::endl << std::flush;
-        
-#ifdef USE_CUDA
-        // Print initial GPU memory state
-        size_t free_mem_before, total_mem_before;
-        cudaMemGetInfo(&free_mem_before, &total_mem_before);
-        std::cout << "GPU Memory before allocations: Free=" << (free_mem_before/1024/1024) 
-                  << "MB, Total=" << (total_mem_before/1024/1024) << "MB" << std::endl << std::flush;
-        
-        // Allocate and check each allocation individually with detailed error reporting
-        std::cout << "Allocating d_hidden (" << hidden_size << " bytes)..." << std::endl << std::flush;
-        cudaError_t err = cudaMalloc(&d_hidden, hidden_size);
-        if (err != cudaSuccess) {
-            std::cout << "Failed to allocate d_hidden: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("Failed to allocate d_hidden");
-        }
-        
-        // Check memory after d_hidden allocation
-        size_t free_after_hidden, total_after_hidden;
-        cudaMemGetInfo(&free_after_hidden, &total_after_hidden);
-        std::cout << "Memory after d_hidden allocation: Free=" << (free_after_hidden/1024/1024) 
-                  << "MB, Total=" << (total_after_hidden/1024/1024) << "MB" << std::endl << std::flush;
-        
-        std::cout << "Allocating d_grad_output (" << grad_output_size << " bytes)..." << std::endl << std::flush;
-        err = cudaMalloc(&d_grad_output, grad_output_size);
-        if (err != cudaSuccess) {
-            std::cout << "Failed to allocate d_grad_output: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("Failed to allocate d_grad_output");
-        }
-        
-        // Check memory after d_grad_output allocation
-        size_t free_after_grad_output, total_after_grad_output;
-        cudaMemGetInfo(&free_after_grad_output, &total_after_grad_output);
-        std::cout << "Memory after d_grad_output allocation: Free=" << (free_after_grad_output/1024/1024) 
-                  << "MB, Total=" << (total_after_grad_output/1024/1024) << "MB" << std::endl << std::flush;
-        
-        std::cout << "Allocating d_grad_proj (" << grad_proj_size << " bytes)..." << std::endl << std::flush;
-        err = cudaMalloc(&d_grad_proj, grad_proj_size);
-        if (err != cudaSuccess) {
-            std::cout << "Failed to allocate d_grad_proj: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("Failed to allocate d_grad_proj");
-        }
-        
-        // Check memory after all allocations
-        size_t free_mem_after_alloc, total_mem_after_alloc;
-        cudaMemGetInfo(&free_mem_after_alloc, &total_mem_after_alloc);
-        std::cout << "GPU Memory after all allocations: Free=" << (free_mem_after_alloc/1024/1024) 
-                  << "MB, Total=" << (total_mem_after_alloc/1024/1024) << "MB" << std::endl << std::flush;
-        
-        // Copy data to device with detailed error checking
-        std::cout << "Copying hidden_states to device (size: " << hidden_size << " bytes)..." << std::endl << std::flush;
-        err = cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
-        if (err != cudaSuccess) {
-            std::cout << "Failed to copy hidden_states: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("Failed to copy hidden states to device");
-        }
-        
-        std::cout << "Copying grad_output to device (size: " << grad_output_size << " bytes)..." << std::endl << std::flush;
-        err = cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
-        if (err != cudaSuccess) {
-            std::cout << "Failed to copy grad_output: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("Failed to copy grad_output to device");
-        }
+        // Copy data to device
+        cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_projection, projection.data(), projection_size, cudaMemcpyHostToDevice);
         
         float alpha = 1.0f;
         float beta = 0.0f;
         
         // Ensure we have a valid cuBLAS handle
-        std::cout << "Creating/checking cuBLAS handle..." << std::endl << std::flush;
         if (!cublas_handle) {
-            cublasStatus_t create_status = cublasCreate(&cublas_handle);
-            if (create_status != CUBLAS_STATUS_SUCCESS) {
-                std::cout << "Failed to create cuBLAS handle. Status: " << create_status << std::endl << std::flush;
-                cleanup();
-                throw std::runtime_error("Failed to create cuBLAS handle");
-            }
+            cublasCreate(&cublas_handle);
         }
         
-        // Print memory usage and matrix dimensions before cuBLAS
-        size_t free_mem, total_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        std::cout << "Memory before cuBLAS:" << std::endl
-                  << "Free=" << (free_mem/1024/1024) << "MB" << std::endl
-                  << "Total=" << (total_mem/1024/1024) << "MB" << std::endl
-                  << "Matrix dimensions for cuBLAS:" << std::endl
-                  << "M (vocab_size_): " << vocab_size_ << std::endl
-                  << "N (hidden_size_): " << hidden_size_ << std::endl
-                  << "K (grad_output.rows()): " << grad_output.rows() << std::endl
-                  << "lda (grad_output stride): " << lda << std::endl
-                  << "ldb (hidden_states stride): " << ldb << std::endl
-                  << "ldc (grad_proj stride): " << ldc << std::endl << std::flush;
+        // For cuBLAS SGEMM: C = α * op(A) * op(B) + β * C
+        // We want: grad_proj = grad_output * projection
+        // grad_output: [batch_size x vocab_size]
+        // projection: [vocab_size x hidden_size]
+        // grad_proj: [batch_size x hidden_size]
         
-        std::cout << "Starting cuBLAS matrix multiplication..." << std::endl << std::flush;
-        // Compute grad_proj = grad_output.T @ hidden_states
         cublasStatus_t status = cublasSgemm(cublas_handle,
-                    CUBLAS_OP_T, CUBLAS_OP_N,
-                    vocab_size_, hidden_size_, grad_output.rows(),
+                    CUBLAS_OP_N, CUBLAS_OP_N,     // No transpositions needed
+                    hidden_size_,                  // M: number of rows of projection (hidden_size)
+                    grad_output.rows(),            // N: number of rows of grad_output (batch_size)
+                    vocab_size_,                   // K: number of columns of grad_output (vocab_size)
                     &alpha,
-                    d_grad_output, lda,
-                    d_hidden, ldb,
+                    projection.data(),             // A: projection matrix [vocab_size x hidden_size]
+                    hidden_size_,                  // lda: leading dimension of projection
+                    grad_output.data(),            // B: grad_output [batch_size x vocab_size]
+                    vocab_size_,                   // ldb: leading dimension of grad_output
                     &beta,
-                    d_grad_proj, ldc);
+                    grad_proj.data(),             // C: output matrix [batch_size x hidden_size]
+                    hidden_size_);                 // ldc: leading dimension of grad_proj
         
-        std::cout << "cuBLAS status: " << status << std::endl << std::flush;
         if (status != CUBLAS_STATUS_SUCCESS) {
-            std::cout << "cuBLAS error details:" << std::endl
-                      << "- Status code: " << status << std::endl
-                      << "- Operation: CUBLAS_OP_T, CUBLAS_OP_N" << std::endl
-                      << "- Dimensions: " << vocab_size_ << " x " << hidden_size_ << " x " << grad_output.rows() << std::endl
-                      << "- Alpha: " << alpha << ", Beta: " << beta << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("cuBLAS operation failed");
+            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
         }
         
-        // Check for any CUDA errors before synchronization
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            std::cout << "CUDA error after cuBLAS: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("CUDA error in cuBLAS operation");
-        }
+        // Copy result back to host
+        cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
         
-        std::cout << "Synchronizing device..." << std::endl << std::flush;
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            std::cout << "cudaDeviceSynchronize failed: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("cudaDeviceSynchronize failed");
-        }
-        
-        // Print memory state after cuBLAS
-        cudaMemGetInfo(&free_mem, &total_mem);
-        std::cout << "Memory after cuBLAS:" << std::endl
-                  << "Free=" << (free_mem/1024/1024) << "MB" << std::endl
-                  << "Total=" << (total_mem/1024/1024) << "MB" << std::endl << std::flush;
-        
-        std::cout << "Copying result back to host..." << std::endl << std::flush;
-        
-        // Allocate temporary host memory with proper alignment
-        float* aligned_host_mem = nullptr;
-        size_t aligned_pitch = ldc * sizeof(float);  // Use the same stride as device memory
-        size_t aligned_size = vocab_size_ * aligned_pitch;
-        
-        std::cout << "Allocating aligned host memory:" << std::endl
-                  << "- Pitch: " << aligned_pitch << " bytes" << std::endl
-                  << "- Total size: " << aligned_size << " bytes" << std::endl << std::flush;
-        
-        aligned_host_mem = static_cast<float*>(malloc(aligned_size));
-        if (!aligned_host_mem) {
-            std::cout << "Failed to allocate aligned host memory" << std::endl << std::flush;
-            cleanup();
-            throw std::runtime_error("Failed to allocate aligned host memory");
-        }
-        
-        // Copy from device to aligned host memory
-        err = cudaMemcpy2D(aligned_host_mem,                    // dst
-                          aligned_pitch,                        // dpitch
-                          d_grad_proj,                         // src
-                          ldc * sizeof(float),                 // spitch
-                          hidden_size_ * sizeof(float),        // width
-                          vocab_size_,                         // height
-                          cudaMemcpyDeviceToHost);
-        
-        if (err != cudaSuccess) {
-            std::cout << "Failed to copy grad_proj back to aligned host memory: " << cudaGetErrorString(err) 
-                      << " (Error code: " << err << ")" << std::endl
-                      << "- Source pitch: " << (ldc * sizeof(float)) << std::endl
-                      << "- Dest pitch: " << aligned_pitch << std::endl
-                      << "- Width: " << (hidden_size_ * sizeof(float)) << std::endl
-                      << "- Height: " << vocab_size_ << std::endl << std::flush;
-            free(aligned_host_mem);
-            cleanup();
-            throw std::runtime_error("Failed to copy grad_proj back to host");
-        }
-        
-        // Copy from aligned memory to grad_proj, removing padding
-        for (size_t i = 0; i < vocab_size_; ++i) {
-            std::memcpy(grad_proj.data() + i * hidden_size_,
-                       aligned_host_mem + i * (ldc),
-                       hidden_size_ * sizeof(float));
-        }
-        
-        // Free aligned memory
-        free(aligned_host_mem);
-        
-        // Free memory
-        std::cout << "Cleaning up CUDA memory..." << std::endl << std::flush;
+        // Cleanup
         cleanup();
         
-        // Print final memory state
-        cudaMemGetInfo(&free_mem, &total_mem);
-        std::cout << "Final GPU memory state:" << std::endl
-                  << "Free=" << (free_mem/1024/1024) << "MB" << std::endl
-                  << "Total=" << (total_mem/1024/1024) << "MB" << std::endl << std::flush;
+        std::cout << "Gradient projection complete. Output dimensions: ["
+                  << grad_proj.rows() << " x " << grad_proj.cols() << "]" << std::endl;
         
-        // Return the computed gradients
         return grad_proj;
+        
 #else
         throw std::runtime_error("CUDA support not enabled");
 #endif
+        
     } catch (const std::exception& e) {
-        std::cout << "Exception caught in backward_pass: " << e.what() << std::endl << std::flush;
+        std::cout << "Exception in backward_pass: " << e.what() << std::endl;
+#ifdef USE_CUDA
         cleanup();
+#endif
         throw;
     }
 }
