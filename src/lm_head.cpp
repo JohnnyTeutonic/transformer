@@ -1,6 +1,7 @@
 #include "../include/lm_head.hpp"
 #include "../include/token_constants.hpp"
 #include "../include/cuda/matrix_ops.cuh"
+#include "../include/cuda/matrix_multiply.cuh"
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -29,52 +30,43 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
         throw std::runtime_error("Hidden states dimension mismatch in backward pass");
     }
 
-    std::cout << "\nLM Head Backward Pass Dimensions:" << std::endl;
-    std::cout << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl;
-    std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
-    std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
-
+    std::cout << "\nLM Head Backward Pass Dimensions:" << std::endl
+              << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl
+              << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl
+              << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
+    
     // Initialize output gradient with correct dimensions [batch_size x hidden_size]
     Matrix grad_proj(grad_output.rows(), hidden_size_);
     
-    // Allocate device memory
-    float *d_grad_output = nullptr, *d_grad_proj = nullptr, *d_projection = nullptr;
-    
 #ifdef USE_CUDA
-    // Helper lambda for cleanup
+    // First declare device pointers
+    float *d_grad_output = nullptr, *d_projection = nullptr, *d_grad_proj = nullptr;
+
+    // Then define cleanup lambda using the now-declared pointers
     auto cleanup = [&]() {
-        if (d_grad_output) {
-            cudaFree(d_grad_output);
-            d_grad_output = nullptr;
-        }
-        if (d_grad_proj) {
-            cudaFree(d_grad_proj);
-            d_grad_proj = nullptr;
-        }
-        if (d_projection) {
-            cudaFree(d_projection);
-            d_projection = nullptr;
-        }
-        // Synchronize to ensure all memory is freed
+        if (d_grad_output) cudaFree(d_grad_output);
+        if (d_projection) cudaFree(d_projection);
+        if (d_grad_proj) cudaFree(d_grad_proj);
         cudaDeviceSynchronize();
     };
     
     try {
-        // Print initial GPU memory state
-        size_t free_mem, total_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        std::cout << "GPU memory before allocation: Free=" << (free_mem/1024/1024) 
-                  << "MB, Total=" << (total_mem/1024/1024) << "MB" << std::endl;
-        
-        // Calculate memory sizes with proper alignment
+        // Calculate memory sizes
         size_t grad_output_size = grad_output.rows() * grad_output.cols() * sizeof(float);
         size_t projection_size = projection.rows() * projection.cols() * sizeof(float);
         size_t grad_proj_size = grad_proj.rows() * grad_proj.cols() * sizeof(float);
         
-        // Check if we have enough memory
-        if (grad_output_size + projection_size + grad_proj_size > free_mem) {
-            throw std::runtime_error("Not enough GPU memory for allocation");
-        }
+        // Print memory requirements
+        std::cout << "\nMemory requirements:" << std::endl
+                  << "- grad_output: " << grad_output_size << " bytes" << std::endl
+                  << "- projection: " << projection_size << " bytes" << std::endl
+                  << "- grad_proj: " << grad_proj_size << " bytes" << std::endl;
+        
+        // Check GPU memory
+        size_t free_mem, total_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cout << "GPU memory before allocation: Free=" << (free_mem/1024/1024) 
+                  << "MB, Total=" << (total_mem/1024/1024) << "MB" << std::endl;
         
         // Allocate device memory
         cudaError_t err = cudaMalloc(&d_grad_output, grad_output_size);
@@ -95,64 +87,59 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
         }
         
         // Copy data to device
-        cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_projection, projection.data(), projection_size, cudaMemcpyHostToDevice);
-        
-        float alpha = 1.0f;
-        float beta = 0.0f;
-        
-        // Ensure we have a valid cuBLAS handle
-        if (!cublas_handle) {
-            cublasCreate(&cublas_handle);
-        }
-        
-        // For cuBLAS SGEMM: C = α * op(A) * op(B) + β * C
-        cublasStatus_t status = cublasSgemm(cublas_handle,
-                    CUBLAS_OP_N, CUBLAS_OP_N,     // No transpositions needed
-                    hidden_size_,                  // M: number of rows of projection (hidden_size)
-                    grad_output.rows(),            // N: number of rows of grad_output (batch_size)
-                    vocab_size_,                   // K: number of columns of grad_output (vocab_size)
-                    &alpha,
-                    projection.data(),             // A: projection matrix [vocab_size x hidden_size]
-                    hidden_size_,                  // lda: leading dimension of projection
-                    grad_output.data(),            // B: grad_output [batch_size x vocab_size]
-                    vocab_size_,                   // ldb: leading dimension of grad_output
-                    &beta,
-                    grad_proj.data(),             // C: output matrix [batch_size x hidden_size]
-                    hidden_size_);                 // ldc: leading dimension of grad_proj
-        
-        if (status != CUBLAS_STATUS_SUCCESS) {
+        err = cudaMemcpy(d_grad_output, grad_output.data(), grad_output_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
             cleanup();
-            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+            throw std::runtime_error("Failed to copy grad_output to device");
         }
         
-        // Synchronize before copy
-        cudaDeviceSynchronize();
+        err = cudaMemcpy(d_projection, projection.data(), projection_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to copy projection to device");
+        }
+        
+        // Launch our custom matrix multiplication kernel
+        err = launch_matrix_multiply(
+            d_projection,
+            d_grad_output,
+            d_grad_proj,
+            grad_output.rows(),  // batch_size
+            vocab_size_,         // vocab_size
+            hidden_size_,        // hidden_size
+            nullptr             // use default stream
+        );
+
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("CUDA matrix multiplication failed: " + std::string(cudaGetErrorString(err)));
+        }
+
+        // Synchronize to ensure computation is complete
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("CUDA synchronization failed: " + std::string(cudaGetErrorString(err)));
+        }
         
         // Copy result back to host
-        cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
+        err = cudaMemcpy(grad_proj.data(), d_grad_proj, grad_proj_size, cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            cleanup();
+            throw std::runtime_error("Failed to copy result back to host");
+        }
         
-        // Cleanup and synchronize
         cleanup();
-        
-        // Check final memory state
-        cudaMemGetInfo(&free_mem, &total_mem);
-        std::cout << "GPU memory after cleanup: Free=" << (free_mem/1024/1024) 
-                  << "MB, Total=" << (total_mem/1024/1024) << "MB" << std::endl;
-        
         return grad_proj;
-        
-#else
-        throw std::runtime_error("CUDA support not enabled");
-#endif
         
     } catch (const std::exception& e) {
         std::cout << "Exception in backward_pass: " << e.what() << std::endl;
-#ifdef USE_CUDA
         cleanup();
-#endif
         throw;
     }
+#else
+    throw std::runtime_error("CUDA support not enabled");
+#endif
 }
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
@@ -229,92 +216,144 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
     std::cout << "Starting CUDA operations..." << std::endl << std::flush;
     
     try {
-        size_t hidden_size = hidden_states.rows() * hidden_states.cols() * sizeof(float);
-        size_t proj_size = projection.rows() * projection.cols() * sizeof(float);
-        size_t logits_size = logits.rows() * logits.cols() * sizeof(float);
-        std::cout << "Calculated sizes:" << std::endl
-                  << "- hidden_size: " << hidden_size << " bytes" << std::endl
-                  << "- proj_size: " << proj_size << " bytes" << std::endl
-                  << "- logits_size: " << logits_size << " bytes" << std::endl << std::flush;
+        size_t batch_size = hidden_states.rows();
         
+        // Print the actual sizes we're working with
+        std::cout << "Matrix dimensions:" << std::endl
+                  << "hidden_states: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl
+                  << "projection: " << projection.rows() << "x" << projection.cols() << std::endl
+                  << "logits: " << logits.rows() << "x" << logits.cols() << std::endl;
+
+        // Calculate memory sizes with proper casting
+        size_t hidden_size = static_cast<size_t>(hidden_states.rows()) * 
+                            static_cast<size_t>(hidden_states.cols()) * 
+                            sizeof(float);
+        
+        size_t proj_size = static_cast<size_t>(projection.rows()) * 
+                          static_cast<size_t>(projection.cols()) * 
+                          sizeof(float);
+        
+        size_t logits_size = static_cast<size_t>(logits.rows()) * 
+                            static_cast<size_t>(logits.cols()) * 
+                            sizeof(float);
+
+        // Print allocated sizes
+        std::cout << "Allocation sizes:" << std::endl
+                  << "hidden_size: " << hidden_size << " bytes" << std::endl
+                  << "proj_size: " << proj_size << " bytes" << std::endl
+                  << "logits_size: " << logits_size << " bytes" << std::endl;
+
+        // Check if we have enough GPU memory
+        size_t free_mem, total_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cout << "GPU memory available: " << free_mem << " bytes" << std::endl;
+
+        if (hidden_size + proj_size + logits_size > free_mem) {
+            throw std::runtime_error("Not enough GPU memory for allocation");
+        }
+
+        // Remove duplicate declarations
         std::cout << "Allocating d_hidden..." << std::endl << std::flush;
-        cudaMalloc(&d_hidden, hidden_size);
-        if (!d_hidden) {
-            throw std::runtime_error("Failed to allocate d_hidden");
+        cudaError_t err = cudaMalloc(&d_hidden, hidden_size);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to allocate d_hidden: " + std::string(cudaGetErrorString(err)));
         }
         
         std::cout << "Allocating d_proj..." << std::endl << std::flush;
-        cudaMalloc(&d_proj, proj_size);
-        if (!d_proj) {
-            throw std::runtime_error("Failed to allocate d_proj");
+        err = cudaMalloc(&d_proj, proj_size);
+        if (err != cudaSuccess) {
+            cudaFree(d_hidden);  // Clean up previous allocation
+            throw std::runtime_error("Failed to allocate d_proj: " + std::string(cudaGetErrorString(err)));
         }
         
         std::cout << "Allocating d_logits..." << std::endl << std::flush;
-        cudaMalloc(&d_logits, logits_size);
-        if (!d_logits) {
-            throw std::runtime_error("Failed to allocate d_logits");
+        err = cudaMalloc(&d_logits, logits_size);
+        if (err != cudaSuccess) {
+            cudaFree(d_hidden);  // Clean up previous allocations
+            cudaFree(d_proj);
+            throw std::runtime_error("Failed to allocate d_logits: " + std::string(cudaGetErrorString(err)));
         }
+
+        // Ensure cuBLAS handle is created before use
+        if (!cublas_handle) {
+            cublasStatus_t status = cublasCreate(&cublas_handle);
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("Failed to create cuBLAS handle");
+            }
+        }
+
+        // Copy data to device (no transpose needed yet)
+        err = cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to copy hidden states to device");
+        }
+
+        err = cudaMemcpy(d_proj, projection.data(), proj_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to copy projection to device");
+        }
+
+        std::cout << "\n=== Starting cuBLAS Matrix Multiplication ===" << std::endl;
         
-        std::cout << "Copying hidden states to device..." << std::endl << std::flush;
-        cudaMemcpy(d_hidden, hidden_states.data(), hidden_size, cudaMemcpyHostToDevice);
-        
-        std::cout << "Copying projection matrix to device..." << std::endl << std::flush;
-        cudaMemcpy(d_proj, projection.data(), proj_size, cudaMemcpyHostToDevice);
-        
+        std::cout << "Setting alpha and beta..." << std::endl;
         float alpha = 1.0f;
         float beta = 0.0f;
+        std::cout << "Set alpha=" << alpha << " and beta=" << beta << std::endl;
+
+        std::cout << "Calculating leading dimensions..." << std::endl;
+        int lda = batch_size;      // Leading dimension of A is now rows of transposed matrix
+        std::cout << "Set lda=" << lda << std::endl;
         
-        std::cout << "Creating cuBLAS handle..." << std::endl << std::flush;
+        int ldb = hidden_size_;    // Leading dimension of B is now rows of transposed matrix
+        std::cout << "Set ldb=" << ldb << std::endl;
+        
+        int ldc = batch_size;      // Leading dimension of C remains the same
+        std::cout << "Set ldc=" << ldc << std::endl;
+        
+        std::cout << "Verifying cuBLAS handle before operation..." << std::endl;
         if (!cublas_handle) {
-            cublasCreate(&cublas_handle);
+            std::cout << "cuBLAS handle is null!" << std::endl;
+            throw std::runtime_error("cuBLAS handle is null before matrix multiplication");
         }
-        
-        // Print memory usage and matrix dimensions before cuBLAS
-        size_t free_mem, total_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        std::cout << "Memory before cuBLAS:" << std::endl
-                  << "- Free: " << (free_mem/1024/1024) << "MB" << std::endl
-                  << "- Total: " << (total_mem/1024/1024) << "MB" << std::endl
-                  << "Matrix dimensions for cuBLAS:" << std::endl
-                  << "- M (rows of output): " << hidden_states.rows() << std::endl
-                  << "- N (cols of output): " << vocab_size_ << std::endl
-                  << "- K (inner dimension): " << hidden_size_ << std::endl
-                  << "- lda (leading dim of d_hidden): " << hidden_states.cols() << std::endl
-                  << "- ldb (leading dim of d_proj): " << vocab_size_ << std::endl
-                  << "- ldc (leading dim of d_logits): " << hidden_states.rows() << std::endl << std::flush;
-        
-        std::cout << "Performing cuBLAS matrix multiplication..." << std::endl << std::flush;
-        // Operation: C = alpha * op(A) * op(B) + beta * C
-        // We want: logits = hidden_states @ projection.T
-        // A = hidden_states [5 x 128], B = projection [2857 x 128]
-        // op(A) = A [5 x 128], op(B) = B.T [128 x 2857]
-        // Result = [5 x 2857]
-        
-        // For leading dimensions:
-        // lda ≥ max(1, M) for non-transposed A
-        // ldb ≥ max(1, N) for transposed B
-        // ldc ≥ max(1, M) for output C
-        int lda = std::max(1, static_cast<int>(hidden_states.rows()));  // ≥ 5
-        int ldb = std::max(1, static_cast<int>(projection.rows()));     // ≥ 2857
-        int ldc = std::max(1, static_cast<int>(hidden_states.rows()));  // ≥ 5
-        
+        std::cout << "cuBLAS handle verified" << std::endl;
+
+        std::cout << "Verifying device pointers..." << std::endl;
+        if (!d_hidden || !d_proj || !d_logits) {
+            std::cout << "Device pointers: d_hidden=" << d_hidden << ", d_proj=" << d_proj << ", d_logits=" << d_logits << std::endl;
+            throw std::runtime_error("One or more device pointers are null");
+        }
+        std::cout << "All device pointers verified" << std::endl;
+
+        std::cout << "Starting cublasSgemm call..." << std::endl;
         cublasStatus_t status = cublasSgemm(cublas_handle,
-                    CUBLAS_OP_N, CUBLAS_OP_T,     // A not transposed, B transposed
-                    hidden_states.rows(),          // M = 5 (rows of output)
-                    projection.rows(),             // N = 2857 (cols of output)
-                    hidden_states.cols(),          // K = 128 (inner dimension)
+                    CUBLAS_OP_T, CUBLAS_OP_N,     // Now we transpose A and don't transpose B
+                    batch_size,                    // M: rows of output
+                    vocab_size_,                   // N: cols of output  
+                    hidden_size_,                  // K: inner dimension
                     &alpha,
-                    d_hidden, lda,                 // Leading dim of A ≥ 5
-                    d_proj, ldb,                  // Leading dim of B ≥ 2857
+                    d_hidden, lda,                 // Input matrix (transposed)
+                    d_proj, ldb,                   // Projection matrix (transposed)
                     &beta,
-                    d_logits, ldc);              // Leading dim of C ≥ 5
-        
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            std::cout << "cuBLAS error status: " << status << std::endl << std::flush;
-            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+                    d_logits, ldc);               // Output matrix
+        std::cout << "cublasSgemm call completed with status: " << status << std::endl;
+
+        std::cout << "Checking for CUDA errors..." << std::endl;
+        cudaError_t cuda_status = cudaGetLastError();
+        if (cuda_status != cudaSuccess) {
+            std::cout << "CUDA error detected: " << cudaGetErrorString(cuda_status) << std::endl;
+        } else {
+            std::cout << "No CUDA errors detected" << std::endl;
         }
-        
-        std::cout << "Copying result back to host..." << std::endl << std::flush;
+
+        std::cout << "Synchronizing CUDA device..." << std::endl;
+        cuda_status = cudaDeviceSynchronize();
+        if (cuda_status != cudaSuccess) {
+            std::cout << "CUDA synchronization failed: " << cudaGetErrorString(cuda_status) << std::endl;
+        } else {
+            std::cout << "CUDA synchronization successful" << std::endl;
+        }
+
+        // Copy result back to host
         cudaMemcpy(logits.data(), d_logits, logits_size, cudaMemcpyDeviceToHost);
         
         std::cout << "Freeing CUDA memory..." << std::endl << std::flush;
