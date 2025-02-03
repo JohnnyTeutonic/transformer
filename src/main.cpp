@@ -10,6 +10,10 @@
 #include "../include/count_vocabulary.hpp"
 #include "../include/cuda/matrix_ops.cuh"
 #include <iostream>
+#include <vector>
+#include <string>
+#include "../include/transformer.hpp"
+#include "../include/evaluation_metrics.hpp"
 
 // Add necessary forward declarations and structures
 std::unique_ptr<Tokenizer> tokenizer;
@@ -918,7 +922,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Backward pass and parameter update
-                transformer.backward(loss_gradients, flattened_batch, current_lr);
+                transformer.backward(loss_gradients, flattened_batch, current_lr, target_distribution);
                 transformer.update_parameters(current_lr);
 
                 // Print training statistics

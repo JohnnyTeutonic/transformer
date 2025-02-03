@@ -410,9 +410,9 @@ void Transformer::clear_kv_cache() {
 
 // Original backward method implementation
 void Transformer::backward(const Matrix& grad_output, 
-                          const std::vector<int>& input_tokens, 
-                          float learning_rate,
-                          const Matrix& target_distribution) {
+                         const std::vector<int>& input_tokens, 
+                         float learning_rate,
+                         const Matrix& target_distribution) {
     // Get dimensions for debugging
     const size_t batch_size = input_tokens.size();
     const size_t seq_length = grad_output.rows() / batch_size;
@@ -430,10 +430,11 @@ void Transformer::backward(const Matrix& grad_output,
     }
 
     // Backward through layers
+    Matrix layer_input;
     for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
         std::cout << "Backward through layer " << i << std::endl;
-        Matrix layer_grad = backward(reshaped_grad, layers[i]->get_input(), target_distribution);
-        reshaped_grad = layer_grad;
+        layer_input = layers[i]->get_input();
+        reshaped_grad = layers[i]->backward(reshaped_grad, layer_input, target_distribution);
     }
 
     // Update parameters

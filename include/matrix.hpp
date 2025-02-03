@@ -257,6 +257,12 @@ class Matrix {
     void fill(float value);
     void fill(const Matrix& m, float value);
 
+    // Iterator support
+    float* begin() { return data_.data(); }
+    const float* begin() const { return data_.data(); }
+    float* end() { return data_.data() + data_.size(); }
+    const float* end() const { return data_.data() + data_.size(); }
+
     // Add element-wise multiplication (Hadamard product)
     Matrix hadamard(const Matrix& other) const {
         if (rows() != other.rows() || cols() != other.cols()) {

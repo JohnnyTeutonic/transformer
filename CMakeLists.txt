@@ -95,6 +95,7 @@ set(CORE_SOURCES
     src/gradient_checkpoint.cpp
     src/utils.cpp
     src/performance_metrics.cpp
+    src/evaluation_metrics.cpp
     src/gqa.cpp
     src/beam_search.cpp
     src/config.cpp
