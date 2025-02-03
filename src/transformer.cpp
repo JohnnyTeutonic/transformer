@@ -2,6 +2,7 @@
 #ifdef USE_CUDA
 #include "../include/cuda/cublas_check.cuh"
 #include "../include/cuda/cuda_check.cuh"
+#include "../include/cuda/parameter_update_kernels.cuh"
 #include <cublas_v2.h>
 #endif
 #include "../include/logger.hpp"
@@ -308,91 +309,30 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
     return ffn_ln->forward(residual);
 }
 
-Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input,
-                                  const Matrix& target_distribution) {
-    std::cout << "=== TransformerLayer::backward START ===" << std::endl;
-    std::cout << "Grad output dimensions: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-    std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
+Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input, const Matrix& target_distribution) {
+    // Get dimensions for debugging
+    const size_t batch_size = input.rows();
+    const size_t seq_length = input.cols() / config.hidden_size;
+    const size_t hidden_size = config.hidden_size;
+    
+    std::cout << "Layer backward dimensions:"
+              << "\n- Batch size: " << batch_size
+              << "\n- Sequence length: " << seq_length
+              << "\n- Hidden size: " << hidden_size << std::endl;
 
-    try {
-        // Ensure dimensions match input
-        if (grad_output.cols() != input.cols()) {
-            throw std::runtime_error("Gradient output columns (" + std::to_string(grad_output.cols()) + 
-                                   ") must match input columns (" + std::to_string(input.cols()) + ")");
-        }
-
-        // Get the cached normalized input for feed forward
-        std::string ffn_key = "ffn_norm_" + std::to_string(layer_idx);
-        Matrix ffn_normalized = GradientCheckpoint::get_activation(ffn_key);
-        std::cout << "Cached normalized input for feed forward: " << ffn_normalized.rows() << "x"
-                  << ffn_normalized.cols() << std::endl;
-
-        // Backward through feed forward network with dimension validation
-        Matrix ff_dropout_grad = training ? ffn_dropout->backward(grad_output) : grad_output;
-        if (ff_dropout_grad.cols() != input.cols()) {
-            throw std::runtime_error("FFN dropout gradient columns must match input columns");
-        }
-
-        Matrix ffn_grad = feed_forward->backward(ff_dropout_grad, ffn_normalized);
-        if (ffn_grad.cols() != input.cols()) {
-            throw std::runtime_error("FFN gradient columns must match input columns");
-        }
-
-        // Backward through feed forward layer norm
-        Matrix ffn_ln_grad = ffn_ln->backward(ffn_grad, input);
-        if (ffn_ln_grad.cols() != input.cols()) {
-            throw std::runtime_error("FFN layer norm gradient columns must match input columns");
-        }
-
-        // First residual connection - proper gradient flow
-        Matrix residual_grad = ffn_ln_grad + grad_output;  // Add both gradient paths
-        std::cout << "Residual grad dimensions after first connection: " << residual_grad.rows()
-                  << "x" << residual_grad.cols() << std::endl;
-
-        // Get the cached normalized input for attention
-        std::string attn_key = "attn_norm_" + std::to_string(layer_idx);
-        Matrix attn_normalized = GradientCheckpoint::get_activation(attn_key);
-        std::cout << "Cached normalized input for attention: " << attn_normalized.rows() << "x"
-                  << attn_normalized.cols() << std::endl;
-
-        // Backward through self attention with dimension validation
-        Matrix attn_dropout_grad = training ? attention_dropout->backward(residual_grad) : residual_grad;
-        if (attn_dropout_grad.cols() != input.cols()) {
-            throw std::runtime_error("Attention dropout gradient columns must match input columns");
-        }
-
-        // Project attention gradients to correct dimension before addition
-        Matrix attention_grad = self_attention->backward(attn_dropout_grad, attn_normalized, target_distribution);
-        if (attention_grad.cols() != input.cols()) {
-            throw std::runtime_error("Attention gradient columns must match input columns");
-        }
-
-        // Ensure attention gradients have correct dimensions
-        if (attention_grad.rows() != residual_grad.rows() || attention_grad.cols() != residual_grad.cols()) {
-            throw std::runtime_error("Attention gradient dimensions (" + 
-                std::to_string(attention_grad.rows()) + "x" + std::to_string(attention_grad.cols()) + 
-                ") must match residual gradient dimensions (" +
-                std::to_string(residual_grad.rows()) + "x" + std::to_string(residual_grad.cols()) + ")");
-        }
-
-        // Backward through attention layer norm
-        Matrix attention_ln_grad = attention_ln->backward(attention_grad, input);
-        if (attention_ln_grad.cols() != input.cols()) {
-            throw std::runtime_error("Attention layer norm gradient columns must match input columns");
-        }
-
-        // Second residual connection - proper gradient flow
-        Matrix final_grad = attention_ln_grad + residual_grad;  // Add both gradient paths
-        std::cout << "Final grad dimensions: " << final_grad.rows() << "x"
-                  << final_grad.cols() << std::endl;
-
-        std::cout << "=== TransformerLayer::backward END ===" << std::endl;
-        return final_grad;
-
-    } catch (const std::exception& e) {
-        std::cerr << "Error in TransformerLayer::backward: " << e.what() << std::endl;
-        throw;
+    // Reshape grad_output if needed
+    Matrix reshaped_grad = grad_output;
+    if (grad_output.rows() != batch_size * seq_length) {
+        reshaped_grad = grad_output.reshape(batch_size * seq_length, hidden_size);
     }
+
+    // Backward through feed forward
+    Matrix ffn_grad = feed_forward->backward(reshaped_grad, input);
+    
+    // Backward through attention
+    Matrix attn_grad = self_attention->backward(ffn_grad, input, target_distribution);
+    
+    return attn_grad;
 }
 
 // Transformer implementation
@@ -469,135 +409,60 @@ void Transformer::clear_kv_cache() {
 }
 
 // Original backward method implementation
-void Transformer::backward(const Matrix& grad_output, const std::vector<int>& input_tokens, float learning_rate) {
-    if (!training) {
-        std::cout << "Model is in evaluation mode. Skipping backward pass." << std::endl;
-        return;
+void Transformer::backward(const Matrix& grad_output, 
+                          const std::vector<int>& input_tokens, 
+                          float learning_rate,
+                          const Matrix& target_distribution) {
+    // Get dimensions for debugging
+    const size_t batch_size = input_tokens.size();
+    const size_t seq_length = grad_output.rows() / batch_size;
+    const size_t hidden_size = grad_output.cols();
+    
+    std::cout << "Backward pass dimensions:"
+              << "\n- Batch size: " << batch_size
+              << "\n- Sequence length: " << seq_length
+              << "\n- Hidden size: " << hidden_size << std::endl;
+
+    // Reshape grad_output if needed
+    Matrix reshaped_grad = grad_output;
+    if (grad_output.rows() != batch_size * seq_length) {
+        reshaped_grad = grad_output.reshape(batch_size * seq_length, hidden_size);
     }
 
-    try {
-        std::cout << "\nStarting backward pass..." << std::endl;
-        std::cout << "Initial gradient dimensions: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-        
-        // First, pass gradient through language model head to transform from vocab space to hidden space
-        Matrix hidden_states = GradientCheckpoint::get_activation("final_hidden_states");
-        if (hidden_states.empty()) {
-            throw std::runtime_error("No cached hidden states found for backward pass");
-        }
-        
-        std::cout << "Transforming gradient through LM head..." << std::endl;
-        Matrix current_grad = lm_head->backward_pass(grad_output, hidden_states);
-        std::cout << "Transformed gradient dimensions: " << current_grad.rows() << "x" << current_grad.cols() << std::endl;
-        
-        const float global_max_grad_norm = config.gradient_clip_threshold;
-        static DynamicLossScaler loss_scaler;
-        
-        std::cout << "Starting backward pass with " << layers.size() << " layers" << std::endl;
-        
-        // If using FP16, apply loss scaling
-        if (config.use_fp16) {
-            float scale = loss_scaler.get_scale();
-            current_grad *= scale;
-            std::cout << "Applied loss scale: " << scale << std::endl;
-        }
-        
-        // Store layer gradients for global norm computation
-        std::vector<Matrix> layer_gradients;
-        layer_gradients.reserve(layers.size());
-        
-        bool has_inf_nan = false;
-        
-        // Gradient accumulation setup
-        static size_t accum_step = 0;
-        const size_t grad_accum_steps = config.gradient_accumulation_steps;
-        
-        // Backward pass through transformer layers
-        for (int i = layers.size() - 1; i >= 0; --i) {
-            std::string ffn_key = "ffn_norm_" + std::to_string(i);
-            std::string attn_key = "attn_norm_" + std::to_string(i);
-            
-            Matrix ffn_input = GradientCheckpoint::get_activation(ffn_key);
-            Matrix attn_input = GradientCheckpoint::get_activation(attn_key);
-            
-            try {
-                std::cout << "Layer " << i << " backward pass..." << std::endl;
-                std::cout << "Current gradient dimensions: " << current_grad.rows() << "x" << current_grad.cols() << std::endl;
-                std::cout << "Layer input dimensions: " << attn_input.rows() << "x" << attn_input.cols() << std::endl;
-                
-                Matrix layer_grad = layers[i]->backward(current_grad, attn_input, Matrix());
-                if (!layer_grad.empty()) {
-                    // Check for inf/nan if using FP16
-                    if (config.use_fp16 && loss_scaler.has_inf_or_nan(layer_grad)) {
-                        has_inf_nan = true;
-                        break;
-                    }
-                    layer_gradients.push_back(layer_grad);
-                    current_grad = layer_grad;
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
-                std::cerr << "Attempting to proceed with remaining layers..." << std::endl;
-            }
-        }
-
-        // Accumulate gradients
-        accum_step++;
-        if (accum_step < grad_accum_steps) {
-            std::cout << "Accumulating gradients: step " << accum_step << "/" << grad_accum_steps << std::endl;
-            return;
-        }
-        
-        // Reset accumulation counter
-        accum_step = 0;
-
-        // Apply gradient clipping
-        float total_grad_norm = 0.0f;
-        for (const auto& grad : layer_gradients) {
-            for (size_t j = 0; j < grad.size(); j++) {
-                total_grad_norm += grad.data()[j] * grad.data()[j];
-            }
-        }
-        total_grad_norm = std::sqrt(total_grad_norm);
-        
-        float global_scale = 1.0f;
-        if (total_grad_norm > global_max_grad_norm) {
-            global_scale = global_max_grad_norm / total_grad_norm;
-            std::cout << "Clipping gradients with scale: " << global_scale << std::endl;
-        }
-
-        // Update parameters with proper learning rate schedule
-        float current_lr = learning_rate;
-        if (update_step < config.warmup_steps) {
-            current_lr = config.initial_lr + 
-                        (config.peak_lr - config.initial_lr) * 
-                        (float)update_step / config.warmup_steps;
-        } else {
-            current_lr *= config.decay_factor;
-        }
-        update_step++;
-
-        // Update parameters
-        for (size_t i = 0; i < layers.size(); i++) {
-            try {
-                if (auto* attention = layers[i]->getAttention()) {
-                    update_attention_parameters(attention, current_lr * global_scale, config);
-                }
-                if (auto* ffn = layers[i]->getFeedForward()) {
-                    update_ffn_parameters(ffn, current_lr * global_scale, config);
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Error in layer " << i << " parameter update: " << e.what() << std::endl;
-            }
-        }
-        
-        std::cout << "Backward pass complete" << std::endl;
-        std::cout << "Final gradient norm after scaling: " << (total_grad_norm * global_scale) << std::endl;
-        std::cout << "Current learning rate: " << current_lr << std::endl;
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
-        throw;
+    // Backward through layers
+    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+        std::cout << "Backward through layer " << i << std::endl;
+        Matrix layer_grad = layers[i]->backward(reshaped_grad, layers[i]->get_input(), target_distribution);
+        reshaped_grad = layer_grad;
     }
+
+    // Update parameters
+    update_parameters(learning_rate);
+}
+
+Matrix Transformer::backward(const Matrix& grad_output, const Matrix& activation, size_t layer_idx, const Matrix& target_distribution) {
+    if (layer_idx >= layers.size()) {
+        throw std::runtime_error("Invalid layer index in backward pass");
+    }
+    
+    // Get dimensions for debugging
+    const size_t batch_size = activation.rows();
+    const size_t seq_length = activation.cols() / config.hidden_size;
+    const size_t hidden_size = config.hidden_size;
+    
+    std::cout << "Layer backward dimensions:"
+              << "\n- Batch size: " << batch_size
+              << "\n- Sequence length: " << seq_length
+              << "\n- Hidden size: " << hidden_size << std::endl;
+
+    // Reshape grad_output if needed
+    Matrix reshaped_grad = grad_output;
+    if (grad_output.rows() != batch_size * seq_length) {
+        reshaped_grad = grad_output.reshape(batch_size * seq_length, hidden_size);
+    }
+
+    // Backward through the specific layer
+    return layers[layer_idx]->backward(reshaped_grad, activation, target_distribution);
 }
 
 void Transformer::clear_gradients() {
@@ -695,17 +560,17 @@ void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens,
             Matrix output = forward(input_tokens[i], "", tokenizer);
             batch_outputs.push_back(output);
             
-            float batch_loss = Utils::compute_loss(output, target_distribution);
+            float batch_loss = Utils::compute_loss(output, target_distribution, config);
             total_loss += batch_loss;
             
-            Matrix scaled_grad = Utils::compute_loss_gradient(output, target_distribution);
+            Matrix scaled_grad = Utils::compute_loss_gradient(output, target_distribution, config);
             scaled_grad *= scale_factor;
             
             // Track gradient statistics before scaling
             grad_stats.update(scaled_grad);
             
             // Accumulate gradients without applying learning rate
-            backward(scaled_grad, input_tokens[i], 0.0f);  // Pass 0.0f to accumulate without updating
+            backward(scaled_grad, layers[i]->get_input(), target_distribution);  // Pass input for backward
         }
         
         if ((current_step + 1) % gradient_accumulation_steps == 0) {
@@ -788,11 +653,14 @@ void Transformer::update_parameters(float learning_rate) {
 
         // Update layer norm parameters
         if (auto* ln = layer->getLayerNorm()) {
-            auto& ln_params = ln->parameters();
-            auto& ln_grads = ln->param_gradients();
+            auto& params = ln->parameters();
+            params.gamma.initialize_constant(0.1f);
+            params.beta.initialize_constant(0.0f);
             
-            update_parameter_with_clip(ln_params.gamma, ln_grads.gamma_grad, learning_rate, config);
-            update_parameter_with_clip(ln_params.beta, ln_grads.beta_grad, learning_rate, config);
+            #ifdef CUDA_AVAILABLE
+            // Ensure CUDA synchronization after initialization
+            cudaDeviceSynchronize();
+            #endif
         }
     }
 
@@ -829,14 +697,33 @@ std::vector<Matrix>& Transformer::parameters() {
 }
 
 void Transformer::initialize_weights() {
-    // Xavier/Glorot initialization with proper scaling and bounds
     auto init_weights = [](Matrix& weights, size_t fan_in, size_t fan_out, bool is_attention = false) {
         float scale = std::sqrt(2.0f / (fan_in + fan_out));
         if (is_attention) {
-            // Attention weights need smaller initialization
             scale *= 0.1f;
         }
         
+        #ifdef CUDA_AVAILABLE
+        // Allocate temporary host memory
+        std::vector<float> host_weights(weights.size());
+        
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::normal_distribution<float> dist(0.0f, scale);
+        
+        // Initialize on host
+        for (size_t i = 0; i < host_weights.size(); i++) {
+            float value = dist(gen);
+            value = std::max(-2.0f * scale, std::min(2.0f * scale, value));
+            host_weights[i] = value;
+        }
+        
+        // Copy to device
+        cudaMemcpy(weights.data(), host_weights.data(), 
+                  weights.size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaDeviceSynchronize();
+        #else
+        // Original CPU implementation
         std::random_device rd;
         std::mt19937 gen(rd());
         std::normal_distribution<float> dist(0.0f, scale);
@@ -845,11 +732,11 @@ void Transformer::initialize_weights() {
         for (size_t i = 0; i < weights.rows(); i++) {
             for (size_t j = 0; j < weights.cols(); j++) {
                 float value = dist(gen);
-                // Clip extreme values
                 value = std::max(-2.0f * scale, std::min(2.0f * scale, value));
                 weights(i, j) = value;
             }
         }
+        #endif
     };
     
     // Initialize token embeddings with smaller scale
@@ -895,8 +782,8 @@ void Transformer::initialize_weights() {
             // Initialize layer norm parameters
             if (auto* ln = layer->getLayerNorm()) {
                 auto& params = ln->parameters();
-                params.gamma.initialize_constant(1.0f);  // Identity scaling
-                params.beta.initialize_constant(0.0f);   // No initial shift
+                params.gamma.initialize_constant(0.1f);  // Start smaller
+                params.beta.initialize_constant(0.0f);
             }
         }
     }
@@ -904,7 +791,7 @@ void Transformer::initialize_weights() {
     // Initialize final layer norm
     if (final_ln) {
         auto& params = final_ln->parameters();
-        params.gamma.initialize_constant(1.0f);
+        params.gamma.initialize_constant(0.1f);
         params.beta.initialize_constant(0.0f);
     }
     
@@ -1298,54 +1185,69 @@ bool Transformer::is_likely_adjective(const std::string& token) const {
 }
 
 void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learning_rate, const TransformerConfig& config) {
-    const float clip_threshold = 1.0f;  // Reduced from 10.0f to be more conservative
-    const float weight_decay = config.weight_decay;
-    const float max_relative_change = 0.1f;  // Maximum 10% change per update
+    const float clip_threshold = 5.0f;
+    const float max_relative_change = 0.3f;
     
-    // Calculate gradient norm
-    float grad_norm = 0.0f;
-    #pragma omp parallel for reduction(+:grad_norm)
-    for (size_t i = 0; i < grad.rows(); ++i) {
-        for (size_t j = 0; j < grad.cols(); ++j) {
-            grad_norm += grad(i, j) * grad(i, j);
-        }
+    #ifdef USE_CUDA
+    // Ensure CUDA operations are synchronized
+    cudaDeviceSynchronize();
+    
+    // Calculate grid and block dimensions
+    const int block_size = 256;
+    const int num_elements = static_cast<int>(param.rows() * param.cols());
+    const int grid_size = (num_elements + block_size - 1) / block_size;
+    
+    // Get device pointers and dimensions
+    float* d_param = param.data();
+    const float* d_grad = grad.data();
+    size_t rows = param.rows();  // Store dimensions in variables
+    size_t cols = param.cols();
+    
+    // Launch CUDA kernel using cudaLaunchKernel
+    void* args[] = {
+        (void*)&d_param,
+        (void*)&d_grad,
+        (void*)&learning_rate,
+        (void*)&config.weight_decay,
+        (void*)&max_relative_change,
+        (void*)&rows,  // Use stored dimensions
+        (void*)&cols
+    };
+    
+    cudaError_t error = cudaLaunchKernel(
+        (void*)update_params_kernel,
+        dim3(grid_size),
+        dim3(block_size),
+        args,
+        0,
+        nullptr
+    );
+    
+    if (error != cudaSuccess) {
+        throw std::runtime_error("CUDA error in parameter update: " + 
+                               std::string(cudaGetErrorString(error)));
     }
-    grad_norm = std::sqrt(grad_norm);
     
-    // Apply more aggressive clipping with smooth transition
-    float scaling_factor = 1.0f;
-    if (grad_norm > clip_threshold) {
-        scaling_factor = clip_threshold / (grad_norm + 1e-8f);
-        // Apply smooth transition for large gradients
-        scaling_factor = std::pow(scaling_factor, 1.5f);  // More aggressive scaling for larger gradients
-    }
-    
-    // Scale learning rate based on gradient norm
-    float adaptive_lr = learning_rate;
-    if (grad_norm > 0.1f) {  // If gradients are large
-        adaptive_lr *= std::exp(-grad_norm);  // Exponentially reduce learning rate
-    }
-    adaptive_lr = std::max(adaptive_lr, learning_rate * 0.01f);  // Don't let it get too small
-    
-    // Update parameters with clipped gradients and weight decay
+    // Ensure update is complete
+    cudaDeviceSynchronize();
+    #else
+    // CPU version
     #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < param.rows(); ++i) {
         for (size_t j = 0; j < param.cols(); ++j) {
-            float decay = weight_decay * param(i, j);
-            float update = grad(i, j) * scaling_factor + decay;
+            float decay = config.weight_decay * param(i, j);
+            float update = grad(i, j) * learning_rate + decay;
             
             // Limit maximum parameter change
             float param_scale = std::abs(param(i, j)) + 1e-8f;
             float max_update = max_relative_change * param_scale;
             update = std::clamp(update, -max_update, max_update);
             
-            // Apply update with adaptive learning rate
-            param(i, j) -= adaptive_lr * update;
-            
-            // Add value clipping to prevent extreme values
+            param(i, j) -= update;
             param(i, j) = std::clamp(param(i, j), -100.0f, 100.0f);
         }
     }
+    #endif
 }
 
 void update_parameter_with_clip(Vector& param, const Vector& grad, float learning_rate, const TransformerConfig& config) {
@@ -1418,117 +1320,94 @@ static DynamicLossScaler loss_scaler;
 
 // Add learning_rate parameter to backward_pass
 void Transformer::backward_pass(const Matrix& output, const Matrix& target_distribution, float learning_rate) {
-    // Compute loss gradient with proper sequence handling
-    Matrix loss_grad = Utils::compute_loss_gradient(output, target_distribution);
+    // Initialize loss gradients
+    loss_grad = Utils::compute_loss_gradient(output, target_distribution, config);
+    layer_gradients.clear();
     
-    // Retrieve sequence boundaries
-    const auto& seq_boundaries = last_seq_boundaries;
-    
-    // Apply loss scaling if using FP16
+    float scale = 1.0f;
     if (config.use_fp16) {
-        float scale = loss_scaler.get_scale();
-        #pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < loss_grad.rows(); i++) {
-            for (size_t j = 0; j < loss_grad.cols(); j++) {
-                loss_grad(i, j) *= scale;
-            }
+        scale = loss_scaler.get_scale();
+        
+        #ifdef USE_CUDA
+        const int block_size = 256;
+        const int num_elements = static_cast<int>(loss_grad.size());
+        const int grid_size = (num_elements + block_size - 1) / block_size;
+        
+        // Get data pointer
+        float* d_loss_grad = loss_grad.data();
+        
+        // Scale gradients using CUDA
+        void* args[] = {
+            (void*)&d_loss_grad,  // Use pointer variable
+            (void*)&scale,
+            (void*)&num_elements
+        };
+        
+        cudaError_t error = cudaLaunchKernel(
+            (void*)scale_tensor_kernel,
+            dim3(grid_size),
+            dim3(block_size),
+            args,
+            0,
+            nullptr
+        );
+        
+        if (error != cudaSuccess) {
+            throw std::runtime_error("CUDA error in gradient scaling: " + 
+                                   std::string(cudaGetErrorString(error)));
         }
+        
+        cudaDeviceSynchronize();
+        #else
+        loss_grad *= scale;
+        #endif
     }
     
-    // Initialize gradient accumulation buffers
-    std::vector<Matrix> layer_gradients;
-    layer_gradients.reserve(layers.size());
-    
-    bool has_inf_nan = false;
-    
-    // Backward through layers with proper sequence handling
+    // Backward through layers
     for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
-        // Get cached layer input
-        std::string layer_key = "layer_" + std::to_string(i) + "_input";
-        Matrix layer_input = GradientCheckpoint::get_activation(layer_key);
-        
-        // Process each sequence in the batch separately
-        Matrix layer_grad(layer_input.rows(), layer_input.cols(), 0.0f);
-        
-        for (const auto& [start, end] : seq_boundaries) {
-            // Extract sequence portion of gradients and input
-            Matrix seq_grad = loss_grad.block(start, 0, end - start, loss_grad.cols());
-            Matrix seq_input = layer_input.block(start, 0, end - start, layer_input.cols());
-            
-            // Backward through layer for this sequence
-            Matrix seq_layer_grad = layers[i]->backward(seq_grad, seq_input, target_distribution);
-            
-            // Accumulate gradients
-            for (size_t r = 0; r < seq_layer_grad.rows(); r++) {
-                for (size_t c = 0; c < seq_layer_grad.cols(); c++) {
-                    layer_grad(start + r, c) += seq_layer_grad(r, c);
-                }
-            }
-        }
-        
-        // Check for inf/nan if using FP16
-        if (config.use_fp16) {
-            has_inf_nan |= loss_scaler.has_inf_or_nan(layer_grad);
-            
-            // Check layer gradients
-            auto& layer = layers[i];
-            if (auto* attention = layer->getAttention()) {
-                auto& grads = attention->param_gradients();
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.query_grad);
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.key_grad);
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.value_grad);
-            }
-            if (auto* ffn = layer->getFeedForward()) {
-                auto& grads = ffn->param_gradients();
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.ff1_grad);
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.ff2_grad);
-            }
-        }
-        
+        Matrix layer_grad = layers[i]->backward(loss_grad, layers[i]->get_input(), target_distribution);
         layer_gradients.push_back(layer_grad);
-        loss_grad = layer_grad;  // Propagate gradients to next layer
     }
     
-    // Handle FP16 loss scaling
     if (config.use_fp16) {
-        bool should_skip = !loss_scaler.update_scale(has_inf_nan);
-        if (should_skip) {
-            std::cout << "Skipping step due to inf/nan in gradients" << std::endl;
-            return;
-        }
+        float inv_scale = 1.0f / scale;
+        #ifdef USE_CUDA
+        const int block_size = 256;
         
-        // Unscale gradients
-        float inv_scale = 1.0f / loss_scaler.get_scale();
+        for (auto& grad : layer_gradients) {
+            const int num_elements = static_cast<int>(grad.size());
+            const int grid_size = (num_elements + block_size - 1) / block_size;
+            
+            // Get data pointer
+            float* d_grad = grad.data();
+            
+            void* args[] = {
+                (void*)&d_grad,  // Use pointer variable
+                (void*)&inv_scale,
+                (void*)&num_elements
+            };
+            
+            cudaError_t error = cudaLaunchKernel(
+                (void*)scale_tensor_kernel,
+                dim3(grid_size),
+                dim3(block_size),
+                args,
+                0,
+                nullptr
+            );
+            
+            if (error != cudaSuccess) {
+                throw std::runtime_error("CUDA error in gradient unscaling: " + 
+                                       std::string(cudaGetErrorString(error)));
+            }
+        }
+        cudaDeviceSynchronize();
+        #else
         for (auto& grad : layer_gradients) {
             grad *= inv_scale;
         }
-        
-        // Unscale parameter gradients
-        for (auto& layer : layers) {
-            if (auto* attention = layer->getAttention()) {
-                auto& grads = attention->param_gradients();
-                unscale_gradients(grads, inv_scale);
-            }
-            if (auto* ffn = layer->getFeedForward()) {
-                auto& grads = ffn->param_gradients();
-                unscale_gradients(grads, inv_scale);
-            }
-        }
+        #endif
     }
-    
-    // Update parameters with proper sequence handling
-    for (size_t i = 0; i < layers.size(); i++) {
-        auto& layer = layers[i];
-        if (auto* attention = layer->getAttention()) {
-            update_attention_parameters(attention, learning_rate, config);
-        }
-        if (auto* ffn = layer->getFeedForward()) {
-            update_ffn_parameters(ffn, learning_rate, config);
-        }
-    }
-    
-    // Store sequence boundaries for next backward pass
-    last_seq_boundaries = seq_boundaries;
 }
 
 // Helper function to unscale gradients

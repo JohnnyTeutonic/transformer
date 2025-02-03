@@ -69,7 +69,10 @@ public:
     create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
                                      const Tokenizer& tokenizer, size_t vocab_size,
                                      size_t input_max_seq_len);
-    static float compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const Tokenizer& tokenizer);
+    static float compute_batch_loss(const Matrix& logits, 
+                                  const Matrix& target_distribution, 
+                                  const Tokenizer& tokenizer,
+                                  const TransformerConfig& config);
     static void apply_sampling_parameters(std::vector<float>& logits, float temperature,
                                           float top_p);
     static std::vector<std::string>& get_vocabulary(const Tokenizer& tokenizer);
@@ -93,8 +96,17 @@ public:
                                         size_t num_folds, 
                                         float early_stopping_threshold);
 
-    // Add inline utility functions for gradient computation
-    static inline float compute_grad_norm(const Matrix& grad) {
+    // Add loss computation functions
+    static float compute_loss(const Matrix& output, 
+                            const Matrix& target_distribution,
+                            const TransformerConfig& config);
+    
+    static Matrix compute_loss_gradient(const Matrix& output, 
+                                      const Matrix& target_distribution,
+                                      const TransformerConfig& config);
+
+    // Add back the gradient computation utility functions
+    static float compute_grad_norm(const Matrix& grad) {
         float norm = 0.0f;
         #pragma omp parallel for reduction(+:norm)
         for (size_t i = 0; i < grad.rows(); ++i) {
@@ -105,73 +117,8 @@ public:
         return std::sqrt(norm);
     }
 
-    static inline size_t count_params(const Matrix& param) {
+    static size_t count_params(const Matrix& param) {
         return param.rows() * param.cols();
-    }
-
-    // Add loss computation functions
-    static inline float compute_loss(const Matrix& output, const Matrix& target_distribution) {
-        if (output.size() != target_distribution.size()) {
-            throw std::runtime_error("Output and target distribution must have the same size");
-        }
-
-        const size_t batch_size = output.rows();
-        const size_t vocab_size = output.cols();
-        float total_loss = 0.0f;
-
-        #pragma omp parallel for reduction(+:total_loss)
-        for (size_t i = 0; i < batch_size; ++i) {
-            for (size_t j = 0; j < vocab_size; ++j) {
-                if (target_distribution(i, j) > 0.0f) {
-                    const float epsilon = 1e-10f;
-                    float pred = std::clamp(output(i, j), epsilon, 1.0f - epsilon);
-                    total_loss -= target_distribution(i, j) * std::log(pred);
-                }
-            }
-        }
-
-        return total_loss / static_cast<float>(batch_size);
-    }
-
-    static inline Matrix compute_loss_gradient(const Matrix& output, const Matrix& target_distribution) {
-        if (output.size() != target_distribution.size()) {
-            throw std::runtime_error("Output and target distribution must have the same size");
-        }
-
-        const size_t batch_size = output.rows();
-        const size_t vocab_size = output.cols();
-        Matrix gradient(batch_size, vocab_size);
-
-        // For each example in the batch
-        #pragma omp parallel for
-        for (size_t i = 0; i < batch_size; ++i) {
-            // First compute softmax probabilities
-            float max_logit = -std::numeric_limits<float>::infinity();
-            for (size_t j = 0; j < vocab_size; ++j) {
-                max_logit = std::max(max_logit, output(i, j));
-            }
-
-            std::vector<float> probs(vocab_size);
-            float sum_exp = 0.0f;
-            for (size_t j = 0; j < vocab_size; ++j) {
-                probs[j] = std::exp(output(i, j) - max_logit);
-                sum_exp += probs[j];
-            }
-
-            // Normalize to get probabilities
-            const float eps = 1e-10f;
-            sum_exp = std::max(sum_exp, eps);
-            for (size_t j = 0; j < vocab_size; ++j) {
-                probs[j] /= sum_exp;
-            }
-
-            // Compute gradients: softmax derivative * cross-entropy derivative
-            for (size_t j = 0; j < vocab_size; ++j) {
-                gradient(i, j) = probs[j] - target_distribution(i, j);
-            }
-        }
-
-        return gradient;
     }
 
     // Random number generation utilities
@@ -240,7 +187,8 @@ public:
     static void process_validation_example(Transformer& transformer, 
                                          const std::string& input, 
                                          const std::string& target, 
-                                         const Tokenizer& tokenizer);
+                                         const Tokenizer& tokenizer,
+                                         const TransformerConfig& config);
 
     /**
      * @brief Perform a single training step
@@ -259,4 +207,8 @@ public:
                           size_t& processed_examples,
                           size_t& global_step,
                           const std::vector<std::pair<std::string, std::string>>& val_data);
+
+    static Matrix compute_target_distribution(const Matrix& target_tokens, 
+                                            const Tokenizer& tokenizer,
+                                            const TransformerConfig& config);
 };

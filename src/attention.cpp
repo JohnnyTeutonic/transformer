@@ -349,10 +349,15 @@ Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matri
     return scores;
 }
 
-Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& input, const Matrix& target) {
+Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& input, const Matrix& target_distribution) {
     try {
         std::cout << "\n=== MultiHeadAttention::backward START ===" << std::endl;
         
+        // Validate input dimensions
+        if (grad_output.rows() != input.rows() || grad_output.cols() != input.cols()) {
+            throw std::runtime_error("Gradient and input dimension mismatch");
+        }
+
         // Constants for gradient clipping and stability
         const float clip_threshold = 5.0f;  // Match global threshold
         const float eps = 1e-6f;

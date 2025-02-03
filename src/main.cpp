@@ -64,11 +64,18 @@ std::vector<float> normalize(const std::vector<float>& sample) {
     return normalized;
 }
 
-float compute_loss(const Matrix& logits, const std::vector<int>& target_tokens, const Tokenizer& tokenizer) {
+// Update function signature to include config parameter
+float compute_loss(const Matrix& logits, const std::vector<int>& target_tokens, 
+                  const Tokenizer& tokenizer, const TransformerConfig& config) {
     float loss = 0.0f;
     const int sep_token_id = tokenizer.get_sep_token_id();
     bool after_separator = false;
-    const float epsilon = 1e-6f;  // Increased epsilon for better stability
+    const float epsilon = config.use_fp16 ? 1e-6f : 1e-10f;  // Larger epsilon for FP16
+    
+    #ifdef USE_CUDA
+    // Ensure CUDA computations are synchronized before loss computation
+    cudaDeviceSynchronize();
+    #endif
     
     for (size_t i = 0; i < target_tokens.size() - 1; i++) {
         int current_token = target_tokens[i];
@@ -133,10 +140,13 @@ float compute_loss(const Matrix& logits, const std::vector<int>& target_tokens, 
         return 100.0f;  // Fallback to a high but finite loss
     }
     
+    #ifdef USE_CUDA
+    // Ensure loss computation is visible to host
+    cudaDeviceSynchronize();
+    #endif
+    
     return loss / std::max(static_cast<float>(target_tokens.size()), epsilon);
 }
-
-
 
 // Helper functions for phrase type-specific loss components
 float compute_verb_penalty(const Matrix& logits, const std::vector<int>& final_tokens,
@@ -455,6 +465,40 @@ void test_model_predictions(Transformer& transformer, std::unique_ptr<Tokenizer>
         std::cout << "\nTop Predictions:\n";
         Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
     }
+
+    // Add this after testing the model on test words
+    std::vector<int> predictions;
+    std::vector<int> targets;
+
+    for (const auto& test_input : test_queries) {
+        // Preprocess input
+        std::string processed_input = test_input;
+        tokenizer->preprocess_text(processed_input);
+        std::vector<int> test_tokens = tokenizer->encode(processed_input);
+
+        // Get model prediction
+        transformer.set_training(false);  // Set to evaluation mode
+        Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
+        Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
+
+        // Get the predicted token
+        int predicted_token = std::max_element(logits.begin(), logits.end()) - logits.begin();
+        predictions.push_back(predicted_token);
+
+        // Get the target token (assuming the target is the last token in the input)
+        int target_token = test_tokens.back();
+        targets.push_back(target_token);
+    }
+
+    // Compute metrics
+    EvaluationMetrics metrics = compute_metrics(predictions, targets);
+
+    // Print metrics
+    std::cout << "\n=== Evaluation Metrics ===\n";
+    std::cout << "Accuracy: " << metrics.accuracy << "\n";
+    std::cout << "Precision: " << metrics.precision << "\n";
+    std::cout << "Recall: " << metrics.recall << "\n";
+    std::cout << "F1-Score: " << metrics.f_score << "\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -829,17 +873,20 @@ int main(int argc, char* argv[]) {
                 }
                 std::cout << "Flattened batch size: " << flattened_batch.size() << " tokens\n";
 
+                // Get config once at the start of this section
+                const auto& config = transformer.getConfig();
+
                 // Forward pass through the model
                 Matrix hidden_states = transformer.forward(flattened_batch, "", *tokenizer);
 
                 // Project hidden states to vocabulary space using LM head
                 Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden_states);
 
-                // Compute batch loss
-                float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
+                // Compute batch loss with config
+                float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer, config);
 
                 // Compute gradient norm
-                Matrix loss_gradients = Utils::compute_loss_gradient(logits, target_distribution);
+                Matrix loss_gradients = Utils::compute_loss_gradient(logits, target_distribution, config);
                 float grad_norm = 0.0f;
                 for (size_t i = 0; i < loss_gradients.size(); i++) {
                     grad_norm += loss_gradients.data()[i] * loss_gradients.data()[i];
@@ -1025,7 +1072,7 @@ int main(int argc, char* argv[]) {
                 
                 // Test a simple input
                 std::string test_input = "I go to";
-                std::cout << "\n=== Processing prompt: '" << test_input << "' ===" << std::endl;
+                std::cout << "\n=== Processing prompt: '" << test_input << "' ===\n";
                 
                 // Preprocess input
                 std::string processed_input = test_input;
@@ -1036,8 +1083,7 @@ int main(int argc, char* argv[]) {
                 Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
                 Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
                 
-                // For single token prediction, we don't need beam search
-                // Just show the top predictions
+                // Show the top predictions
                 std::cout << "\nTop Predictions:\n";
                 Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
             }
@@ -1067,7 +1113,7 @@ int main(int argc, char* argv[]) {
         
         // Test a simple input
         std::string test_input = "I go to";
-        std::cout << "\n=== Processing prompt: '" << test_input << "' ===" << std::endl;
+        std::cout << "\n=== Processing prompt: '" << test_input << "' ===\n";
         
         // Preprocess input
         std::string processed_input = test_input;
@@ -1104,6 +1150,75 @@ int main(int argc, char* argv[]) {
 
         // Cleanup CUDA before exit
         cuda::cleanup_cuda();
+
+        // Add test words
+        std::vector<std::string> test_words = {
+            "I go to",          // Predict noun
+            "She is",           // Predict adjective
+            "They walk to the", // Predict noun
+            "The sky is",       // Predict adjective
+            "I want to",        // Predict verb
+            "He runs to the",   // Predict noun
+            "The cat is",       // Predict adjective/verb
+            "We should",       // Predict verb
+            "The students are", // Predict verb/adjective
+            "The project will"  // Predict verb
+        };
+
+        // Add this after the model is trained
+        std::cout << "\n=== Testing Model Predictions ===\n";
+        for (const auto& test_input : test_words) {
+            std::cout << "\n=== Processing prompt: '" << test_input << "' ===\n";
+
+            // Preprocess input
+            std::string processed_input = test_input;
+            tokenizer->preprocess_text(processed_input);
+            std::vector<int> test_tokens = tokenizer->encode(processed_input);
+
+            // Get model prediction
+            transformer.set_training(false);  // Set to evaluation mode
+            Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
+            Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
+
+            // Show the top predictions
+            std::cout << "\nTop Predictions:\n";
+            Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
+        }
+
+        // Add this after testing the model on test words
+        std::vector<int> predictions;
+        std::vector<int> targets;
+
+        for (const auto& test_input : test_words) {
+            // Preprocess input
+            std::string processed_input = test_input;
+            tokenizer->preprocess_text(processed_input);
+            std::vector<int> test_tokens = tokenizer->encode(processed_input);
+
+            // Get model prediction
+            transformer.set_training(false);  // Set to evaluation mode
+            Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
+            Matrix logits = transformer.get_lm_head()->project_to_vocab(test_hidden);
+
+            // Get the predicted token
+            int predicted_token = std::max_element(logits.begin(), logits.end()) - logits.begin();
+            predictions.push_back(predicted_token);
+
+            // Get the target token (assuming the target is the last token in the input)
+            int target_token = test_tokens.back();
+            targets.push_back(target_token);
+        }
+
+        // Compute metrics
+        EvaluationMetrics metrics = compute_metrics(predictions, targets);
+
+        // Print metrics
+        std::cout << "\n=== Evaluation Metrics ===\n";
+        std::cout << "Accuracy: " << metrics.accuracy << "\n";
+        std::cout << "Precision: " << metrics.precision << "\n";
+        std::cout << "Recall: " << metrics.recall << "\n";
+        std::cout << "F1-Score: " << metrics.f_score << "\n";
+
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

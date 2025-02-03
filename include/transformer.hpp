@@ -69,6 +69,7 @@ class TransformerLayer {
     const TransformerConfig& config;                 ///< Reference to model configuration
     size_t layer_idx;                              ///< Index of this layer in the transformer
     bool training = false;                        ///< Whether the layer is in training mode
+    Matrix input_cache;  // Add this to cache the input
 
   public:
     virtual ~TransformerLayer() = default;
@@ -138,8 +139,7 @@ class TransformerLayer {
     void load(std::istream& is) {
         self_attention = MultiHeadAttention::load(is, config);
     }
-    Matrix backward(const Matrix& grad_output, const Matrix& input,
-                    const Matrix& target_distribution = Matrix());
+    Matrix backward(const Matrix& grad_output, const Matrix& input, const Matrix& target_distribution);
     Matrix backward_cuda(const Matrix& grad, const Matrix& input) const;
     std::vector<std::reference_wrapper<Matrix>> get_weights() {
         std::vector<std::reference_wrapper<Matrix>> weights;
@@ -200,6 +200,8 @@ class TransformerLayer {
         }
         return *this;
     }
+
+    const Matrix& get_input() const { return input_cache; }
 };
 
 /**
@@ -305,6 +307,9 @@ private:
         std::mt19937* gen = nullptr
     );
 
+    Matrix loss_grad;  // Store gradients from loss computation
+    std::vector<Matrix> layer_gradients;  // Store layer gradients
+
 public:
     Transformer() = default;
 
@@ -364,7 +369,10 @@ public:
      */
     void clear_kv_cache();
 
-    Matrix backward(const Matrix& grad, const Matrix& activation, size_t layer_idx);
+    void backward(const Matrix& grad_output, 
+                 const std::vector<int>& input_tokens, 
+                 float learning_rate,
+                 const Matrix& target_distribution);
     Matrix backward_cuda(const Matrix& grad, const Matrix& activation, size_t layer_idx);
     std::vector<Matrix>& parameters();
     void save(std::ostream& os) const;

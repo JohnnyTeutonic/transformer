@@ -134,7 +134,15 @@ Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int
     return target_distribution;
 }
 
-float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const Tokenizer& tokenizer) {
+float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, 
+                              const Tokenizer& tokenizer, const TransformerConfig& config) {
+    // Add detailed dimension logging
+    std::cout << "compute_batch_loss dimensions:"
+              << "\nlogits: [" << logits.rows() << "x" << logits.cols() << "]"
+              << "\ntarget: [" << target_distribution.rows() << "x" << target_distribution.cols() << "]"
+              << std::endl;
+    
+    const float epsilon = config.use_fp16 ? 1e-6f : 1e-10f;
     // Input validation with detailed error messages
     if (logits.empty() || target_distribution.empty()) {
         std::cout << "Logits shape: " << (logits.empty() ? "empty" : 
@@ -155,7 +163,6 @@ float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distr
     float total_loss = 0.0f;
     const size_t batch_size = logits.rows();
     const size_t vocab_size = logits.cols();
-    const float epsilon = 1e-7f;  // Increased epsilon for better stability
     const float max_loss_per_token = 100.0f;  // Cap individual token losses
 
     // Pre-compute max logits for numerical stability
@@ -382,102 +389,24 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
 }
 
 std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
-    std::vector<std::pair<std::string, std::string>> training_pairs;
-    std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
-    std::filesystem::path data_dir = exe_path / "data";
-    std::filesystem::path file_path = data_dir / "training_pairs.txt";
-
-    std::ifstream file(file_path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open training data file: " + file_path.string());
-    }
-
+    std::vector<std::pair<std::string, std::string>> training_data;
+    std::ifstream file("data/training_pairs.txt");
     std::string line;
-    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> category_pairs;
-    std::unordered_set<std::string> seen_pairs;
-    
-    // First, read all pairs and categorize them
     while (std::getline(file, line)) {
-        // Skip empty lines
-        if (line.empty()) continue;
-
-        // Normalize separators
-        std::string normalized_line = line;
-        std::replace(normalized_line.begin(), normalized_line.end(), '#', '|');
-        std::replace(normalized_line.begin(), normalized_line.end(), '*', '|');
-        
-        size_t delimiter_pos = normalized_line.find('|');
-        if (delimiter_pos != std::string::npos) {
-            std::string input = normalized_line.substr(0, delimiter_pos);
-            std::string output = normalized_line.substr(delimiter_pos + 1);
-            
-            // Trim whitespace
-            input = std::regex_replace(input, std::regex("^\\s+|\\s+$"), "");
-            output = std::regex_replace(output, std::regex("^\\s+|\\s+$"), "");
-            
-            // Create unique key to detect duplicates
-            std::string pair_key = input + "|" + output;
-            if (seen_pairs.find(pair_key) != seen_pairs.end()) {
-                continue;  // Skip duplicates
+        size_t sep_pos = line.find('|');
+        if (sep_pos == std::string::npos) {
+            sep_pos = line.find('*');
+            if (sep_pos == std::string::npos) {
+                sep_pos = line.find('#');
             }
-            seen_pairs.insert(pair_key);
-            
-            // Categorize the pair
-            std::string category;
-            if (input.length() > 50) {
-                category = "complex";
-            } else if (input.find("is") != std::string::npos || 
-                      input.find("looks") != std::string::npos || 
-                      input.find("feels") != std::string::npos) {
-                category = "adjective";
-            } else if (input.find("to") != std::string::npos) {
-                category = "verb";
-            } else {
-                category = "other";
-            }
-            
-            category_pairs[category].push_back({input, output});
+        }
+        if (sep_pos != std::string::npos) {
+            std::string input = line.substr(0, sep_pos);
+            std::string target = line.substr(sep_pos + 1);
+            training_data.emplace_back(input, target);
         }
     }
-    
-    // Print initial statistics
-    std::cout << "\nInitial Training Data Statistics:" << std::endl;
-    size_t total_pairs = 0;
-    size_t max_category_size = 0;
-    for (const auto& [category, pairs] : category_pairs) {
-        std::cout << category << " pairs: " << pairs.size() << std::endl;
-        total_pairs += pairs.size();
-        max_category_size = std::max(max_category_size, pairs.size());
-    }
-    std::cout << "Total pairs before balancing: " << total_pairs << std::endl;
-
-    // Instead of taking the minimum, we'll take up to 80% of the largest category size
-    size_t target_size = static_cast<size_t>(max_category_size * 0.8);
-    std::cout << "Target size per category: " << target_size << std::endl;
-
-    // Random number generator for shuffling
-    std::mt19937 gen(42);  // Fixed seed for reproducibility
-    
-    // Sample from each category
-    for (const auto& [category, pairs] : category_pairs) {
-        std::vector<size_t> indices(pairs.size());
-        std::iota(indices.begin(), indices.end(), 0);
-        std::shuffle(indices.begin(), indices.end(), gen);
-        
-        // Take up to target_size samples from each category
-        size_t samples_to_take = std::min(target_size, pairs.size());
-        for (size_t i = 0; i < samples_to_take; ++i) {
-            training_pairs.push_back(pairs[indices[i]]);
-        }
-    }
-    
-    // Shuffle the final training pairs
-    std::shuffle(training_pairs.begin(), training_pairs.end(), gen);
-    
-    std::cout << "\nFinal Training Data Statistics:" << std::endl;
-    std::cout << "Total pairs after balancing: " << training_pairs.size() << std::endl;
-    
-    return training_pairs;
+    return training_data;
 }
 
 void Utils::analyze_token_mappings(
@@ -511,90 +440,24 @@ void Utils::analyze_token_mappings(
 }
 
 std::vector<std::pair<std::string, std::string>> Utils::load_validation_data() {
-    std::vector<std::pair<std::string, std::string>> validation_pairs;
-    std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
-    std::filesystem::path data_dir = exe_path / "data";
-    std::filesystem::path file_path = data_dir / "validation_pairs.txt";
-
-    std::ifstream file(file_path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open validation data file: " + file_path.string());
-    }
-
+    std::vector<std::pair<std::string, std::string>> validation_data;
+    std::ifstream file("data/validation_pairs.txt");
     std::string line;
-    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> category_pairs;
-    std::unordered_set<std::string> seen_pairs;
-    
     while (std::getline(file, line)) {
-        // Normalize separators
-        std::string normalized_line = line;
-        std::replace(normalized_line.begin(), normalized_line.end(), '#', '|');
-        std::replace(normalized_line.begin(), normalized_line.end(), '*', '|');
-        
-        size_t delimiter_pos = normalized_line.find('|');
-        if (delimiter_pos != std::string::npos) {
-            std::string input = normalized_line.substr(0, delimiter_pos);
-            std::string output = normalized_line.substr(delimiter_pos + 1);
-            
-            // Trim whitespace
-            input = std::regex_replace(input, std::regex("^\\s+|\\s+$"), "");
-            output = std::regex_replace(output, std::regex("^\\s+|\\s+$"), "");
-            
-            // Create unique key to detect duplicates
-            std::string pair_key = input + "|" + output;
-            if (seen_pairs.find(pair_key) != seen_pairs.end()) {
-                continue;  // Skip duplicates
+        size_t sep_pos = line.find('|');
+        if (sep_pos == std::string::npos) {
+            sep_pos = line.find('*');
+            if (sep_pos == std::string::npos) {
+                sep_pos = line.find('#');
             }
-            seen_pairs.insert(pair_key);
-            
-            // Categorize the pair
-            std::string category;
-            if (input.length() > 50) {
-                category = "complex";
-            } else if (input.find("is") != std::string::npos || 
-                      input.find("looks") != std::string::npos || 
-                      input.find("feels") != std::string::npos) {
-                category = "adjective";
-            } else if (input.find("to") != std::string::npos) {
-                category = "verb";
-            } else {
-                category = "other";
-            }
-            
-            category_pairs[category].push_back({input, output});
+        }
+        if (sep_pos != std::string::npos) {
+            std::string input = line.substr(0, sep_pos);
+            std::string target = line.substr(sep_pos + 1);
+            validation_data.emplace_back(input, target);
         }
     }
-    
-    // Balance categories but keep more validation samples
-    size_t min_category_size = std::numeric_limits<size_t>::max();
-    for (const auto& [category, pairs] : category_pairs) {
-        min_category_size = std::min(min_category_size, pairs.size());
-    }
-    
-    // Use up to 20% of training size for validation
-    min_category_size = std::min(min_category_size, static_cast<size_t>(min_category_size * 0.2));
-    
-    // Sample evenly from each category
-    std::mt19937 gen(42);  // Fixed seed for reproducibility
-    for (const auto& [category, pairs] : category_pairs) {
-        std::vector<size_t> indices(pairs.size());
-        std::iota(indices.begin(), indices.end(), 0);
-        std::shuffle(indices.begin(), indices.end(), gen);
-        
-        // Take min_category_size samples from each category
-        for (size_t i = 0; i < min_category_size; ++i) {
-            validation_pairs.push_back(pairs[indices[i]]);
-        }
-    }
-    
-    std::cout << "\nValidation Data Statistics:" << std::endl;
-    std::cout << "Total pairs after balancing: " << validation_pairs.size() << std::endl;
-    for (const auto& [category, pairs] : category_pairs) {
-        std::cout << category << " pairs: " << pairs.size() 
-                  << " (used " << min_category_size << ")" << std::endl;
-    }
-    
-    return validation_pairs;
+    return validation_data;
 }
 
 bool Utils::validate_input_sequence(const std::vector<int>& tokens, size_t vocab_size,
@@ -867,7 +730,7 @@ float Utils::evaluate_validation(
             tokenizer.preprocess_text(processed_input);
             std::vector<int> input_tokens = tokenizer.encode(processed_input);
             
-            // Forward pass to get hidden states (this should return hidden states, not logits)
+            // Forward pass to get hidden states
             Matrix hidden_states = transformer.forward(input_tokens, processed_input, tokenizer);
             std::cout << "Hidden states dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
             
@@ -892,32 +755,19 @@ float Utils::evaluate_validation(
                 }
             }
 
-            // Get target
-            std::string processed_target = pair.second;
-            tokenizer.preprocess_text(processed_target);
-            std::vector<int> target_tokens = tokenizer.encode(processed_target);
-
-            // Create target distribution
-            Matrix target_distribution(1, tokenizer.vocab_size(), 0.0f);
-            if (!target_tokens.empty()) {
-                target_distribution(0, target_tokens.back()) = 1.0f;
+            // Create target tokens directly from the validation pair
+            std::vector<int> target_tokens = tokenizer.encode(pair.second);
+            Matrix target_tokens_matrix(1, target_tokens.size());
+            for (size_t i = 0; i < target_tokens.size(); ++i) {
+                target_tokens_matrix(0, i) = static_cast<float>(target_tokens[i]);
             }
-
-            // Update logits matrix with modified values
-            Matrix last_token_logits(1, logits.cols());
-            for (size_t i = 0; i < last_logits.size(); i++) {
-                last_token_logits(0, i) = last_logits[i];
-            }
-
-            // Verify dimensions before computing loss
-            if (last_token_logits.cols() != target_distribution.cols()) {
-                throw std::runtime_error("Dimension mismatch: logits cols (" + 
-                    std::to_string(last_token_logits.cols()) + ") != target cols (" + 
-                    std::to_string(target_distribution.cols()) + ")");
-            }
-
-            float loss = compute_batch_loss(last_token_logits, target_distribution, tokenizer);
-            total_loss += loss;
+            Matrix val_target_dist = Utils::compute_target_distribution(target_tokens_matrix, tokenizer, config);
+            std::cout << "Target distribution shape: " << val_target_dist.rows() << "x" << val_target_dist.cols() << std::endl;
+            
+            // Compute loss and gradients
+            Matrix loss_gradients = compute_loss_gradient(logits, val_target_dist, config);
+            float example_loss = compute_batch_loss(logits, val_target_dist, tokenizer, config);
+            total_loss += example_loss;
 
             // Check if prediction matches target
             if (!target_tokens.empty() && predicted_token == target_tokens.back()) {
@@ -1155,6 +1005,22 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
     std::vector<int> current_input_tokens;
     Matrix current_loss_gradients;
     
+    // Declare grad_norm before use
+    float grad_norm = 0.0f;
+    for (size_t i = 0; i < current_loss_gradients.size(); i++) {
+        grad_norm += current_loss_gradients.data()[i] * current_loss_gradients.data()[i];
+    }
+    grad_norm = std::sqrt(grad_norm);
+    
+    // Declare accumulated_loss before use
+    float accumulated_loss = 0.0f;
+    
+    // Declare accum_step before use
+    size_t accum_step = 0;
+    
+    // Declare global_step before use
+    size_t global_step = 0;
+    
     for (size_t fold = 0; fold < folds.size(); fold++) {
         std::cout << "\n>>> Processing Fold " << fold + 1 << "/" << num_folds << std::endl;
         
@@ -1165,11 +1031,9 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
         std::deque<float> val_loss_history;
         float best_val_loss = std::numeric_limits<float>::max();
         size_t no_improvement_count = 0;
-        size_t global_step = 0;
         
-        // Gradient accumulation variables
-        size_t accum_step = 0;
-        float accumulated_loss = 0.0f;
+        // Declare train_loss before use
+        float train_loss = 0.0f;
         
         // Training loop for this fold
         for (size_t epoch = 0; epoch < config.num_epochs; epoch++) {
@@ -1188,59 +1052,24 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
                     // Forward pass through transformer to get hidden states
                     current_input_tokens = tokenizer.encode(pair.first);
                     Matrix hidden_states = transformer.forward(current_input_tokens, "", tokenizer);
+                    std::cout << "Hidden states dimensions: [" << hidden_states.rows() << "x" << hidden_states.cols() << "]" << std::endl;
                     
-                    // Project hidden states to vocabulary space through language model head
-                    Matrix logits = transformer.get_lm_head()->project_to_vocab(hidden_states);
+                    // Get language model head
+                    auto lm_head = transformer.get_lm_head();
+                    if (!lm_head) {
+                        throw std::runtime_error("Language model head not initialized");
+                    }
                     
-                    // Create target distribution
-                    Matrix target_distribution = create_batch_target_distribution(
-                        {tokenizer.encode(pair.second)}, tokenizer, tokenizer.vocab_size(), current_input_tokens.size());
+                    Matrix logits = lm_head->project_to_vocab(hidden_states);
+                    std::cout << "Logits dimensions: [" << logits.rows() << "x" << logits.cols() << "]" << std::endl;
                     
                     // Compute loss and gradients
-                    float example_loss = compute_batch_loss(logits, target_distribution, tokenizer);
-                    current_loss_gradients = compute_loss_gradient(logits, target_distribution);
+                    const Matrix& target_distribution = target_distribution;  // Use the parameter directly
+                    float example_loss = compute_batch_loss(logits, target_distribution, tokenizer, config);
+                    current_loss_gradients = compute_loss_gradient(logits, target_distribution, config);
                     
-                    // Apply gradient clipping
-                    float grad_norm = 0.0f;
-                    for (size_t i = 0; i < current_loss_gradients.rows(); ++i) {
-                        for (size_t j = 0; j < current_loss_gradients.cols(); ++j) {
-                            grad_norm += current_loss_gradients(i, j) * current_loss_gradients(i, j);
-                        }
-                    }
-                    grad_norm = std::sqrt(grad_norm);
-                    
-                    if (grad_norm > gradient_clip) {
-                        float scale = gradient_clip / grad_norm;
-                        for (size_t i = 0; i < current_loss_gradients.rows(); ++i) {
-                            for (size_t j = 0; j < current_loss_gradients.cols(); ++j) {
-                                current_loss_gradients(i, j) *= scale;
-                            }
-                        }
-                    }
-                    
-                    // Update learning rate with warmup and decay
-                    if (global_step < warmup_steps) {
-                        current_lr = initial_lr + (peak_lr - initial_lr) * (float)global_step / warmup_steps;
-                    } else {
-                        current_lr *= decay_factor;
-                    }
-                    
-                    // Gradient accumulation
-                    accumulated_loss += example_loss;
-                    accum_step++;
-                    
-                    // Only update parameters after accumulating enough gradients
-                    if (accum_step >= grad_accum_steps) {
-                        // Backward pass and parameter update with accumulated gradients
-                        transformer.backward(current_loss_gradients, current_input_tokens, current_lr);
-                        transformer.update_parameters(current_lr);
-                        
-                        // Reset accumulation
-                        accumulated_loss = 0.0f;
-                        accum_step = 0;
-                        current_loss_gradients = Matrix();  // Clear gradients
-                        current_input_tokens.clear();       // Clear tokens
-                    }
+                    // Backward pass
+                    transformer.backward(current_loss_gradients, current_input_tokens, 0.001f, target_distribution);
                     
                     train_loss += example_loss;
                     processed_examples++;
@@ -1250,54 +1079,48 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
                     if (processed_examples % 50 == 0) {
                         std::cout << "\n=== Test Predictions (Example " << processed_examples << ") ===\n";
                         if (!val_data.empty()) {
-                            try {
-                                size_t test_idx = global_step % val_data.size();
-                                const auto& [test_input, test_target] = val_data[test_idx];
-                                
-                                std::cout << "Processing test input: " << test_input << std::endl;
-                                
-                                // Generate prediction
-                                std::vector<int> test_tokens = tokenizer.encode(test_input);
-                                
-                                // Set to eval mode for prediction
-                                transformer.set_training(false);
-                                
-                                // Get hidden states from transformer
-                                Matrix hidden_states = transformer.forward(test_tokens, "", tokenizer);
-                                std::cout << "Hidden states shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-                                
-                                // Get language model head
-                                auto lm_head = transformer.get_lm_head();
-                                if (!lm_head) {
-                                    throw std::runtime_error("Language model head not initialized");
-                                }
-                                
-                                // Project hidden states to vocabulary space
-                                Matrix logits = lm_head->project_to_vocab(hidden_states);
-                                std::cout << "Logits shape: " << logits.rows() << "x" << logits.cols() << std::endl;
-                                
-                                // Print detailed prediction information
-                                std::cout << "\nTop 5 token predictions:\n";
-                                print_top_predictions(logits, tokenizer, transformer, 5);
-                                
-                                // Get most likely sequence
-                                std::vector<int> predicted_tokens = get_most_likely_tokens(logits);
-                                std::string prediction = tokenizer.decode(predicted_tokens);
-                                
-                                std::cout << "\nFull prediction details:"
-                                          << "\nInput: " << test_input
-                                          << "\nPredicted text: " << prediction
-                                          << "\nTarget: " << test_target << "\n"
-                                          << "======================================\n";
-                                
-                                // Reset to training mode
-                                transformer.set_training(true);
-                                
-                            } catch (const std::exception& e) {
-                                std::cerr << "Error generating test prediction: " << e.what() << std::endl;
-                                std::cout << "======================================\n";
-                                transformer.set_training(true);  // Ensure we reset to training mode even on error
+                            size_t test_idx = global_step % val_data.size();
+                            const auto& [test_input, test_target] = val_data[test_idx];
+                            
+                            std::cout << "Processing test input: " << test_input << std::endl;
+                            
+                            // Generate prediction
+                            std::vector<int> test_tokens = tokenizer.encode(test_input);
+                            
+                            // Set to eval mode for prediction
+                            transformer.set_training(false);
+                            
+                            // Get hidden states from transformer
+                            Matrix hidden_states = transformer.forward(test_tokens, "", tokenizer);
+                            std::cout << "Hidden states shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+                            
+                            // Get language model head
+                            auto lm_head = transformer.get_lm_head();
+                            if (!lm_head) {
+                                throw std::runtime_error("Language model head not initialized");
                             }
+                            
+                            // Project hidden states to vocabulary space
+                            Matrix logits = lm_head->project_to_vocab(hidden_states);
+                            std::cout << "Logits shape: " << logits.rows() << "x" << logits.cols() << std::endl;
+                            
+                            // Print detailed prediction information
+                            std::cout << "\nTop 5 token predictions:\n";
+                            print_top_predictions(logits, tokenizer, transformer, 5);
+                            
+                            // Get most likely sequence
+                            std::vector<int> predicted_tokens = get_most_likely_tokens(logits);
+                            std::string prediction = tokenizer.decode(predicted_tokens);
+                            
+                            std::cout << "\nFull prediction details:"
+                                      << "\nInput: " << test_input
+                                      << "\nPredicted text: " << prediction
+                                      << "\nTarget: " << test_target << "\n"
+                                      << "======================================\n";
+                            
+                            // Reset to training mode
+                            transformer.set_training(true);
+                            
                         }
                     }
                     
@@ -1321,8 +1144,8 @@ float Utils::perform_cross_validation(Transformer& transformer, const Tokenizer&
             
             // Process any remaining accumulated gradients
             if (accum_step > 0 && !current_input_tokens.empty()) {
-                transformer.backward(current_loss_gradients, current_input_tokens, current_lr);
-                transformer.update_parameters(current_lr);
+                const Matrix& target_distribution = target_distribution;  // Use the parameter directly
+                transformer.backward(current_loss_gradients, current_input_tokens, current_lr, target_distribution);
             }
             
             train_loss /= train_data.size();
@@ -1458,116 +1281,230 @@ std::vector<int> Utils::get_most_likely_tokens(const Matrix& logits) {
     return tokens;
 }
 
-void Utils::process_validation_example(Transformer& transformer, const std::string& input, const std::string& target, const Tokenizer& tokenizer) {
-    try {
-        // Preprocess input
-        std::string processed_input = input;
-        tokenizer.preprocess_text(processed_input);
-        std::vector<int> input_tokens = tokenizer.encode(processed_input);
-        
-        // Get hidden states from transformer
-        Matrix hidden_states = transformer.forward(input_tokens, processed_input, tokenizer);
-        std::cout << "Hidden states from transformer: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
-        
-        // Project through language model head to get logits
-        auto lm_head = transformer.get_lm_head();
-        if (!lm_head) {
-            throw std::runtime_error("Language model head is not initialized");
-        }
-        Matrix logits = lm_head->project_to_vocab(hidden_states);
-        std::cout << "Final logits after LM head: [" << logits.rows() << " x " << logits.cols() << "]" << std::endl;
-        
-        // Create target distribution using the correct function signature
-        std::string processed_target = target;
-        tokenizer.preprocess_text(processed_target);
-        std::vector<int> target_tokens = tokenizer.encode(processed_target);
-        std::vector<std::vector<int>> target_batch = {target_tokens};  // Single example batch
-        
-        // Get the actual vocabulary size from the tokenizer
-        size_t vocab_size = tokenizer.vocab_size();
-        
-        Matrix target_distribution = create_batch_target_distribution(
-            target_batch,
-            tokenizer,
-            vocab_size,      // Use actual vocab size from tokenizer
-            logits.rows()    // sequence_length
-        );
-        std::cout << "Target distribution shape: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
-        
-        // Compute loss using the logits (not hidden states)
-        float batch_loss = compute_batch_loss(logits, target_distribution, tokenizer);
-        std::cout << "Batch loss: " << batch_loss << std::endl;
-        
-        // Print detailed prediction information
-        std::cout << "\nTop 5 token predictions:\n";
-        print_top_predictions(logits, tokenizer, transformer, 5);
-        
-        // Get most likely sequence
-        std::vector<int> predicted_tokens = get_most_likely_tokens(logits);
-        std::string prediction = tokenizer.decode(predicted_tokens);
-        
-        std::cout << "\nFull prediction details:"
-                  << "\nInput: " << input
-                  << "\nPredicted text: " << prediction
-                  << "\nTarget: " << target << "\n"
-                  << "======================================\n";
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Error processing validation example: " << e.what() << std::endl;
-        throw;
+void Utils::process_validation_example(Transformer& transformer, 
+                                     const std::string& input, 
+                                     const std::string& target, 
+                                     const Tokenizer& tokenizer,
+                                     const TransformerConfig& config) {
+    std::vector<int> input_tokens = tokenizer.encode(input);
+    std::vector<int> target_tokens = tokenizer.encode(target);
+
+    // Convert target_tokens to Matrix if needed
+    Matrix target_tokens_matrix(1, target_tokens.size());
+    for (size_t i = 0; i < target_tokens.size(); ++i) {
+        target_tokens_matrix(0, i) = static_cast<float>(target_tokens[i]);
     }
+
+    Matrix val_target_dist = Utils::compute_target_distribution(target_tokens_matrix, tokenizer, config);
+    Matrix output = transformer.forward(input_tokens, "", tokenizer);
+    Matrix loss_gradients = compute_loss_gradient(output, val_target_dist, config);
+
+    transformer.backward(loss_gradients, input_tokens, 0.001f, val_target_dist);
 }
 
-void Utils::train_step(Transformer& transformer, const std::vector<std::vector<int>>& input_tokens,
-                     const Matrix& target_distribution, const Tokenizer& tokenizer,
-                     size_t& processed_examples, size_t& global_step,
-                     const std::vector<std::pair<std::string, std::string>>& val_data) {
+void Utils::train_step(Transformer& transformer,
+                      const std::vector<std::vector<int>>& input_tokens,
+                      const Matrix& target_distribution,
+                      const Tokenizer& tokenizer,
+                      size_t& processed_examples,
+                      size_t& global_step,
+                      const std::vector<std::pair<std::string, std::string>>& val_data) {
     try {
+        const auto& config = transformer.getConfig();
+        
+        // Declare train_loss before use
+        float train_loss = 0.0f;
+        
         // Process each example in the batch
         for (size_t i = 0; i < input_tokens.size(); i++) {
-            // Get hidden states from transformer
+            // Forward pass
             Matrix hidden_states = transformer.forward(input_tokens[i], "", tokenizer);
             
-            // Project hidden states to vocabulary space using LM head
+            // Get language model head
             auto lm_head = transformer.get_lm_head();
             if (!lm_head) {
                 throw std::runtime_error("Language model head not initialized");
             }
+            
             Matrix logits = lm_head->project_to_vocab(hidden_states);
             
-            // Compute batch loss using logits
-            float batch_loss = compute_batch_loss(logits, target_distribution, tokenizer);
+            // Use target_distribution directly since it's already a Matrix parameter
+            float example_loss = compute_batch_loss(logits, target_distribution, tokenizer, config);
+            Matrix loss_gradients = compute_loss_gradient(logits, target_distribution, config);
+
+            // Backward pass
+            transformer.backward(loss_gradients, input_tokens[i], 0.001f, target_distribution);
             
-            // Compute loss gradients
-            Matrix loss_gradients = compute_loss_gradient(logits, target_distribution);
-            
-            // Backward pass through LM head first
-            Matrix hidden_grads = lm_head->backward_pass(loss_gradients, hidden_states);
-            
-            // Then backward through transformer with hidden state gradients
-            transformer.backward(hidden_grads, input_tokens[i], 0.001f);
-            
+            train_loss += example_loss;
             processed_examples++;
             global_step++;
+            
+            // Print training statistics
+            std::cout << "\nTraining Statistics (Example " << processed_examples << "):"
+                      << "\n- Loss: " << example_loss << std::endl;
             
             // Show test predictions every 50 examples
             if (processed_examples % 50 == 0) {
                 std::cout << "\n=== Test Predictions (Example " << processed_examples << ") ===\n";
                 if (!val_data.empty()) {
-                    try {
-                        size_t test_idx = global_step % val_data.size();
-                        const auto& [test_input, test_target] = val_data[test_idx];
-                        process_validation_example(transformer, test_input, test_target, tokenizer);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error generating test prediction: " << e.what() << std::endl;
-                        std::cout << "======================================\n";
-                    }
-                    transformer.set_training(true);  // Reset to training mode
+                    size_t test_idx = global_step % val_data.size();
+                    const auto& [test_input, test_target] = val_data[test_idx];
+                    process_validation_example(transformer, test_input, test_target, tokenizer, config);
                 }
             }
         }
+
+        // Process validation examples
+        if (processed_examples % 50 == 0 && !val_data.empty()) {
+            size_t test_idx = global_step % val_data.size();
+            const auto& [test_input, test_target] = val_data[test_idx];
+            
+            // Convert validation target to tokens
+            std::vector<int> val_target_tokens = tokenizer.encode(test_target);
+            Matrix target_tokens_matrix(1, val_target_tokens.size());
+            for (size_t i = 0; i < val_target_tokens.size(); ++i) {
+                target_tokens_matrix(0, i) = static_cast<float>(val_target_tokens[i]);
+            }
+            
+            Matrix val_target_dist = Utils::compute_target_distribution(target_tokens_matrix, tokenizer, config);
+            process_validation_example(transformer, test_input, test_target, tokenizer, config);
+        }
+
     } catch (const std::exception& e) {
-        std::cerr << "Error processing example " << processed_examples << ": " << e.what() << std::endl;
+        std::cerr << "Error in train_step: " << e.what() << std::endl;
         throw;
     }
+}
+
+float Utils::compute_loss(const Matrix& output, const Matrix& target_distribution,
+                         const TransformerConfig& config) {
+    float loss = 0.0f;
+    const float epsilon = config.use_fp16 ? 1e-6f : 1e-10f;
+    
+    #ifdef USE_CUDA
+    cudaDeviceSynchronize();
+    #endif
+    
+    // Compute actual loss
+    for (size_t i = 0; i < output.rows(); ++i) {
+        for (size_t j = 0; j < output.cols(); ++j) {
+            if (target_distribution(i, j) > 0.0f) {
+                float pred = std::max(output(i, j), epsilon);
+                loss -= target_distribution(i, j) * std::log(pred);
+            }
+        }
+    }
+    
+    #ifdef USE_CUDA
+    cudaDeviceSynchronize();
+    #endif
+    
+    return loss / output.rows();
+}
+
+Matrix Utils::compute_loss_gradient(const Matrix& output, const Matrix& target_distribution,
+                                   const TransformerConfig& config) {
+    // Add detailed dimension checks
+    if (output.rows() != target_distribution.rows() || output.cols() != target_distribution.cols()) {
+        throw std::runtime_error("Dimension mismatch in compute_loss_gradient: output[" + 
+                               std::to_string(output.rows()) + "," + std::to_string(output.cols()) + 
+                               "] vs target[" + std::to_string(target_distribution.rows()) + "," + 
+                               std::to_string(target_distribution.cols()) + "]");
+    }
+    
+    // Add debug print
+    std::cout << "Computing gradient for matrices of size: [" << output.rows() << "x" << output.cols() << "]" << std::endl;
+    
+    Matrix gradient(output.rows(), output.cols());
+    const float epsilon = config.use_fp16 ? 1e-6f : 1e-10f;
+    
+    #ifdef USE_CUDA
+    cudaDeviceSynchronize();
+    #endif
+    
+    // Compute gradient
+    for (size_t i = 0; i < output.rows(); ++i) {
+        for (size_t j = 0; j < output.cols(); ++j) {
+            float pred = std::max(output(i, j), epsilon);
+            gradient(i, j) = (pred - target_distribution(i, j)) / output.rows();
+        }
+    }
+    
+    #ifdef USE_CUDA
+    cudaDeviceSynchronize();
+    #endif
+    
+    return gradient;
+}
+
+Matrix Utils::compute_target_distribution(const Matrix& target_tokens, 
+                                         const Tokenizer& tokenizer,
+                                         const TransformerConfig& config) {
+    const size_t batch_size = target_tokens.rows();
+    const size_t seq_length = target_tokens.cols();
+    const size_t vocab_size = tokenizer.get_vocab_size();
+    
+    Matrix target_dist(batch_size * seq_length, vocab_size, 0.0f);
+    
+    // Convert token indices to one-hot vectors
+    for (size_t i = 0; i < batch_size; ++i) {
+        for (size_t j = 0; j < seq_length; ++j) {
+            int token_idx = static_cast<int>(target_tokens(i, j));
+            if (token_idx >= 0 && static_cast<size_t>(token_idx) < vocab_size) {
+                target_dist(i * seq_length + j, token_idx) = 1.0f;
+            } else {
+                std::cout << "Warning: Token ID " << token_idx << " is outside vocabulary size " << vocab_size << std::endl;
+            }
+        }
+    }
+    
+    // Apply label smoothing if enabled
+    if (config.label_smoothing > 0.0f) {
+        const float smooth_value = config.label_smoothing / (vocab_size - 1);
+        for (size_t i = 0; i < target_dist.rows(); ++i) {
+            for (size_t j = 0; j < target_dist.cols(); ++j) {
+                if (target_dist(i, j) == 1.0f) {
+                    target_dist(i, j) = 1.0f - config.label_smoothing;
+                } else {
+                    target_dist(i, j) = smooth_value;
+                }
+            }
+        }
+    }
+    
+    return target_dist;
+}
+
+struct EvaluationMetrics {
+    float accuracy;
+    float precision;
+    float recall;
+    float f_score;
+};
+
+EvaluationMetrics compute_metrics(const std::vector<int>& predictions, const std::vector<int>& targets) {
+    size_t correct = 0;
+    size_t true_positives = 0;
+    size_t false_positives = 0;
+    size_t false_negatives = 0;
+
+    for (size_t i = 0; i < predictions.size(); ++i) {
+        if (predictions[i] == targets[i]) {
+            correct++;
+            true_positives++;
+        } else {
+            if (predictions[i] != -1) false_positives++;
+            if (targets[i] != -1) false_negatives++;
+        }
+    }
+
+    float accuracy = static_cast<float>(correct) / predictions.size();
+    float precision = (true_positives + false_positives == 0) ? 0.0f :
+                     static_cast<float>(true_positives) / (true_positives + false_positives);
+    float recall = (true_positives + false_negatives == 0) ? 0.0f :
+                  static_cast<float>(true_positives) / (true_positives + false_negatives);
+    float f_score = (precision + recall == 0) ? 0.0f :
+                    (2 * precision * recall) / (precision + recall);
+
+    return {accuracy, precision, recall, f_score};
 }

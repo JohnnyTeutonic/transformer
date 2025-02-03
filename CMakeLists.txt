@@ -264,6 +264,7 @@ if(CUDAToolkit_FOUND)
         src/cuda/beam_search_ops.cu
         src/cuda/tokenizer_kernels.cu
         src/cuda/matrix_multiply.cu
+        src/cuda/parameter_update_kernels.cu
     )
 
     set_target_properties(cuda_kernels PROPERTIES

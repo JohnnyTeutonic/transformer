@@ -59,6 +59,10 @@ public:
         }
     }
 
+    size_t get_vocab_size() const {
+        return vocab_size();
+    }
+
 protected:
     // Token category sets
     std::unordered_set<std::string> verb_tokens_;

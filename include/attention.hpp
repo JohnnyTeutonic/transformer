@@ -112,8 +112,7 @@ class MultiHeadAttention {
      * @param target_distribution Optional target attention distribution
      * @return Gradient with respect to the input
      */
-    Matrix backward(const Matrix& grad_output, const Matrix& input,
-                    const Matrix& target_distribution = Matrix());
+    Matrix backward(const Matrix& grad_output, const Matrix& input, const Matrix& target_distribution);
 
     /**
      * @brief CUDA-accelerated version of the backward pass.

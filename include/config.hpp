@@ -114,6 +114,8 @@ struct TransformerConfig {
     bool load_from_checkpoint = false;
     std::string checkpoint_to_load = "";
 
+    float label_smoothing = 0.0f;  // Default: no label smoothing
+
     /**
      * @brief Constructs a transformer configuration with default values.
      * @param vocab_size Size of the vocabulary (default: 32000)

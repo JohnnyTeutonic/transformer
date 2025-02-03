@@ -408,6 +408,17 @@ class Matrix {
      * @throws std::runtime_error if matrix doesn't own its data
      */
     void initialize_constant(float value);
+
+    Matrix reshape(size_t new_rows, size_t new_cols) const {
+        if (new_rows * new_cols != rows_ * cols_) {
+            throw std::runtime_error("Cannot reshape matrix of size " + 
+                                   std::to_string(rows_) + "x" + std::to_string(cols_) + 
+                                   " to " + std::to_string(new_rows) + "x" + std::to_string(new_cols));
+        }
+        Matrix result(new_rows, new_cols);
+        std::copy(data_.begin(), data_.end(), result.data_.begin());
+        return result;
+    }
 };
 
 // Make to_vector inline to allow multiple definitions
