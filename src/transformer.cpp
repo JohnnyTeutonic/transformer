@@ -432,7 +432,7 @@ void Transformer::backward(const Matrix& grad_output,
     // Backward through layers
     for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
         std::cout << "Backward through layer " << i << std::endl;
-        Matrix layer_grad = layers[i]->backward(reshaped_grad, layers[i]->get_input(), target_distribution);
+        Matrix layer_grad = backward(reshaped_grad, layers[i]->get_input(), target_distribution);
         reshaped_grad = layer_grad;
     }
 
@@ -570,7 +570,7 @@ void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens,
             grad_stats.update(scaled_grad);
             
             // Accumulate gradients without applying learning rate
-            backward(scaled_grad, layers[i]->get_input(), target_distribution);  // Pass input for backward
+            backward(scaled_grad, layers[i]->get_input(), i, target_distribution);
         }
         
         if ((current_step + 1) % gradient_accumulation_steps == 0) {

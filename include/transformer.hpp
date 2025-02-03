@@ -369,10 +369,18 @@ public:
      */
     void clear_kv_cache();
 
+    // Main backward function for training
     void backward(const Matrix& grad_output, 
                  const std::vector<int>& input_tokens, 
                  float learning_rate,
                  const Matrix& target_distribution);
+
+    // Layer-wise backward function
+    Matrix backward(const Matrix& grad_output, 
+                   const Matrix& activation, 
+                   size_t layer_idx,
+                   const Matrix& target_distribution);
+
     Matrix backward_cuda(const Matrix& grad, const Matrix& activation, size_t layer_idx);
     std::vector<Matrix>& parameters();
     void save(std::ostream& os) const;
@@ -488,6 +496,11 @@ private:
         const Matrix& logits,
         const Tokenizer& tokenizer
     );
+
+    // Add this overload
+    Matrix backward(const Matrix& grad_output, 
+                   const Matrix& activation, 
+                   const Matrix& target_distribution);
 };
 
 class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp
