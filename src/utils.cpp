@@ -75,45 +75,35 @@ Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int
     // Create target distribution for all token positions
     Matrix target_distribution(total_tokens, vocab_size, 0.0f);
     
-    // Set target distribution for each token in each sequence
+    // Set target distribution for each sequence's final token
     size_t current_pos = 0;
     for (size_t seq = 0; seq < target_tokens.size(); seq++) {
         const auto& sequence = target_tokens[seq];
         
-        // Find the start of the noun phrase at the end
-        size_t noun_phrase_start = sequence.size();
-        for (size_t i = sequence.size(); i > 0; --i) {
-            std::string token = tokenizer.decode({sequence[i-1]});
-            if (!tokenizer.is_noun(token)) {
-                break;
-            }
-            noun_phrase_start = i-1;
-        }
-        
-        // Set actual tokens with higher weight for noun phrase tokens
-        for (size_t i = 0; i < sequence.size(); i++) {
-            // Ensure token ID is within vocab_size bounds
-            int token_id = sequence[i];
-            if (token_id >= 0 && static_cast<size_t>(token_id) < vocab_size) {  // Use the passed vocab_size
-                float weight = (i >= noun_phrase_start) ? 1.0f : 0.5f;
-                target_distribution(current_pos, token_id) = weight;
+        // For each position in the sequence length
+        for (size_t i = 0; i < input_max_seq_len; i++) {
+            if (i < sequence.size()) {
+                // Only set target distribution for the final token
+                if (i == sequence.size() - 1) {
+                    int token_id = sequence[i];
+                    if (token_id >= 0 && static_cast<size_t>(token_id) < vocab_size) {
+                        target_distribution(current_pos, token_id) = 1.0f;
+                    } else {
+                        std::cout << "Warning: Token ID " << token_id << " is outside vocabulary size " << vocab_size << std::endl;
+                    }
+                }
             } else {
-                std::cout << "Warning: Token ID " << token_id << " is outside vocabulary size " << vocab_size << std::endl;
+                // For padding positions, set pad token with zero weight
+                int pad_token = tokenizer.get_pad_token_id();
+                if (pad_token >= 0 && static_cast<size_t>(pad_token) < vocab_size) {
+                    target_distribution(current_pos, pad_token) = 0.0f;
+                }
             }
             current_pos++;
         }
-        
-        // Pad remaining positions with pad token
-        int pad_token = tokenizer.get_pad_token_id();
-        if (pad_token >= 0 && static_cast<size_t>(pad_token) < vocab_size) {  // Use the passed vocab_size
-            for (size_t i = sequence.size(); i < input_max_seq_len; i++) {
-                target_distribution(current_pos, pad_token) = 1.0f;
-                current_pos++;
-            }
-        }
     }
     
-    // Normalize the target distributions
+    // Normalize the target distributions (only for rows that have non-zero sums)
     for (size_t i = 0; i < total_tokens; i++) {
         float row_sum = 0.0f;
         for (size_t j = 0; j < vocab_size; j++) {
