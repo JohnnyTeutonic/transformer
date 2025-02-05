@@ -114,9 +114,7 @@ public:
     static float perform_cross_validation(
         Transformer& transformer,
         const Tokenizer& tokenizer,
-        const std::vector<std::pair<std::string, std::string>>& train_data,
-        const size_t num_folds,
-        const float early_stopping_threshold
+        const std::vector<std::pair<std::string, std::string>>& train_data
     );
 
     // Add inline utility functions for gradient computation

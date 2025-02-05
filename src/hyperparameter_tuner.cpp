@@ -246,11 +246,9 @@ TuningResult HyperparameterTuner::evaluate_config(
         
         // Train and evaluate - updated to match new signature
         float fold_loss = Utils::perform_cross_validation(
-            transformer, 
-            tokenizer, 
-            train_data,
-            transformer_config.training.cross_validation.num_folds,
-            transformer_config.training.cross_validation.early_stopping_threshold
+            transformer,  // The transformer already contains the config
+            tokenizer,
+            train_data
         );
         
         result.fold_scores.push_back(fold_loss);

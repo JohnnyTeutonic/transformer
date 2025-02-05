@@ -129,10 +129,17 @@ struct TransformerConfig {
     float epsilon = 1e-8f;
 
     struct TrainingConfig {
-        size_t batch_size = 16;        // Reduced for small dataset
-        size_t num_epochs = 5;         // Reduced from 10
+        size_t batch_size = 16;
+        size_t num_epochs = 3;
         float dropout_rate = 0.1f;
         float weight_decay = 0.01f;
+        
+        struct CrossValidationConfig {
+            size_t num_folds = 2;
+            size_t validation_frequency = 1;
+            float early_stopping_threshold = 1.5f;
+            size_t early_stopping_patience = 2;
+        } cross_validation;
         
         // Learning rate parameters
         struct LearningRateConfig {
@@ -144,18 +151,10 @@ struct TransformerConfig {
             float min_lr = 1e-4f;
         } learning_rate;
 
-        // Cross validation parameters
-        struct CrossValidationConfig {
-            size_t num_folds = 3;           // Reduced from 5
-            size_t validation_frequency = 2; // Check validation every N epochs
-            float early_stopping_threshold = 1.5f;
-            size_t early_stopping_patience = 2;  // Reduced from 3
-        } cross_validation;
-
         // Hyperparameter tuning
         struct TuningConfig {
-            size_t num_trials = 10;         // Reduced from 20
-            size_t evaluation_steps = 50;   // Reduced from larger value
+            size_t num_trials = 10;
+            size_t evaluation_steps = 50;
             bool enabled = true;
         } tuning;
     } training;

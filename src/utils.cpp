@@ -1028,12 +1028,15 @@ Utils::create_cross_validation_folds(const std::vector<std::pair<std::string, st
 float Utils::perform_cross_validation(
     Transformer& transformer,
     const Tokenizer& tokenizer,
-    const std::vector<std::pair<std::string, std::string>>& train_data,
-    const size_t num_folds,
-    const float early_stopping_threshold
-) {
+    const std::vector<std::pair<std::string, std::string>>& train_data)
+{
     const auto& config = transformer.getConfig();
+    // Get values from the nested config structure
+    const size_t num_folds = config.training.cross_validation.num_folds;
+    const float early_stopping_threshold = config.training.cross_validation.early_stopping_threshold;
+
     std::cout << "\nPerforming " << num_folds << "-fold cross-validation..." << std::endl;
+    std::cout << "Using early stopping threshold: " << early_stopping_threshold << std::endl;
     
     auto folds = create_cross_validation_folds(train_data, num_folds);
     float total_loss = 0.0f;
@@ -1131,7 +1134,7 @@ float Utils::perform_cross_validation(
             std::cout << "Validation Loss after epoch " << (epoch + 1) << ": " << val_loss << std::endl;
             
             // Check for early stopping using configured threshold
-            if (val_loss > config.early_stopping_threshold) {
+            if (val_loss > early_stopping_threshold) {
                 std::cout << "Early stopping triggered on fold " << (fold + 1) << std::endl;
                 early_stops++;
                 break;

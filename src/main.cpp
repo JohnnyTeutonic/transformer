@@ -490,10 +490,11 @@ int main(int argc, char* argv[]) {
         all_data.insert(all_data.end(), validation_data.begin(), validation_data.end());
         
         // Perform initial cross-validation to establish baseline
-        const size_t NUM_FOLDS = 5;
-        const float EARLY_STOPPING_THRESHOLD = 1.5f;  // Ratio of val_loss/train_loss that triggers early stopping
-        float initial_cv_loss = Utils::perform_cross_validation(transformer, *tokenizer, all_data, 
-                                                              NUM_FOLDS, EARLY_STOPPING_THRESHOLD);
+        float initial_cv_loss = Utils::perform_cross_validation(
+            transformer, 
+            *tokenizer, 
+            all_data
+        );
         std::cout << "Initial cross-validation loss: " << initial_cv_loss << std::endl;
 
         // Update any hardcoded token references
@@ -806,8 +807,11 @@ int main(int argc, char* argv[]) {
 
             // Perform cross-validation every few epochs
             if ((epoch + 1) % 3 == 0) {  // Every 3 epochs
-                float cv_loss = Utils::perform_cross_validation(transformer, *tokenizer, all_data, 
-                                                              NUM_FOLDS, early_stopping_threshold);
+                float cv_loss = Utils::perform_cross_validation(
+                    transformer, 
+                    *tokenizer, 
+                    all_data
+                );
                 std::cout << "Cross-validation loss after epoch " << epoch + 1 << ": " << cv_loss << std::endl;
                 
                 // Early stopping based on cross-validation with tuned parameters
