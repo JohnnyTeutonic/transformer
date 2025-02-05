@@ -20,15 +20,15 @@ constexpr size_t MIN_ACTIVE_TOKENS = 1000;  // Reasonable default value
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     : hidden_size_(hidden_size), vocab_size_(vocab_size), 
-      projection(vocab_size, hidden_size),  // [vocab_size x hidden_size] for correct transposition
+      projection(hidden_size, vocab_size),  // Changed: [hidden_size x vocab_size]
       bias(vocab_size, 0.0f),
       token_frequencies(vocab_size, 0.0f),
       pruning_threshold(1e-6f),
       active_tokens(vocab_size, 1),
       training_steps(0),
       is_training_(false),
-      m_proj(vocab_size, hidden_size, 0.0f),  // Match projection dimensions
-      v_proj(vocab_size, hidden_size, 0.0f),  // Match projection dimensions
+      m_proj(hidden_size, vocab_size, 0.0f),  // Changed: match new projection dimensions
+      v_proj(hidden_size, vocab_size, 0.0f),  // Changed: match new projection dimensions
       m_bias(vocab_size, 0.0f),
       v_bias(vocab_size, 0.0f),
       t(0),
@@ -57,7 +57,8 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     std::cout << "- Hidden size: " << hidden_size << std::endl;
     std::cout << "- Vocab size: " << vocab_size << std::endl;
     std::cout << "- Projection matrix: " << projection.rows() << "x" << projection.cols() << std::endl;
-    std::cout << "- Projection matrix shape: [vocab_size x hidden_size] = [" << vocab_size << " x " << hidden_size << "]" << std::endl;
+    std::cout << "- Projection matrix shape: [hidden_size x vocab_size] = [" 
+              << hidden_size << " x " << vocab_size << "]" << std::endl;
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
@@ -74,17 +75,17 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     
     // Project hidden states to vocabulary space
     // hidden_states: [batch_size x hidden_size]
-    // projection: [vocab_size x hidden_size] (transposed)
+    // projection: [hidden_size x vocab_size]
     // result: [batch_size x vocab_size]
     Matrix logits(hidden_states.rows(), vocab_size_);
     
     std::cout << "Matrix dimensions:" << std::endl;
     std::cout << "- Hidden states: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-    std::cout << "- Projection (transposed): " << projection.rows() << "x" << projection.cols() << std::endl;
+    std::cout << "- Projection: " << projection.rows() << "x" << projection.cols() << std::endl;
     std::cout << "- Output logits: " << logits.rows() << "x" << logits.cols() << std::endl;
     
-    // Perform matrix multiplication with transposed projection
-    cuda::matmul_transposed(hidden_states, projection, logits);
+    // Perform matrix multiplication (no need for transposition now)
+    cuda::matmul(hidden_states, projection, logits);
     
     // Add bias
     for (size_t i = 0; i < logits.rows(); ++i) {
@@ -118,12 +119,15 @@ Matrix LanguageModelHead::backward(const Matrix& grad_output, const Matrix& targ
     std::cout << "- Target distribution: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
     std::cout << "- Cached hidden states: " << hidden_states_.rows() << "x" << hidden_states_.cols() << std::endl;
     
+    // Verify input dimensions
+    if (grad_output.cols() != vocab_size_) {
+        throw std::runtime_error("Gradient output dimension mismatch in backward pass. Expected vocab_size: " + 
+                               std::to_string(vocab_size_) + ", got: " + std::to_string(grad_output.cols()));
+    }
+
     // Use backward_pass which already has Adam optimization
     Matrix grad_hidden = backward_pass(grad_output, hidden_states_);
-    std::cout << "After backward_pass, gradient shape: " 
-              << grad_hidden.rows() << "x" << grad_hidden.cols() << std::endl;
     
-    std::cout << "=== LanguageModelHead::backward END ===" << std::endl;
     return grad_hidden;
 }
 
@@ -293,16 +297,8 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     // hidden_states.T: [hidden_size x batch_size]
     // grad_output: [batch_size x vocab_size]
     // grad_proj: [hidden_size x vocab_size]
-    std::cout << "before multiplying hidden states transpose with grad output" << std::endl;
     Matrix hidden_states_t = hidden_states.transpose();
-    Matrix temp_grad = matmul(hidden_states_t, grad_output);
-    Matrix grad_proj = temp_grad.transpose();  // Transpose to match m_proj dimensions
-    
-    std::cout << "Gradient computation dimensions:" << std::endl;
-    std::cout << "- hidden_states_t: " << hidden_states_t.rows() << "x" << hidden_states_t.cols() << std::endl;
-    std::cout << "- grad_output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-    std::cout << "- temp_grad: " << temp_grad.rows() << "x" << temp_grad.cols() << std::endl;
-    std::cout << "- grad_proj (transposed): " << grad_proj.rows() << "x" << grad_proj.cols() << std::endl;
+    Matrix grad_proj = matmul(hidden_states_t, grad_output);  // No need for extra transpose
     
     // Compute bias gradients
     Vector grad_bias = grad_output.row_sum();
@@ -407,17 +403,10 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     }
     
     // Compute gradient with respect to input
-    // grad_output: [batch_size x vocab_size] = [6x2857]
-    // projection: [vocab_size x hidden_size] = [2857x256]
-    // We want result: [batch_size x hidden_size] = [6x256]
-    std::cout << "Computing gradient with respect to input" << std::endl;
-    std::cout << "Dimensions:" << std::endl;
-    std::cout << "- grad_output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-    std::cout << "- projection: " << projection.rows() << "x" << projection.cols() << std::endl;
-    
-    // Multiply directly: [6x2857] * [2857x256] = [6x256]
-    Matrix grad_input = matmul(grad_output, projection);
-    std::cout << "- grad_input: " << grad_input.rows() << "x" << grad_input.cols() << std::endl;
+    // grad_output: [batch_size x vocab_size]
+    // projection.T: [vocab_size x hidden_size]
+    Matrix projection_t = projection.transpose();
+    Matrix grad_input = matmul(grad_output, projection_t);
     
     // Verify output dimensions
     if (grad_input.cols() != hidden_size_) {

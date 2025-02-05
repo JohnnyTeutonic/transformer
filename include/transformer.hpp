@@ -299,10 +299,9 @@ private:
     bool is_likely_adjective(const std::string& token) const;
 
     std::string extract_prediction(
-        const Matrix& logits,
+        const Matrix& hidden_states,
         PhraseType phrase_type,
-        const Tokenizer& tokenizer,
-        std::mt19937* gen = nullptr
+        const Tokenizer& tokenizer
     );
 
 public:

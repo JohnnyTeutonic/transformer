@@ -52,6 +52,10 @@ namespace cuda {
     }
 
     void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
+        // A: [batch_size x hidden_size]
+        // B: [hidden_size x vocab_size]
+        // C: [batch_size x vocab_size]
+        
         // Ensure CUDA is initialized
         if (!cuda_initialized || cublas_handle == nullptr) {
             initialize_cuda();

@@ -451,10 +451,10 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
     // Cache final hidden states for backward pass
     GradientCheckpoint::cache_activation("final_hidden_states", hidden_states);
     
-    // Project hidden states to vocabulary space using LM head
+    // Project to vocabulary space using LM head
     Matrix logits = lm_head->forward(hidden_states);
     
-    // Return logits
+    // Return logits (in vocab space)
     return logits;
 }
 
@@ -627,24 +627,28 @@ void Transformer::backward(const Matrix& logits, const Matrix& target_distributi
     std::cout << "- Target: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
 
     try {
-        // First backward through LM head
-        std::cout << "\nStarting LM head backward..." << std::endl;
-        Matrix d_hidden = lm_head->backward(logits, target_distribution);
-        std::cout << "After LM head backward, gradient shape: " 
-                  << d_hidden.rows() << "x" << d_hidden.cols() << std::endl;
-
-        // Then through final layer norm if present
-        if (final_ln) {
-            std::cout << "\nBackward through final layer norm..." << std::endl;
-            Matrix last_hidden = GradientCheckpoint::get_activation("final_hidden_states");
-            std::cout << "Retrieved cached hidden states: " 
-                      << last_hidden.rows() << "x" << last_hidden.cols() << std::endl;
-            d_hidden = final_ln->backward(d_hidden, last_hidden);
-            std::cout << "After layer norm backward: " 
-                      << d_hidden.rows() << "x" << d_hidden.cols() << std::endl;
+        // Get cached hidden states
+        Matrix last_hidden = GradientCheckpoint::get_activation("final_hidden_states");
+        if (last_hidden.empty()) {
+            throw std::runtime_error("No cached hidden states found for backward pass");
         }
 
-        // Rest of implementation...
+        // First compute loss gradient with respect to hidden states
+        Matrix hidden_grad(logits.rows(), config.hidden_size);
+        
+        // Backward through final layer norm if present
+        if (final_ln) {
+            hidden_grad = final_ln->backward(logits, last_hidden);
+        } else {
+            hidden_grad = logits;  // If no layer norm, use logits directly
+        }
+
+        // Now backward through LM head with hidden gradients
+        std::cout << "\nStarting LM head backward..." << std::endl;
+        Matrix d_hidden = lm_head->backward(hidden_grad, target_distribution);
+
+        // Continue with rest of backward pass...
+        
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
         throw;
@@ -968,10 +972,10 @@ std::pair<std::string, PhraseType> Transformer::predict_final_phrase(
     std::vector<int> tokens = tokenizer.encode(input_text);
     
     // Forward pass
-    Matrix logits = forward(tokens, input_text, tokenizer);
+    Matrix hidden_states = forward(tokens, input_text, tokenizer);
     
     // Extract the prediction based on the predicted type
-    std::string predicted_phrase = extract_prediction(logits, predicted_type, tokenizer);
+    std::string predicted_phrase = extract_prediction(hidden_states, predicted_type, tokenizer);
     
     return {predicted_phrase, predicted_type};
 }
@@ -984,29 +988,29 @@ PhraseType Transformer::predict_phrase_type(
     std::vector<int> tokens = tokenizer.encode(input_text);
     
     // Forward pass
-    Matrix logits = forward(tokens, input_text, tokenizer);
+    Matrix hidden_states = forward(tokens, input_text, tokenizer);
     
-    // Analyze logits to determine phrase type
-    return analyze_phrase_type(logits, tokenizer);
+    // Analyze hidden states to determine phrase type
+    return analyze_phrase_type(hidden_states, tokenizer);
 }
 
 PhraseType Transformer::analyze_phrase_type(
-    const Matrix& logits,
+    const Matrix& hidden_states,
     const Tokenizer& tokenizer
 ) {
     // Get the final token predictions
-    Matrix final_logits = Matrix(logits.row(logits.rows() - 1));
+    Matrix final_hidden_states = Matrix(hidden_states.row(hidden_states.rows() - 1));
     
-    // Convert logits to probabilities
-    float max_logit = -std::numeric_limits<float>::infinity();
-    for (size_t i = 0; i < final_logits.cols(); i++) {
-        max_logit = std::max(max_logit, final_logits(0, i));
+    // Convert hidden states to probabilities
+    float max_hidden_state = -std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < final_hidden_states.cols(); i++) {
+        max_hidden_state = std::max(max_hidden_state, final_hidden_states(0, i));
     }
     
-    std::vector<float> probabilities(final_logits.cols());
+    std::vector<float> probabilities(final_hidden_states.cols());
     float sum_exp = 0.0f;
-    for (size_t i = 0; i < final_logits.cols(); i++) {
-        probabilities[i] = std::exp(final_logits(0, i) - max_logit);
+    for (size_t i = 0; i < final_hidden_states.cols(); i++) {
+        probabilities[i] = std::exp(final_hidden_states(0, i) - max_hidden_state);
         sum_exp += probabilities[i];
     }
     for (float& prob : probabilities) {
@@ -1093,41 +1097,40 @@ PhraseType Transformer::analyze_phrase_type(
 }
 
 std::string Transformer::extract_prediction(
-    const Matrix& logits,
+    const Matrix& hidden_states,
     PhraseType phrase_type,
-    const Tokenizer& tokenizer,
-    std::mt19937* gen
+    const Tokenizer& tokenizer
 ) {
     // Create a local generator if none provided
-    std::mt19937 local_gen = gen ? *gen : Utils::get_new_generator();
+    std::mt19937 local_gen = Utils::get_new_generator();
     
     // Get the final token predictions
-    Matrix final_logits = Matrix(logits.row(logits.rows() - 1));
+    Matrix final_hidden_states = Matrix(hidden_states.row(hidden_states.rows() - 1));
     
     // Apply dynamic temperature scaling based on a random factor
     std::uniform_real_distribution<float> temp_dist(0.7f, 1.3f);
     const float temperature = temp_dist(local_gen);  // Random temperature for each prediction
     
-    // Add random noise to logits for more variety
+    // Add random noise to hidden states for more variety
     std::normal_distribution<float> noise_dist(0.0f, 0.1f);
-    for (size_t i = 0; i < final_logits.cols(); i++) {
-        final_logits(0, i) += noise_dist(local_gen);
+    for (size_t i = 0; i < final_hidden_states.cols(); i++) {
+        final_hidden_states(0, i) += noise_dist(local_gen);
     }
     
-    float max_logit = -std::numeric_limits<float>::infinity();
+    float max_hidden_state = -std::numeric_limits<float>::infinity();
     
     // Find max for numerical stability
-    for (size_t i = 0; i < final_logits.cols(); i++) {
-        max_logit = std::max(max_logit, final_logits(0, i));
+    for (size_t i = 0; i < final_hidden_states.cols(); i++) {
+        max_hidden_state = std::max(max_hidden_state, final_hidden_states(0, i));
     }
     
     // Compute softmax probabilities with temperature
-    std::vector<float> probabilities(final_logits.cols());
+    std::vector<float> probabilities(final_hidden_states.cols());
     float sum_exp = 0.0f;
     
-    for (size_t i = 0; i < final_logits.cols(); i++) {
-        float scaled_logit = (final_logits(0, i) - max_logit) / temperature;
-        probabilities[i] = std::exp(scaled_logit);
+    for (size_t i = 0; i < final_hidden_states.cols(); i++) {
+        float scaled_hidden_state = (final_hidden_states(0, i) - max_hidden_state) / temperature;
+        probabilities[i] = std::exp(scaled_hidden_state);
         sum_exp += probabilities[i];
     }
     

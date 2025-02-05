@@ -733,19 +733,30 @@ float Utils::evaluate_validation(
     Transformer& transformer, 
     const Tokenizer& tokenizer,
     const std::vector<std::pair<std::string, std::string>>& validation_data) {
-    std::cout << "\n=== Evaluating Validation Data ===\n";
+    
+    std::cout << "\n=== Starting evaluate_validation ===" << std::endl << std::flush;
 
     if (validation_data.empty()) {
-        std::cout << "Warning: Empty validation data\n";
+        std::cout << "Warning: Empty validation data\n" << std::flush;
         return 0.0f;
     }
+
+    std::cout << "Validation data size: " << validation_data.size() << std::endl << std::flush;
 
     float total_loss = 0.0f;
     size_t correct_predictions = 0;
     size_t total_predictions = 0;
     const size_t BATCH_SIZE = 32;
 
+    std::cout << "Set training mode to false" << std::endl << std::flush;
     transformer.set_training(false);
+
+    // Before the loop
+    std::cout << "About to enter batch processing loop with:"
+              << "\nbatch_start = 0"
+              << "\nbatch_end = " << validation_data.size()
+              << "\nvalidation_data.size() = " << validation_data.size() 
+              << std::endl << std::flush;
 
     // Process data in batches
     for (size_t batch_start = 0; batch_start < validation_data.size(); batch_start += BATCH_SIZE) {
@@ -761,23 +772,22 @@ float Utils::evaluate_validation(
 
         // Process each example in the batch
         for (size_t i = batch_start; i < batch_end; i++) {
+            std::cout << "Processing example " << i << std::endl;  // Add this
             try {
                 const auto& pair = validation_data[i];
+                std::cout << "Got validation pair" << std::endl;  // Add this
                 std::string processed_input = pair.first;
+                std::cout << "Got input: '" << processed_input << "'" << std::endl;  // Add this
                 tokenizer.preprocess_text(processed_input);
                 std::vector<int> input_tokens = tokenizer.encode(processed_input);
+                std::cout << "Encoded input tokens, size: " << input_tokens.size() << std::endl;  // Add this
                 
-                // Forward pass
-                Matrix hidden_states = transformer.forward(input_tokens, processed_input, tokenizer);
-                auto lm_head = transformer.get_lm_head();
-                if (!lm_head) {
-                    throw std::runtime_error("Language model head is not initialized");
-                }
-                Matrix logits = lm_head->forward(hidden_states);
+                // Get logits directly from transformer - don't project again through LM head
+                Matrix logits = transformer.forward(input_tokens, processed_input, tokenizer);
                 
                 // Debug dimensions
                 std::cout << "Dimensions:"
-                          << "\n- Hidden states: " << hidden_states.rows() << "x" << hidden_states.cols()
+                          << "\n- Hidden states: " << logits.rows() << "x" << logits.cols()
                           << "\n- Logits: " << logits.rows() << "x" << logits.cols()
                           << "\n- Vocab size: " << tokenizer.vocab_size() << std::endl;
                 
@@ -1130,6 +1140,8 @@ float Utils::perform_cross_validation(
             
             // Evaluate on validation set after each epoch
             transformer.set_training(false);
+            std::cout << "About to call evaluate_validation in perform cross validation" << std::endl << std::flush;
+
             float val_loss = evaluate_validation(transformer, tokenizer, val_fold);
             std::cout << "Validation Loss after epoch " << (epoch + 1) << ": " << val_loss << std::endl;
             
@@ -1143,6 +1155,7 @@ float Utils::perform_cross_validation(
         
         // Final evaluation for this fold
         transformer.set_training(false);
+        std::cout << "About to call evaluate_validation in main loop" << std::endl << std::flush;
         float fold_loss = evaluate_validation(transformer, tokenizer, val_fold);
         total_loss += fold_loss;
         
