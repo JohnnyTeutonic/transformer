@@ -20,27 +20,17 @@
         "token_noise_scale": 0.1,
         "top_k": 100,
         "top_p": 0.98,
-        "use_beam_search": true
+        "use_beam_search": false
     },
     "checkpoint_to_load": "",
-    "early_stopping": {
-        "patience": 3,
-        "threshold": 1.5
-    },
-    "learning_rate": {
-        "decay_factor": 0.98,
-        "initial_lr": 0.0001,
-        "peak_lr": 0.001,
-        "warmup_steps": 100
-    },
     "load_from_checkpoint": false,
     "model": {
         "head_dim": 32,
-        "hidden_size": 128,
-        "intermediate_size": 256,
+        "hidden_size": 256,
+        "intermediate_size": 512,
         "max_seq_length": 512,
         "num_heads": 8,
-        "num_layers": 4,
+        "num_layers": 6,
         "vocab_size": 2857
     },
     "optimization": {
@@ -52,7 +42,7 @@
         "use_gradient_checkpointing": true
     },
     "paths": {
-        "checkpoint_frequency": 5,
+        "checkpoint_frequency": 2,
         "model_name": "transformer_model",
         "save_directory": "checkpoints"
     },
@@ -89,9 +79,28 @@
         "vocab_size": 2857
     },
     "training": {
-        "batch_size": 32,
-        "dropout_rate": 0.3,
-        "num_epochs": 10,
+        "batch_size": 16,
+        "cross_validation": {
+            "early_stopping_patience": 2,
+            "early_stopping_threshold": 1.5,
+            "num_folds": 3,
+            "validation_frequency": 2
+        },
+        "dropout_rate": 0.1,
+        "learning_rate": {
+            "decay_factor": 0.98,
+            "decay_steps": 250,
+            "initial_lr": 0.0001,
+            "min_lr": 0.0001,
+            "peak_lr": 0.002,
+            "warmup_steps": 15
+        },
+        "num_epochs": 5,
+        "tuning": {
+            "enabled": true,
+            "evaluation_steps": 50,
+            "num_trials": 10
+        },
         "weight_decay": 0.01
     },
     "vocab_size": 2857

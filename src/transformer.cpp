@@ -620,124 +620,135 @@ void Transformer::clear_gradients() {
 }
 
 // New batch backward method implementation
-void Transformer::backward(std::vector<Matrix>& outputs, const Matrix& target_distribution,
-                         float learning_rate) {
-    static const bool use_fp16 = config.use_fp16;
-    
-    Matrix grad = outputs.back();
-    if (use_fp16) {
-        HalfPrecisionTraining::convert_to_fp16(grad);
+void Transformer::backward(const Matrix& logits, const Matrix& target_distribution, float learning_rate) {
+    std::cout << "\n=== Transformer::backward START ===" << std::endl;
+    std::cout << "Input dimensions:" << std::endl;
+    std::cout << "- Logits: " << logits.rows() << "x" << logits.cols() << std::endl;
+    std::cout << "- Target: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
+
+    try {
+        // First backward through LM head
+        std::cout << "\nStarting LM head backward..." << std::endl;
+        Matrix d_hidden = lm_head->backward(logits, target_distribution);
+        std::cout << "After LM head backward, gradient shape: " 
+                  << d_hidden.rows() << "x" << d_hidden.cols() << std::endl;
+
+        // Then through final layer norm if present
+        if (final_ln) {
+            std::cout << "\nBackward through final layer norm..." << std::endl;
+            Matrix last_hidden = GradientCheckpoint::get_activation("final_hidden_states");
+            std::cout << "Retrieved cached hidden states: " 
+                      << last_hidden.rows() << "x" << last_hidden.cols() << std::endl;
+            d_hidden = final_ln->backward(d_hidden, last_hidden);
+            std::cout << "After layer norm backward: " 
+                      << d_hidden.rows() << "x" << d_hidden.cols() << std::endl;
+        }
+
+        // Rest of implementation...
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
+        throw;
     }
-    // ... rest of batch implementation
 }
 
 void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens, 
                          const Matrix& target_distribution,
                          const Tokenizer& tokenizer) {
-    static int current_step = 0;
-    const int gradient_accumulation_steps = 4;
-    static LearningRateScheduler lr_scheduler(1e-4f, 1e-3f, 100);  // Initial LR, max LR, warmup steps
-    static bool cross_validation_initialized = false;
-    static std::vector<std::pair<std::vector<std::pair<std::string, std::string>>, 
-                                std::vector<std::pair<std::string, std::string>>>> cv_folds;
-    static size_t current_fold = 0;
-    const size_t num_folds = 5;
-    const float early_stopping_threshold = 1.5f;
-    
+    std::cout << "\n=== Starting train_step ===" << std::endl;
+    std::cout << "Input batch details:"
+              << "\n  Number of sequences: " << input_tokens.size()
+              << "\n  Target distribution shape: " << target_distribution.rows() 
+              << "x" << target_distribution.cols() << std::endl;
+
+    // Print sequence lengths
+    std::cout << "\nSequence lengths:" << std::endl;
+    size_t max_seq_length = 0;
+    for (size_t i = 0; i < input_tokens.size(); ++i) {
+        std::cout << "  Sequence " << i << ": " << input_tokens[i].size() << " tokens" << std::endl;
+        max_seq_length = std::max(max_seq_length, input_tokens[i].size());
+    }
+    std::cout << "Maximum sequence length: " << max_seq_length << std::endl;
+
     try {
-        // Initialize cross-validation folds if not done yet
-        if (!cross_validation_initialized) {
-            std::cout << "\nInitializing 5-fold cross-validation..." << std::endl;
-            auto training_data = Utils::create_training_data();
-            cv_folds = Utils::create_cross_validation_folds(training_data, num_folds);
-            cross_validation_initialized = true;
-            std::cout << "Created " << cv_folds.size() << " folds" << std::endl;
+        // Create a batched input matrix
+        size_t batch_size = input_tokens.size();
+        std::cout << "\nPreparing batched input..." << std::endl;
+        
+        // Initialize embeddings for all sequences
+        std::vector<Matrix> sequence_embeddings;
+        for (const auto& tokens : input_tokens) {
+            Matrix seq_embedding = token_embedding->forward(tokens);
+            std::cout << "Sequence embedding shape: " << seq_embedding.rows() 
+                      << "x" << seq_embedding.cols() << std::endl;
+            sequence_embeddings.push_back(seq_embedding);
         }
         
-        // Get current fold's training and validation data
-        const auto& [train_data, val_data] = cv_folds[current_fold];
+        // Combine embeddings into a single batch
+        size_t hidden_size = sequence_embeddings[0].cols();
+        Matrix batched_hidden_states(batch_size * max_seq_length, hidden_size);
         
-        if (current_step % gradient_accumulation_steps == 0) {
-            clear_gradients();
-        }
+        std::cout << "Creating batched hidden states with shape: " 
+                  << batched_hidden_states.rows() << "x" << batched_hidden_states.cols() << std::endl;
         
-        size_t effective_batch_size = input_tokens.size();
-        float scale_factor = 1.0f / (gradient_accumulation_steps * effective_batch_size);
-        
-        std::vector<Matrix> batch_outputs;
-        float total_loss = 0.0f;
-        
-        // Track gradient statistics
-        struct GradStats {
-            float norm = 0.0f;
-            float max_abs = 0.0f;
-            size_t num_params = 0;
-            void update(const Matrix& grad) {
-                norm += Utils::compute_grad_norm(grad);
-                num_params += Utils::count_params(grad);
-                for (size_t i = 0; i < grad.rows(); ++i) {
-                    for (size_t j = 0; j < grad.cols(); ++j) {
-                        max_abs = std::max(max_abs, std::abs(grad(i, j)));
-                    }
+        // Copy embeddings into batched matrix with padding
+        for (size_t i = 0; i < batch_size; ++i) {
+            const Matrix& seq_emb = sequence_embeddings[i];
+            size_t seq_len = seq_emb.rows();
+            
+            // Copy actual sequence
+            for (size_t j = 0; j < seq_len; ++j) {
+                for (size_t k = 0; k < hidden_size; ++k) {
+                    batched_hidden_states(i * max_seq_length + j, k) = seq_emb(j, k);
                 }
             }
-        };
-        GradStats grad_stats;
-        
-        // Get current learning rate
-        float current_lr = lr_scheduler.get_lr(current_step / gradient_accumulation_steps);
-        
-        for (size_t i = 0; i < input_tokens.size(); ++i) {
-            Matrix output = forward(input_tokens[i], "", tokenizer);
-            batch_outputs.push_back(output);
             
-            float batch_loss = Utils::compute_loss(output, target_distribution);
-            total_loss += batch_loss;
-            
-            Matrix scaled_grad = Utils::compute_loss_gradient(output, target_distribution);
-            scaled_grad *= scale_factor;
-            
-            // Track gradient statistics before scaling
-            grad_stats.update(scaled_grad);
-            
-            // Accumulate gradients without applying learning rate
-            backward(scaled_grad, input_tokens[i], 0.0f);  // Pass 0.0f to accumulate without updating
-        }
-        
-        if ((current_step + 1) % gradient_accumulation_steps == 0) {
-            // Log detailed statistics
-            std::cout << "\nTraining Statistics (Fold " << current_fold + 1 << "/" << num_folds << "):" << std::endl;
-            std::cout << "Step: " << current_step / gradient_accumulation_steps << std::endl;
-            std::cout << "Learning Rate: " << current_lr << std::endl;
-            std::cout << "Average Loss: " << (total_loss / effective_batch_size) << std::endl;
-            std::cout << "Gradient Statistics:" << std::endl;
-            std::cout << "- Average Gradient Norm: " << (grad_stats.norm / std::sqrt(grad_stats.num_params)) << std::endl;
-            std::cout << "- Max Absolute Gradient: " << grad_stats.max_abs << std::endl;
-            std::cout << "- Total Parameters Updated: " << grad_stats.num_params << std::endl;
-            
-            // Only apply learning rate during parameter update
-            update_parameters(current_lr);
-            
-            // Run validation on current fold
-            float val_loss = Utils::evaluate_validation(*this, tokenizer, val_data);
-            std::cout << "Validation Loss (Fold " << current_fold + 1 << "): " << val_loss << std::endl;
-            
-            // Adjust learning rate based on validation performance
-            float loss_ratio = val_loss / (total_loss / effective_batch_size);
-            current_lr = Utils::adjust_learning_rate(current_lr, loss_ratio, current_step / gradient_accumulation_steps);
-            lr_scheduler.set_lr(current_lr);
-            
-            // Check if we should move to next fold
-            if (loss_ratio > early_stopping_threshold || 
-                (current_step / gradient_accumulation_steps) % 1000 == 0) {  // Switch folds every 1000 effective steps
-                std::cout << "\nMoving to next fold..." << std::endl;
-                current_fold = (current_fold + 1) % num_folds;
-                // Reset learning rate for new fold
-                lr_scheduler = LearningRateScheduler(1e-4f, 1e-3f, 100);
+            // Zero-pad remaining positions
+            for (size_t j = seq_len; j < max_seq_length; ++j) {
+                for (size_t k = 0; k < hidden_size; ++k) {
+                    batched_hidden_states(i * max_seq_length + j, k) = 0.0f;
+                }
             }
         }
         
-        current_step++;
+        // Forward through transformer layers
+        Matrix hidden_states = batched_hidden_states;
+        for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+            std::cout << "Layer " << layer_idx + 1 << " input shape: " 
+                      << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+            hidden_states = layers[layer_idx]->forward(hidden_states, AttentionMask());
+            std::cout << "Layer " << layer_idx + 1 << " output shape: " 
+                      << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+        }
+        
+        // Final layer norm
+        if (final_ln) {
+            std::cout << "\nApplying final layer normalization" << std::endl;
+            hidden_states = final_ln->forward(hidden_states);
+            std::cout << "After layer norm shape: " 
+                      << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+        }
+        
+        // Language model head
+        std::cout << "\nApplying language model head" << std::endl;
+        Matrix output = lm_head->forward(hidden_states);
+        std::cout << "Final output shape: " << output.rows() << "x" << output.cols() << std::endl;
+        
+        // Compare dimensions before loss computation
+        std::cout << "\nDimension comparison before loss:"
+                  << "\n  Model output: " << output.rows() << "x" << output.cols()
+                  << "\n  Target distribution: " << target_distribution.rows() 
+                  << "x" << target_distribution.cols() << std::endl;
+        
+        // Compute loss
+        float batch_loss = Utils::compute_loss(output, target_distribution);
+        std::cout << "Computed batch loss: " << batch_loss << std::endl;
+        
+        // Compute gradients and backpropagate
+        Matrix grad = Utils::compute_loss_gradient(output, target_distribution);
+        std::cout << "Starting backward pass with gradient shape: "
+                  << grad.rows() << "x" << grad.cols() << std::endl;
+                  
+        // Rest of backward pass implementation...
         
     } catch (const std::exception& e) {
         std::cerr << "Error in train_step: " << e.what() << std::endl;
@@ -1598,4 +1609,24 @@ Transformer& Transformer::operator=(const Transformer& other) {
         last_input_query_ = other.last_input_query_;
     }
     return *this;
+}
+
+void Transformer::backward(const Matrix& grad, const Matrix& activation, size_t layer_idx) {
+    if (layer_idx >= layers.size()) {
+        throw std::runtime_error("Layer index out of bounds in backward pass");
+    }
+    
+    // Ensure we're in training mode
+    if (!training) {
+        throw std::runtime_error("Cannot perform backward pass while in inference mode");
+    }
+
+    // Store gradients for the current layer
+    if (!parameter_grads.has_value()) {
+        parameter_grads = std::vector<Matrix>();
+    }
+    
+    // Compute gradients through the layer
+    Matrix layer_grads = layers[layer_idx]->backward(grad, activation);
+    parameter_grads->push_back(layer_grads);
 }

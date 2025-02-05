@@ -94,28 +94,26 @@ struct TuningResult {
 
 class HyperparameterTuner {
 public:
-    HyperparameterTuner(const HyperparameterRanges& ranges, 
-                        size_t num_trials = 50,
-                        size_t num_folds = 5,
-                        unsigned int random_seed = 42);
-    
-    // Main tuning function
-    std::vector<TuningResult> tune(const std::vector<std::pair<std::string, std::string>>& training_data,
-                                  const Tokenizer& tokenizer);
-    
-    // Get best configuration
+    HyperparameterTuner(const HyperparameterRanges& ranges,
+                        const TransformerConfig& config,
+                        unsigned int seed = std::random_device{}());
+
+    std::vector<TuningResult> tune(
+        const std::vector<std::pair<std::string, std::string>>& training_data,
+        const Tokenizer& tokenizer
+    );
+
     HyperparameterConfig get_best_config() const;
-    
-    // Save/load results
     void save_results(const std::string& path) const;
-    void load_results(const std::string& path);
 
 private:
     // Internal helper functions
     HyperparameterConfig sample_random_config();
-    TuningResult evaluate_config(const HyperparameterConfig& config,
-                               const std::vector<std::pair<std::string, std::string>>& data,
-                               const Tokenizer& tokenizer);
+    TuningResult evaluate_config(
+        const HyperparameterConfig& config,
+        const std::vector<std::pair<std::string, std::string>>& data,
+        const Tokenizer& tokenizer,
+        const TransformerConfig& transformer_config);
     
     // Member variables
     HyperparameterRanges ranges_;
@@ -123,6 +121,7 @@ private:
     size_t num_folds_;
     std::mt19937 rng_;
     std::vector<TuningResult> results_;
+    TransformerConfig config_;
     
     // Validation helpers
     bool validate_config(const HyperparameterConfig& config) const;

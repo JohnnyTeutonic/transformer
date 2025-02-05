@@ -45,7 +45,39 @@ private:
     );
 
 public:
-    static float adjust_learning_rate(float current_lr, float loss_ratio, size_t step);
+    /**
+     * @brief Find the index of the maximum value in a Matrix row or Vector
+     * @param row The Matrix row or Vector to find the maximum value in
+     * @return The index of the maximum value
+     */
+    static size_t argmax(const Matrix& row) {
+        if (row.rows() != 1) {
+            throw std::runtime_error("argmax expects a single row matrix");
+        }
+        return std::distance(
+            row.data(),
+            std::max_element(row.data(), row.data() + row.cols())
+        );
+    }
+
+    /**
+     * @brief Find the index of the maximum value in a Vector
+     * @param vec The Vector to find the maximum value in
+     * @return The index of the maximum value
+     */
+    static size_t argmax(const Vector& vec) {
+        return std::distance(
+            vec.data(),
+            std::max_element(vec.data(), vec.data() + vec.size())
+        );
+    }
+
+    static float adjust_learning_rate(
+        float current_lr, 
+        float loss_ratio, 
+        size_t step,
+        const TransformerConfig& config
+    );
     static bool validate_input_sequence(const std::vector<int>& tokens, size_t vocab_size,
                                         size_t max_seq_length = 512);
     static void print_matrix(const Matrix& m, const std::string& name, size_t max_rows = 5,
@@ -87,11 +119,13 @@ public:
     create_cross_validation_folds(const std::vector<std::pair<std::string, std::string>>& data, 
                                 size_t num_folds);
 
-    static float perform_cross_validation(Transformer& transformer, 
-                                        const Tokenizer& tokenizer,
-                                        const std::vector<std::pair<std::string, std::string>>& data,
-                                        size_t num_folds, 
-                                        float early_stopping_threshold);
+    static float perform_cross_validation(
+        Transformer& transformer,
+        const Tokenizer& tokenizer,
+        const std::vector<std::pair<std::string, std::string>>& train_data,
+        const size_t num_folds,
+        const float early_stopping_threshold
+    );
 
     // Add inline utility functions for gradient computation
     static inline float compute_grad_norm(const Matrix& grad) {

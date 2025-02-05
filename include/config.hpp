@@ -114,6 +114,38 @@ struct TransformerConfig {
     bool load_from_checkpoint = false;
     std::string checkpoint_to_load = "";
 
+    struct TrainingConfig {
+        size_t batch_size = 16;        // Reduced for small dataset
+        size_t num_epochs = 5;         // Reduced from 10
+        float dropout_rate = 0.1f;
+        float weight_decay = 0.01f;
+        
+        // Learning rate parameters
+        struct LearningRateConfig {
+            float initial_lr = 1e-4f;
+            float peak_lr = 2e-3f;
+            size_t warmup_steps = 15;
+            float decay_factor = 0.98f;
+            size_t decay_steps = 250;
+            float min_lr = 1e-4f;
+        } learning_rate;
+
+        // Cross validation parameters
+        struct CrossValidationConfig {
+            size_t num_folds = 3;           // Reduced from 5
+            size_t validation_frequency = 2; // Check validation every N epochs
+            float early_stopping_threshold = 1.5f;
+            size_t early_stopping_patience = 2;  // Reduced from 3
+        } cross_validation;
+
+        // Hyperparameter tuning
+        struct TuningConfig {
+            size_t num_trials = 10;         // Reduced from 20
+            size_t evaluation_steps = 50;   // Reduced from larger value
+            bool enabled = true;
+        } tuning;
+    } training;
+
     /**
      * @brief Constructs a transformer configuration with default values.
      * @param vocab_size Size of the vocabulary (default: 32000)

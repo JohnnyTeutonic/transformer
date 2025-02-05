@@ -116,6 +116,67 @@ namespace cuda {
         CUDA_CHECK(cudaFree(d_C));
     }
 
+    void matmul_transposed(const Matrix& A, const Matrix& B, Matrix& C) {
+        // Ensure CUDA is initialized
+        if (!cuda_initialized || cublas_handle == nullptr) {
+            initialize_cuda();
+        }
+
+        // Verify dimensions for transposed multiplication
+        // A: [M x K], B: [N x K] (transposed), C: [M x N]
+        if (A.cols() != B.cols()) {
+            throw std::runtime_error("Matrix multiplication dimension mismatch for transposed operation: " +
+                std::to_string(A.rows()) + "x" + std::to_string(A.cols()) + " * " +
+                std::to_string(B.rows()) + "x" + std::to_string(B.cols()));
+        }
+        
+        // Ensure output matrix has correct dimensions
+        if (C.rows() != A.rows() || C.cols() != B.rows()) {
+            throw std::runtime_error("Output matrix has wrong dimensions: expected " +
+                std::to_string(A.rows()) + "x" + std::to_string(B.rows()) + " got " +
+                std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
+        }
+
+        float* d_A, *d_B, *d_C;
+        size_t A_size = A.rows() * A.cols() * sizeof(float);
+        size_t B_size = B.rows() * B.cols() * sizeof(float);
+        size_t C_size = C.rows() * C.cols() * sizeof(float);
+
+        CUDA_CHECK(cudaMalloc(&d_A, A_size));
+        CUDA_CHECK(cudaMalloc(&d_B, B_size));
+        CUDA_CHECK(cudaMalloc(&d_C, C_size));
+
+        CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
+
+        float alpha = 1.0f;
+        float beta = 0.0f;
+
+        // For A[M,K] * B[N,K]^T = C[M,N], we compute:
+        // C = A * B^T
+        cublasStatus_t status = cublasSgemm(cublas_handle,
+                                          CUBLAS_OP_T, CUBLAS_OP_N,  // Transpose B, no transpose A
+                                          B.rows(), A.rows(), A.cols(),  // M, N, K dimensions
+                                          &alpha,
+                                          d_B, B.cols(),  // Leading dimension is cols for B
+                                          d_A, A.cols(),  // Leading dimension is cols for A
+                                          &beta,
+                                          d_C, B.rows()); // Leading dimension is rows of B for C
+
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            CUDA_CHECK(cudaFree(d_A));
+            CUDA_CHECK(cudaFree(d_B));
+            CUDA_CHECK(cudaFree(d_C));
+            throw std::runtime_error("cuBLAS matrix multiplication failed: " + std::to_string(status));
+        }
+
+        CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
+
+        CUDA_CHECK(cudaFree(d_A));
+        CUDA_CHECK(cudaFree(d_B));
+        CUDA_CHECK(cudaFree(d_C));
+    }
+
     void gelu_forward(Matrix& x) {
         float* d_x;
         size_t size = x.size() * sizeof(float);

@@ -104,14 +104,18 @@ HyperparameterConfig HyperparameterConfig::load(const std::string& path) {
 }
 
 // HyperparameterTuner implementation
-HyperparameterTuner::HyperparameterTuner(const HyperparameterRanges& ranges,
-                                         size_t num_trials,
-                                         size_t num_folds,
-                                         unsigned int seed)
-    : ranges_(ranges), num_trials_(num_trials), num_folds_(num_folds), rng_(seed) {
+HyperparameterTuner::HyperparameterTuner(
+    const HyperparameterRanges& ranges,
+    const TransformerConfig& config,
+    unsigned int seed)
+    : ranges_(ranges), 
+      config_(config),
+      num_trials_(config.training.tuning.num_trials),
+      num_folds_(config.training.cross_validation.num_folds),
+      rng_(seed) {
     std::cout << "Initializing HyperparameterTuner with:"
-              << "\n- Number of trials: " << num_trials
-              << "\n- Number of folds: " << num_folds
+              << "\n- Number of trials: " << num_trials_
+              << "\n- Number of folds: " << num_folds_
               << "\n- Random seed: " << seed << std::endl;
 }
 
@@ -217,13 +221,17 @@ bool HyperparameterTuner::validate_config(const HyperparameterConfig& config) co
 TuningResult HyperparameterTuner::evaluate_config(
     const HyperparameterConfig& config,
     const std::vector<std::pair<std::string, std::string>>& data,
-    const Tokenizer& tokenizer) {
+    const Tokenizer& tokenizer,
+    const TransformerConfig& transformer_config) {
     
     TuningResult result;
     result.config = config;
     
     // Create cross-validation folds
-    auto folds = Utils::create_cross_validation_folds(data, num_folds_);
+    auto folds = Utils::create_cross_validation_folds(
+        data, 
+        transformer_config.training.cross_validation.num_folds
+    );
     
     // Evaluate each fold
     float total_loss = 0.0f;
@@ -233,30 +241,35 @@ TuningResult HyperparameterTuner::evaluate_config(
         const auto& [train_data, val_data] = folds[fold];
         
         // Create transformer with current config
-        auto transformer_config = config.to_transformer_config();
-        Transformer transformer(transformer_config);
+        auto trial_transformer_config = config.to_transformer_config();
+        Transformer transformer(trial_transformer_config);
         
-        // Train and evaluate
+        // Train and evaluate - updated to match new signature
         float fold_loss = Utils::perform_cross_validation(
-            transformer, tokenizer, train_data, 1, config.early_stopping_threshold);
+            transformer, 
+            tokenizer, 
+            train_data,
+            transformer_config.training.cross_validation.num_folds,
+            transformer_config.training.cross_validation.early_stopping_threshold
+        );
         
         result.fold_scores.push_back(fold_loss);
         total_loss += fold_loss;
         
         // Check for early stopping
-        if (fold_loss > config.early_stopping_threshold) {
+        if (fold_loss > transformer_config.training.cross_validation.early_stopping_threshold) {
             early_stops++;
         }
     }
     
     // Compute statistics
-    result.mean_validation_loss = total_loss / num_folds_;
+    result.mean_validation_loss = total_loss / transformer_config.training.cross_validation.num_folds;
     
     float variance = 0.0f;
     for (float score : result.fold_scores) {
         variance += (score - result.mean_validation_loss) * (score - result.mean_validation_loss);
     }
-    result.validation_loss_std = std::sqrt(variance / num_folds_);
+    result.validation_loss_std = std::sqrt(variance / transformer_config.training.cross_validation.num_folds);
     result.early_stops = early_stops;
     
     return result;
@@ -314,24 +327,36 @@ std::vector<TuningResult> HyperparameterTuner::tune(
     const std::vector<std::pair<std::string, std::string>>& training_data,
     const Tokenizer& tokenizer) {
     
+    // Store transformer_config as member variable or pass it to tune
+    const TransformerConfig& transformer_config = config_;  // Add this as member variable
+    
+    if (!transformer_config.training.tuning.enabled) {
+        std::cout << "Hyperparameter tuning is disabled in config" << std::endl;
+        return {};
+    }
+
+    const auto& tuning_config = transformer_config.training.tuning;
+    std::cout << "\nStarting hyperparameter tuning with " 
+              << tuning_config.num_trials << " trials..." << std::endl;
+    
     results_.clear();  // Clear any previous results
     
-    for (size_t trial = 0; trial < num_trials_; ++trial) {
+    for (size_t trial = 0; trial < tuning_config.num_trials; ++trial) {
         // Sample a random configuration
-        auto config = sample_random_config();
+        auto trial_config = sample_random_config();
         
         // Skip invalid configurations
-        if (!validate_config(config)) {
+        if (!validate_config(trial_config)) {
             std::cout << "Skipping invalid configuration in trial " << trial + 1 << std::endl;
             continue;
         }
         
         // Evaluate the configuration
-        auto result = evaluate_config(config, training_data, tokenizer);
+        auto result = evaluate_config(trial_config, training_data, tokenizer, transformer_config);
         results_.push_back(result);
         
         // Log progress
-        log_trial_progress(trial + 1, result);
+        log_trial_progress(trial, result);
     }
     
     // Sort results by performance

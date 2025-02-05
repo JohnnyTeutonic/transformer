@@ -336,6 +336,14 @@ public:
     Matrix forward(const std::vector<int>& input_tokens, const std::string& original_query, const Tokenizer& tokenizer);
 
     /**
+     * @brief Performs backward pass and updates model parameters
+     * @param logits Output logits from forward pass
+     * @param target_distribution Target probability distribution
+     * @param learning_rate Learning rate for parameter updates
+     */
+    void backward(const Matrix& logits, const Matrix& target_distribution, float learning_rate);
+
+    /**
      * @brief Trains the transformer on the given dataset.
      * @param input_tokens Batch of input token sequences
      * @param target_tokens Batch of target token sequences
@@ -364,8 +372,14 @@ public:
      */
     void clear_kv_cache();
 
-    Matrix backward(const Matrix& grad, const Matrix& activation, size_t layer_idx);
-    Matrix backward_cuda(const Matrix& grad, const Matrix& activation, size_t layer_idx);
+    /**
+     * @brief Performs backward pass through a specific layer
+     * @param grad Gradient tensor from the next layer
+     * @param activation Input activation for this layer
+     * @param layer_idx Index of the layer to perform backward pass on
+     */
+    void backward(const Matrix& grad, const Matrix& activation, size_t layer_idx);
+
     std::vector<Matrix>& parameters();
     void save(std::ostream& os) const;
     void load(std::istream& is);

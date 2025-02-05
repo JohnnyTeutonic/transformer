@@ -8,6 +8,7 @@ namespace cuda {
 
     // Matrix operations
     void matmul(const Matrix& A, const Matrix& B, Matrix& C);
+    void matmul_transposed(const Matrix& A, const Matrix& B, Matrix& C);
     void add(const Matrix& A, const Matrix& B, Matrix& C);
     
     // GELU operations

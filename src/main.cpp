@@ -327,24 +327,9 @@ void generate_predictions(Transformer& transformer, const std::string& input_tex
         prob /= filtered_sum;
     }
     
-    // Shuffle the filtered probabilities to break any remaining frequency bias
-    std::shuffle(filtered_probs.begin(), filtered_probs.end(), gen);
+    // Show predictions using the standard utility function
+    Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
     
-    // Sort again by probability for display
-    std::sort(filtered_probs.begin(), filtered_probs.end(),
-              [](const auto& a, const auto& b) { return a.first > b.first; });
-    
-    // Print top 5 predictions
-    std::cout << "Top 5 predictions:" << std::endl;
-    for (int i = 0; i < std::min(5, static_cast<int>(filtered_probs.size())); ++i) {
-        int token_id = filtered_probs[i].second;
-        float prob = filtered_probs[i].first;
-        std::string token = tokenizer->decode({token_id});
-        std::cout << std::fixed << std::setprecision(5)
-                  << "   " << token << " (" << prob * 100 << "%)" << std::endl;
-    }
-    
-    std::cout << "--" << std::endl;
     std::cout << "Nonzero final: " << filtered_probs.size() << "/" << token_probs.size() << std::endl << std::endl;
 }
 
@@ -677,7 +662,7 @@ int main(int argc, char* argv[]) {
         
         // Initialize hyperparameter tuner
         HyperparameterRanges ranges;  // Now defined
-        HyperparameterTuner tuner(ranges, 20, 5);  // Now defined
+        HyperparameterTuner tuner(ranges, config);  // Pass config to constructor
         
         // Run hyperparameter tuning
         std::cout << "Running hyperparameter tuning with " << training_pairs.size() 
@@ -713,21 +698,25 @@ int main(int argc, char* argv[]) {
         
         std::cout << "\nStarting main training with best hyperparameters..." << std::endl;
 
-        for (size_t epoch = 0; epoch < config.num_epochs; ++epoch) {
-            std::cout << "Epoch " << epoch + 1 << "/" << config.num_epochs << "\n";
+        // After loading config but before training loop
+        std::cout << "\nStarting training with:"
+                  << "\n- Batch size: " << config.training.batch_size
+                  << "\n- Number of epochs: " << config.training.num_epochs
+                  << "\n- Learning rate: " << config.training.learning_rate.initial_lr
+                  << std::endl;
+
+        // Calculate total batches
+        size_t total_batches = (training_pairs.size() + config.training.batch_size - 1) / config.training.batch_size;
+
+        // Training loop
+        for (size_t epoch = 0; epoch < config.training.num_epochs; epoch++) {
+            std::cout << "\nEpoch " << epoch + 1 << "/" << config.training.num_epochs << std::endl;
             float epoch_loss = 0.0f;
-            size_t total_batches =
-                (training_pairs.size() + config.batch_size - 1) / config.batch_size;
-
-            // Process batches
-            for (size_t batch = 0; batch < total_batches; ++batch) {
-                metrics.start_timer("batch_processing");
-
-                // Add random perturbations to weights before processing batch
-                reinitialize_batch_weights(transformer, config, global_step);
-
-                size_t start_idx = batch * config.batch_size;
-                size_t end_idx = std::min(start_idx + config.batch_size, training_pairs.size());
+            
+            // Process each batch
+            for (size_t batch = 0; batch < total_batches; batch++) {
+                size_t start_idx = batch * config.training.batch_size;
+                size_t end_idx = std::min(start_idx + config.training.batch_size, training_pairs.size());
                 size_t current_batch_size = end_idx - start_idx;
 
                 // Find maximum sequence length in this batch
@@ -956,7 +945,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.num_epochs
+            std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.training.num_epochs
                       << " (Loss: " << epoch_loss / total_batches << ")" << std::endl;
 
             // Perform cross-validation every few epochs
