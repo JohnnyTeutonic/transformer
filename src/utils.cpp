@@ -9,10 +9,103 @@
 #include <queue>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <regex>
 #include <sstream>
 #include <set>
 #include <unordered_set>
 #include "../include/data_augmentation.hpp"
+#include <chrono>
+#include <mutex>
+#include "../include/debug.hpp"
+
+namespace debug {
+    bool verbose_logging = true;
+    std::ofstream debug_log;
+    const std::string log_file = "../build/transformer.log";
+    std::mutex log_mutex;
+    
+    void init_logging() {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        debug_log.open(log_file, std::ios::app);
+        if (!debug_log.is_open()) {
+            std::cerr << "Warning: Could not open debug log file: " << log_file << std::endl;
+            return;
+        }
+        
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        debug_log << "\n=== New Debug Session Started at " 
+                 << std::ctime(&now_time) 
+                 << "===\n" << std::endl;
+        debug_log.flush();
+    }
+    
+    void log_message(const std::string& message, const std::string& level) {
+        if (!verbose_logging) return;
+        std::lock_guard<std::mutex> lock(log_mutex);
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::string time_str = std::ctime(&now_time);
+        time_str = time_str.substr(0, time_str.length() - 1);  // Remove newline
+        
+        debug_log << "[" << time_str << "] [" << level << "] " << message << std::endl;
+        debug_log.flush();
+    }
+    
+    void log_vector(const std::vector<int>& vec, const std::string& name) {
+        if (!verbose_logging) return;
+        std::ostringstream oss;
+        oss << name << " [size=" << vec.size() << "]: ";
+        for (size_t i = 0; i < std::min(vec.size(), size_t(10)); ++i) {
+            oss << vec[i] << " ";
+        }
+        if (vec.size() > 10) oss << "...";
+        log_message(oss.str(), "DEBUG");
+    }
+    
+    void log_matrix(const Matrix& mat, const std::string& label) {
+        if (!verbose_logging) return;
+        std::ostringstream oss;
+        oss << label << " [" << mat.rows() << "x" << mat.cols() << "]";
+        if (mat.rows() <= 5 && mat.cols() <= 5) {
+            oss << ":\n";
+            for (size_t i = 0; i < mat.rows(); i++) {
+                for (size_t j = 0; j < mat.cols(); j++) {
+                    oss << std::fixed << std::setprecision(4) << mat(i,j) << " ";
+                }
+                oss << "\n";
+            }
+        }
+        log_message(oss.str(), "DEBUG");
+    }
+    
+    void log_token_distribution(const Matrix& dist, const std::string& name) {
+        if (!verbose_logging) return;
+        std::ostringstream oss;
+        oss << name << " statistics:\n";
+        float min_val = std::numeric_limits<float>::max();
+        float max_val = std::numeric_limits<float>::lowest();
+        float sum = 0.0f;
+        size_t zeros = 0;
+        
+        for (size_t i = 0; i < dist.rows(); ++i) {
+            for (size_t j = 0; j < dist.cols(); ++j) {
+                float val = dist(i, j);
+                min_val = std::min(min_val, val);
+                max_val = std::max(max_val, val);
+                sum += val;
+                if (val == 0.0f) zeros++;
+            }
+        }
+        
+        oss << "  Min: " << min_val << "\n"
+            << "  Max: " << max_val << "\n"
+            << "  Mean: " << sum / (dist.rows() * dist.cols()) << "\n"
+            << "  Zero elements: " << zeros << "/" << (dist.rows() * dist.cols()) 
+            << " (" << (100.0f * zeros / (dist.rows() * dist.cols())) << "%)";
+        log_message(oss.str(), "DEBUG");
+    }
+}
 
 // Initialize static members
 std::random_device Utils::rd;
@@ -27,60 +120,68 @@ bool starts_with(const std::string& str, const std::string& prefix) {
 Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
                                                const Tokenizer& tokenizer, size_t vocab_size,
                                                size_t input_max_seq_len) {
-    // Calculate total size based on input sequence length
+    debug::init_logging();
+    debug::debug_log << "\nCreating target distribution for batch:" << std::endl;
+    debug::debug_log << "Batch size: " << target_tokens.size() << std::endl;
+    debug::debug_log << "Vocab size: " << vocab_size << std::endl;
+    debug::debug_log << "Max sequence length: " << input_max_seq_len << std::endl;
+    
     size_t batch_size = target_tokens.size();
     size_t total_tokens = batch_size * input_max_seq_len;
     
-    std::cout << "Creating target distribution with dimensions: " << total_tokens << "x" << vocab_size << std::endl;
+    // Log sequence lengths
+    debug::debug_log << "\nSequence lengths in batch:" << std::endl;
+    for (size_t i = 0; i < target_tokens.size(); ++i) {
+        debug::debug_log << "Sequence " << i << ": " << target_tokens[i].size() << " tokens" << std::endl;
+    }
     
-    // Create target distribution for all token positions
     Matrix target_distribution(total_tokens, vocab_size, 0.0f);
     
-    // Set target distribution for each sequence's final token
+    // Track token frequency for analysis
+    std::unordered_map<int, int> token_frequency;
+    
     size_t current_pos = 0;
     for (size_t seq = 0; seq < target_tokens.size(); seq++) {
         const auto& sequence = target_tokens[seq];
         
-        // For each position in the sequence length
+        debug::debug_log << "\nProcessing sequence " << seq << ":" << std::endl;
+        debug::log_vector(sequence, "Token IDs");
+        
         for (size_t i = 0; i < input_max_seq_len; i++) {
             if (i < sequence.size()) {
-                // Only set target distribution for the final token
                 if (i == sequence.size() - 1) {
                     int token_id = sequence[i];
+                    token_frequency[token_id]++;
+                    
                     if (token_id >= 0 && static_cast<size_t>(token_id) < vocab_size) {
-                        target_distribution(current_pos, token_id) = 1.0f;
+                        target_distribution(current_pos + i, token_id) = 1.0f;
+                        debug::debug_log << "Set target for position " << (current_pos + i) 
+                                       << " to token " << token_id << std::endl;
                     } else {
-                        std::cout << "Warning: Token ID " << token_id << " is outside vocabulary size " << vocab_size << std::endl;
+                        debug::debug_log << "WARNING: Token ID " << token_id 
+                                       << " out of vocabulary range [0, " 
+                                       << vocab_size << ")" << std::endl;
                     }
                 }
-            } else {
-                // For padding positions, set pad token with zero weight
-                int pad_token = tokenizer.get_pad_token_id();
-                if (pad_token >= 0 && static_cast<size_t>(pad_token) < vocab_size) {
-                    target_distribution(current_pos, pad_token) = 0.0f;
-                }
-            }
-            current_pos++;
-        }
-    }
-    
-    // Normalize the target distributions (only for rows that have non-zero sums)
-    for (size_t i = 0; i < total_tokens; i++) {
-        float row_sum = 0.0f;
-        for (size_t j = 0; j < vocab_size; j++) {
-            row_sum += target_distribution(i, j);
-        }
-        if (row_sum > 0.0f) {
-            for (size_t j = 0; j < vocab_size; j++) {
-                target_distribution(i, j) /= row_sum;
             }
         }
+        current_pos += input_max_seq_len;
     }
     
-    std::cout << "Final target distribution shape: " 
-              << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
-    std::cout << "Final current_pos: " << current_pos << "\n";
-    std::cout << "=== Target Distribution Creation Complete ===\n\n";
+    // Log token frequency statistics
+    debug::debug_log << "\nToken frequency statistics:" << std::endl;
+    std::vector<std::pair<int, int>> freq_vec(token_frequency.begin(), token_frequency.end());
+    std::sort(freq_vec.begin(), freq_vec.end(), 
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    debug::debug_log << "Top 10 most frequent tokens:" << std::endl;
+    for (size_t i = 0; i < std::min(freq_vec.size(), size_t(10)); ++i) {
+        debug::debug_log << "Token " << freq_vec[i].first << ": " 
+                        << freq_vec[i].second << " occurrences" << std::endl;
+    }
+    
+    // Analyze distribution sparsity
+    debug::log_token_distribution(target_distribution, "Target Distribution");
     
     return target_distribution;
 }
@@ -437,9 +538,10 @@ void Utils::analyze_token_mappings(
 
     for (const auto& pair : training_data) {
         std::string processed_input = pair.first;
+        std::cout << "Full example: '" << pair.first << " | " << pair.second << "'" << std::endl;
         tokenizer.preprocess_text(processed_input);
         std::vector<int> tokens = tokenizer.encode(processed_input);
-
+        std::cout << "encoded tokens" << tokens.data() << std::endl;
         for (int token : tokens) {
             if (!tokenizer.is_special_token(token)) {
                 total_words++;
@@ -775,6 +877,7 @@ float Utils::evaluate_validation(
             std::cout << "Processing example " << i << std::endl;  // Add this
             try {
                 const auto& pair = validation_data[i];
+                std::cout << "Full example: '" << pair.first << " | " << pair.second << "'" << std::endl;
                 std::cout << "Got validation pair" << std::endl;  // Add this
                 std::string processed_input = pair.first;
                 std::cout << "Got input: '" << processed_input << "'" << std::endl;  // Add this
@@ -821,7 +924,11 @@ float Utils::evaluate_validation(
                 std::string processed_target = pair.second;
                 tokenizer.preprocess_text(processed_target);
                 std::vector<int> target_tokens = tokenizer.encode(processed_target);
-
+                std::cout << "encoded target tokens: ";
+                for (const auto& token : target_tokens) {
+                    std::cout << token << " ";
+                }
+                std::cout << std::endl;
                 if (target_tokens.empty()) {
                     std::cout << "Warning: Empty target tokens for example " << i << std::endl;
                     continue;
@@ -1228,4 +1335,124 @@ void Utils::generate_predictions(Transformer& transformer, const std::string& in
     
     std::cout << "===" << std::endl;
     transformer.set_training(true);  // Reset to training mode
+}
+
+// Add debugging for gradient analysis
+void Utils::analyze_gradients(const Matrix& gradients, const std::string& label) {
+    float mean = 0.0f;
+    float max_abs = 0.0f;
+    float min_abs = std::numeric_limits<float>::max();
+    int zero_count = 0;
+    int total_elements = gradients.rows() * gradients.cols();
+    
+    for (size_t i = 0; i < gradients.rows(); i++) {
+        for (size_t j = 0; j < gradients.cols(); j++) {
+            float val = std::abs(gradients(i,j));
+            mean += val;
+            max_abs = std::max(max_abs, val);
+            if (val > 0) min_abs = std::min(min_abs, val);
+            if (val == 0) zero_count++;
+        }
+    }
+    mean /= total_elements;
+    
+    std::ostringstream oss;
+    oss << "Gradient analysis for " << label << ":\n"
+        << "  Mean absolute value: " << mean << "\n"
+        << "  Max absolute value: " << max_abs << "\n"
+        << "  Min non-zero absolute value: " << min_abs << "\n"
+        << "  Zero elements: " << zero_count << "/" << total_elements 
+        << " (" << (100.0f * zero_count / total_elements) << "%)";
+    
+    debug::log_message(oss.str(), "DEBUG");
+    
+    // Check for potential issues
+    if (mean < 1e-7) {
+        debug::log_message("WARNING: Very small gradient mean detected", "WARN");
+    }
+    if (zero_count > total_elements * 0.9) {
+        debug::log_message("WARNING: High proportion of zero gradients detected", "WARN");
+    }
+    if (max_abs > 100) {
+        debug::log_message("WARNING: Large gradient values detected", "WARN");
+    }
+}
+
+// Add debugging for token processing
+void Utils::debug_token_processing(const std::string& input, const std::vector<int>& tokens, 
+                              const Tokenizer& tokenizer) {
+    std::ostringstream oss;
+    oss << "Token processing debug for input: '" << input << "'\n"
+        << "  Input length: " << input.length() << " characters\n"
+        << "  Token count: " << tokens.size() << "\n"
+        << "  Tokens: ";
+    
+    for (size_t i = 0; i < std::min(tokens.size(), size_t(10)); i++) {
+        std::string token = tokenizer.decode({tokens[i]});
+        oss << "'" << token << "'(" << tokens[i] << ") ";
+    }
+    if (tokens.size() > 10) oss << "...";
+    
+    // Check token coverage
+    std::string reconstructed = tokenizer.decode(tokens);
+    bool perfect_reconstruction = (reconstructed == input);
+    
+    oss << "\n  Perfect reconstruction: " << (perfect_reconstruction ? "Yes" : "No");
+    if (!perfect_reconstruction) {
+        oss << "\n  Reconstructed text: '" << reconstructed << "'";
+    }
+    
+    debug::log_message(oss.str(), "DEBUG");
+    
+    // Check for potential issues
+    if (tokens.size() > input.length() * 2) {
+        debug::log_message("WARNING: Unusually high token/character ratio", "WARN");
+    }
+    if (!perfect_reconstruction) {
+        debug::log_message("WARNING: Token reconstruction does not match input", "WARN");
+    }
+}
+
+// Add debugging for loss analysis
+void Utils::analyze_loss_progression(const std::vector<float>& losses, size_t window_size) {
+    if (losses.size() < window_size * 2) return;
+    
+    // Calculate moving averages
+    std::vector<float> moving_avgs;
+    float sum = 0;
+    for (size_t i = 0; i < losses.size(); i++) {
+        sum += losses[i];
+        if (i >= window_size) sum -= losses[i - window_size];
+        if (i >= window_size - 1) {
+            moving_avgs.push_back(sum / window_size);
+        }
+    }
+    
+    // Analyze trend
+    size_t flat_count = 0;
+    size_t increasing_count = 0;
+    const float threshold = 0.001f;
+    
+    for (size_t i = 1; i < moving_avgs.size(); i++) {
+        float diff = moving_avgs[i] - moving_avgs[i-1];
+        if (std::abs(diff) < threshold) flat_count++;
+        if (diff > threshold) increasing_count++;
+    }
+    
+    std::ostringstream oss;
+    oss << "Loss progression analysis:\n"
+        << "  Initial moving average: " << moving_avgs.front() << "\n"
+        << "  Final moving average: " << moving_avgs.back() << "\n"
+        << "  Flat regions: " << (100.0f * flat_count / moving_avgs.size()) << "%\n"
+        << "  Increasing regions: " << (100.0f * increasing_count / moving_avgs.size()) << "%";
+    
+    debug::log_message(oss.str(), "INFO");
+    
+    // Check for potential issues
+    if (flat_count > moving_avgs.size() * 0.5) {
+        debug::log_message("WARNING: Loss appears to be stagnating", "WARN");
+    }
+    if (increasing_count > moving_avgs.size() * 0.3) {
+        debug::log_message("WARNING: Loss shows significant increasing trend", "WARN");
+    }
 }

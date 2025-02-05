@@ -17,7 +17,52 @@ const std::unordered_map<char, std::string> Tokenizer::SPECIAL_CHAR_MAP = {
     {'!', "<exclamation>"}, {'?', "<question>"}, {',', "<comma>"}};
 
 std::vector<int> Tokenizer::encode(const std::string& text) const {
-    return tokenizer_->encode(text);
+    if (!initialized_) throw std::runtime_error("Tokenizer not initialized in base token encoder");
+    
+    // Use the class's own vocab and vocab_size
+    const auto& vocab_ref = vocab;  // Use our class member
+    const size_t vocab_size_ref = vocab_size_;  // Use our class member
+    
+    std::vector<int> tokens;
+    std::istringstream iss(text);
+    std::string word;
+    std::vector<std::string> words;
+    
+    // Collect all words
+    while (iss >> word) {
+        words.push_back(word);
+    }
+    
+    // Try bigrams first
+    for (size_t i = 0; i < words.size(); i++) {
+        if (i < words.size() - 1) {
+            // Try bigram
+            std::string bigram = words[i] + " " + words[i+1];
+            auto it = vocab_ref.find(bigram);
+            if (it != vocab_ref.end() && static_cast<size_t>(it->second) < vocab_size_ref) {
+                tokens.push_back(it->second);
+                i++; // Skip next word since we used it in bigram
+                continue;
+            }
+        }
+        
+        // Try single word
+        auto it = vocab_ref.find(words[i]);
+        if (it != vocab_ref.end() && static_cast<size_t>(it->second) < vocab_size_ref) {
+            tokens.push_back(it->second);
+        } else {
+            // Try subwords before giving up
+            bool found = false;
+            // Add subword handling here if needed
+            
+            if (!found) {
+                std::cout << "Unknown token: '" << words[i] << "'" << std::endl;
+                tokens.push_back(tokens::UNK_ID);
+            }
+        }
+    }
+    
+    return tokens;
 }
 
 std::string Tokenizer::decode(const std::vector<int>& tokens) const {
@@ -94,7 +139,7 @@ std::unique_ptr<Tokenizer> Tokenizer::load(std::istream& is) {
 
 void Tokenizer::save_vocabulary(std::ostream& os) const {
     if (!tokenizer_) {
-        throw std::runtime_error("Tokenizer not initialized");
+        throw std::runtime_error("Tokenizer not initialized in base save vocabulary");
     }
 
     // Write vocabulary size
@@ -162,7 +207,7 @@ void Tokenizer::print_vocabulary_mappings() const {
 
 std::vector<std::string> Tokenizer::get_vocabulary_vector() const {
     if (!tokenizer_ || !tokenizer_->is_initialized()) {
-        throw std::runtime_error("Tokenizer not initialized");
+        throw std::runtime_error("Tokenizer not initialized in base get vocabulary vector");
     }
 
     std::vector<std::string> vocab;
@@ -282,20 +327,30 @@ bool Tokenizer::is_verb(const std::string& token) const {
 }
 
 void Tokenizer::initialize(const std::string& encoding_name) {
-    auto tiktoken = std::make_unique<TiktokenTokenizer>();
-    tiktoken->initialize(encoding_name);
-    tokenizer_ = std::move(tiktoken);
+    if (initialized_) return;  // Guard against double initialization
+    
+    // Create and initialize the tiktoken tokenizer
+    tokenizer_ = std::make_unique<TiktokenTokenizer>();
+    tokenizer_->initialize(encoding_name);
+    
+    // Initialize our own vocabulary from the tokenizer
+    vocab = tokenizer_->get_vocab();  // We need to add this method to TiktokenTokenizer
+    vocab_size_ = tokenizer_->vocab_size();
+    
+    initialized_ = true;  // Mark as initialized
+    
+    std::cout << "Tokenizer initialized with vocab size: " << vocab_size_ << std::endl;
 }
 
 // Add constructor implementation
 Tokenizer::Tokenizer(const std::string& encoding_name) {
-    initialize(encoding_name);
+    initialize(encoding_name);  // This should set initialized_ to true
 }
 
 // Add vocab_size implementation
 size_t Tokenizer::vocab_size() const {
     if (!tokenizer_) {
-        throw std::runtime_error("Tokenizer not initialized");
+        throw std::runtime_error("Tokenizer not initialized in base vocab size");
     }
     return tokenizer_->vocab_size();
 }

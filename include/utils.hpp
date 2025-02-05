@@ -246,4 +246,10 @@ public:
     }
 
     static void generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer);
+
+    // Debugging utilities
+    static void analyze_gradients(const Matrix& gradients, const std::string& label);
+    static void analyze_loss_progression(const std::vector<float>& losses, size_t window_size);
+    static void debug_token_processing(const std::string& input, const std::vector<int>& tokens, 
+                                     const Tokenizer& tokenizer);
 };

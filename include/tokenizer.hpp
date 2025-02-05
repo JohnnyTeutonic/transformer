@@ -7,13 +7,26 @@
 #include <unordered_set>
 #include "token_constants.hpp"
 #include "base_tokenizer.hpp"
+#include "tiktoken_tokenizer.hpp"
 
-// Forward declaration
-class TiktokenTokenizer;
+// Remove forward declaration since we're including the header
+// class TiktokenTokenizer;
 
 class Tokenizer {
 private:
-    std::unique_ptr<BaseTokenizer> tokenizer_;
+    bool initialized_ = false;
+    std::unordered_map<std::string, int> vocab;
+    size_t vocab_size_ = 0;
+    std::unique_ptr<TiktokenTokenizer> tokenizer_;
+
+    // Token category sets
+    std::unordered_set<std::string> verb_tokens_;
+    std::unordered_set<std::string> adjective_tokens_;
+    std::unordered_set<std::string> noun_tokens_;
+    std::unordered_set<std::string> determiner_tokens_;
+
+    // Special character mapping for preprocessing
+    static const std::unordered_map<char, std::string> SPECIAL_CHAR_MAP;
 
 public:
     explicit Tokenizer(const std::string& encoding_name = "gpt2");
@@ -60,16 +73,6 @@ public:
     }
 
 protected:
-    // Token category sets
-    std::unordered_set<std::string> verb_tokens_;
-    std::unordered_set<std::string> adjective_tokens_;
-    std::unordered_set<std::string> noun_tokens_;
-    std::unordered_set<std::string> determiner_tokens_;
-
-    // Special character mapping for preprocessing
-    static const std::unordered_map<char, std::string> SPECIAL_CHAR_MAP;
-
-private:
     // Add private helper methods
     void save_vocabulary(std::ostream& os) const;
     std::unique_ptr<TiktokenTokenizer> load_vocabulary(std::istream& is);

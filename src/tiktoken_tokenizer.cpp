@@ -10,6 +10,9 @@
 #include <iomanip>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <queue>
+
+using json = nlohmann::json;
 
 // Private implementation class
 struct TiktokenTokenizer::Impl {
@@ -43,36 +46,46 @@ struct TiktokenTokenizer::Impl {
     bool is_initialized() const { return initialized_; }
 
     std::vector<int> encode(const std::string& text) const {
-        if (!initialized_) throw std::runtime_error("Tokenizer not initialized");
+        if (!initialized_) throw std::runtime_error("Tokenizer not initialized in encoder");
         
         std::vector<int> tokens;
         std::istringstream iss(text);
+        std::vector<std::string> words;
         std::string word;
         
-        // Split text into words
+        // Collect words
         while (iss >> word) {
-            // Check if the word exists in our vocabulary
-            auto it = vocab.find(word);
-            if (it != vocab.end() && static_cast<size_t>(it->second) < vocab_size_) {
-                tokens.push_back(it->second);
-            } else {
-                // If word not found or ID is outside current vocab size, use UNK token
-                tokens.push_back(tokens::UNK_ID);
-                std::cout << "Unknown token or out of vocab range: '" << word 
-                          << "' (vocab_size: " << vocab_size_ << ")" << std::endl;
-            }
+            words.push_back(word);
         }
         
-        if (tokens.empty()) {
-            std::cout << "Warning: Empty tokens generated for text: '" << text << "'" << std::endl;
-            return {tokens::UNK_ID};  // Return UNK token for empty input
+        // Try bigrams first
+        for (size_t i = 0; i < words.size(); i++) {
+            if (i < words.size() - 1) {
+                // Try bigram
+                std::string bigram = words[i] + " " + words[i+1];
+                auto it = vocab.find(bigram);
+                if (it != vocab.end()) {
+                    tokens.push_back(it->second);
+                    i++; // Skip next word since we used it in bigram
+                    continue;
+                }
+            }
+            
+            // Try single word
+            auto it = vocab.find(words[i]);
+            if (it != vocab.end()) {
+                tokens.push_back(it->second);
+            } else {
+                std::cout << "Unknown token: '" << words[i] << "'" << std::endl;
+                tokens.push_back(tokens::UNK_ID);
+            }
         }
         
         return tokens;
     }
 
     std::string decode(const std::vector<int>& tokens) const {
-        if (!initialized_) throw std::runtime_error("Tokenizer not initialized");
+        if (!initialized_) throw std::runtime_error("Tokenizer not initialized in decoder");
         
         std::string result;
         bool first = true;
@@ -121,7 +134,7 @@ struct TiktokenTokenizer::Impl {
     }
 
     size_t vocab_size() const {
-        if (!initialized_) throw std::runtime_error("Tokenizer not initialized");
+        if (!initialized_) throw std::runtime_error("Tokenizer not initialized for vocab size");
         return vocab_size_;
     }
 
@@ -200,9 +213,96 @@ TiktokenTokenizer::~TiktokenTokenizer() = default;
 void TiktokenTokenizer::initialize(const std::string& encoding_name) {
     if (initialized_) return;
     
-    pimpl_->initialize(encoding_name);
+    // Initialize the pimpl first
+    if (pimpl_) {
+        pimpl_->initialize(encoding_name);
+    } else {
+        throw std::runtime_error("Tokenizer implementation not created");
+    }
+    
+    // Initialize special tokens
+    setup_special_tokens();
     initialized_ = true;
     initialize_token_categories();
+
+    // Add code to build vocabulary from training data
+    std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
+    std::filesystem::path data_dir = exe_path / "data";
+    std::filesystem::path training_file = data_dir / "training_pairs.txt";
+    
+    // Extract all phrase pairs using proper delimiter handling
+    auto phrase_pairs = extract_phrase_pairs(training_file.string());
+    
+    // Process each pair and add to vocabulary
+    for (const auto& [context, target] : phrase_pairs) {
+        // Add the entire target phrase as a token since it's a specialized vocabulary item
+        if (!target.empty()) {
+            // Remove any special markers (* or #) from target before adding to vocabulary
+            std::string clean_target = target;
+            if (clean_target[0] == '*' || clean_target[0] == '#') {
+                clean_target = clean_target.substr(1);
+            }
+            clean_target = preprocess_text(clean_target);
+            
+            // Add the complete phrase as a token
+            if (token_to_id_.find(clean_target) == token_to_id_.end()) {
+                int id = token_to_id_.size();
+                token_to_id_[clean_target] = id;
+                id_to_token_[id] = clean_target;
+            }
+            
+            // Also add individual words from the target
+            std::istringstream iss(clean_target);
+            std::string word;
+            while (iss >> word) {
+                if (token_to_id_.find(word) == token_to_id_.end()) {
+                    int id = token_to_id_.size();
+                    token_to_id_[word] = id;
+                    id_to_token_[id] = word;
+                }
+            }
+        }
+        
+        // Add context words to vocabulary
+        std::istringstream iss_context(preprocess_text(context));
+        std::string word;
+        while (iss_context >> word) {
+            if (token_to_id_.find(word) == token_to_id_.end()) {
+                int id = token_to_id_.size();
+                token_to_id_[word] = id;
+                id_to_token_[id] = word;
+            }
+        }
+    }
+    
+    vocab_size_ = token_to_id_.size();
+    std::cout << "Built vocabulary with initialized tokenizer" << vocab_size_ << " tokens" << std::endl;
+}
+
+void TiktokenTokenizer::build_vocabulary_from_frequencies() {
+    // Sort tokens by frequency
+    std::vector<std::pair<std::string, size_t>> sorted_tokens;
+    for (const auto& [token, freq] : token_frequencies_) {
+        sorted_tokens.push_back({token, freq});
+    }
+    std::sort(sorted_tokens.begin(), sorted_tokens.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    // Add special tokens first
+    setup_special_tokens();
+    
+    // Add most frequent tokens up to vocab_size
+    int current_id = tokens::NUM_SPECIAL_TOKENS;
+    for (const auto& [token, freq] : sorted_tokens) {
+        if (current_id >= vocab_size_) break;
+        if (token_to_id_.find(token) == token_to_id_.end()) {  // Skip if already added
+            token_to_id_[token] = current_id;
+            id_to_token_[current_id] = token;
+            current_id++;
+        }
+    }
+    
+    std::cout << "Built vocabulary from frequencies with " << token_to_id_.size() << " tokens" << std::endl;
 }
 
 bool TiktokenTokenizer::is_initialized() const {
@@ -210,21 +310,29 @@ bool TiktokenTokenizer::is_initialized() const {
 }
 
 std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {
-    if (!pimpl_ || !pimpl_->initialized_) {
-        throw std::runtime_error("Tokenizer not initialized");
+    if (!initialized_) {
+        throw std::runtime_error("Tokenizer not initialized in tiktoken encoder");
     }
     
-    // Use the truncated vocabulary for encoding
     std::vector<int> tokens;
-    std::string current_token;
-    std::istringstream iss(text);
+    std::string preprocessed = preprocess_text(text);
     
-    while (iss >> current_token) {
-        auto it = pimpl_->vocab.find(current_token);
-        if (it != pimpl_->vocab.end()) {
+    // Try to match the entire text first (for complete phrases)
+    auto it = token_to_id_.find(preprocessed);
+    if (it != token_to_id_.end()) {
+        tokens.push_back(it->second);
+        return tokens;
+    }
+    
+    // If not found as complete phrase, tokenize words
+    std::istringstream iss(preprocessed);
+    std::string word;
+    while (iss >> word) {
+        auto it = token_to_id_.find(word);
+        if (it != token_to_id_.end()) {
             tokens.push_back(it->second);
         } else {
-            tokens.push_back(get_unk_token_id());
+            tokens.push_back(tokens::UNK_ID);
         }
     }
     
@@ -232,23 +340,19 @@ std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {
 }
 
 std::string TiktokenTokenizer::decode(const std::vector<int>& tokens) const {
-    if (!pimpl_ || !pimpl_->initialized_) {
-        throw std::runtime_error("Tokenizer not initialized");
+    if (!initialized_) {
+        throw std::runtime_error("Tokenizer not initialized in tiktoken decoder");
     }
     
     std::string result;
-    for (int token : tokens) {
-        // Find the token string in our truncated vocabulary
-        bool found = false;
-        for (const auto& [str, id] : pimpl_->vocab) {
-            if (id == token) {
-                result += (result.empty() ? "" : " ") + str;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            result += (result.empty() ? "" : " ") + tokens::UNK_TOKEN;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        auto it = id_to_token_.find(tokens[i]);
+        if (it != id_to_token_.end()) {
+            if (!result.empty() && i > 0) result += " ";
+            result += it->second;
+        } else {
+            if (!result.empty() && i > 0) result += " ";
+            result += tokens::UNK_TOKEN;
         }
     }
     
@@ -277,7 +381,7 @@ void TiktokenTokenizer::print_vocabulary_mappings() const {
 }
 
 void TiktokenTokenizer::save(std::ostream& os) const {
-    if (!is_initialized()) throw std::runtime_error("Tokenizer not initialized");
+    if (!is_initialized()) throw std::runtime_error("Tokenizer not initialized in tiktoken save");
     
     // Write version
     uint32_t version = 1;
@@ -297,7 +401,7 @@ void TiktokenTokenizer::save(std::ostream& os) const {
 }
 
 std::vector<std::string> TiktokenTokenizer::get_vocabulary_vector() const {
-    if (!is_initialized()) throw std::runtime_error("Tokenizer not initialized");
+    if (!is_initialized()) throw std::runtime_error("Tokenizer not initialized in tiktoken get vocabulary vector");
     
     std::vector<std::string> vocab;
     vocab.reserve(pimpl_->vocab_size());
@@ -473,7 +577,7 @@ std::vector<int> TiktokenTokenizer::encode(const std::string& text, bool add_spe
     }
     
     // Handle separator token specially
-    size_t sep_pos = text.find(SEP_TOKEN);
+    size_t sep_pos = text.find(tokens::SEP_TOKEN);
     if (sep_pos != std::string::npos) {
         // Encode text before separator
         std::string prefix = text.substr(0, sep_pos);
@@ -510,7 +614,7 @@ std::string TiktokenTokenizer::decode(const std::vector<int>& token_ids, bool sk
         }
         
         if (token_id == tokens::SEP_ID) {
-            result += SEP_TOKEN;
+            result += tokens::SEP_TOKEN;
             after_separator = true;
             continue;
         }
@@ -531,7 +635,7 @@ std::string TiktokenTokenizer::decode(const std::vector<int>& token_ids, bool sk
 // Helper function to tokenize text segments
 std::vector<int> TiktokenTokenizer::tokenize_text(const std::string& text) const {
     if (!initialized_) {
-        throw std::runtime_error("Tokenizer not initialized");
+        throw std::runtime_error("Tokenizer not initialized in tiktoken tokenize text");
     }
     
     std::vector<int> tokens;
@@ -571,7 +675,7 @@ std::vector<int> TiktokenTokenizer::tokenize_text(const std::string& text) const
 // Helper function to decode individual tokens
 std::string TiktokenTokenizer::decode_token(int token_id) const {
     if (!initialized_) {
-        throw std::runtime_error("Tokenizer not initialized");
+        throw std::runtime_error("Tokenizer not initialized in tiktoken decode token");
     }
     
     auto it = id_to_token_.find(token_id);
@@ -631,4 +735,115 @@ void TiktokenTokenizer::print_vocabulary_stats() const {
             break;
         }
     }
+}
+
+void TiktokenTokenizer::setup_special_tokens() {
+    // Add special tokens with their predefined IDs
+    token_to_id_[tokens::PAD_TOKEN] = tokens::PAD_ID;
+    token_to_id_[tokens::UNK_TOKEN] = tokens::UNK_ID;
+    token_to_id_[tokens::BOS_TOKEN] = tokens::BOS_ID;
+    token_to_id_[tokens::EOS_TOKEN] = tokens::EOS_ID;
+    token_to_id_[tokens::MASK_TOKEN] = tokens::MASK_ID;
+    token_to_id_[tokens::SEP_TOKEN] = tokens::SEP_ID;
+
+    // Also add to id_to_token map
+    for (const auto& [token, id] : token_to_id_) {
+        id_to_token_[id] = token;
+    }
+}
+
+void TiktokenTokenizer::build_vocabulary_from_data(const std::string& data_file, size_t min_freq) {
+    std::unordered_map<std::string, size_t> token_frequencies;
+    std::ifstream file(data_file);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open data file: " + data_file);
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Preprocess the line
+        std::string preprocessed = preprocess_text(line);
+        
+        // Split into words and count frequencies
+        std::istringstream iss(preprocessed);
+        std::string word;
+        while (iss >> word) {
+            if (!word.empty()) {
+                token_frequencies[word]++;
+            }
+        }
+    }
+    
+    // First, ensure special tokens are in the vocabulary
+    setup_special_tokens();
+    
+    // Then add frequent tokens to vocabulary
+    int next_id = tokens::NUM_SPECIAL_TOKENS;  // Start after special tokens
+    for (const auto& [token, freq] : token_frequencies) {
+        if (freq >= min_freq && token_to_id_.find(token) == token_to_id_.end()) {
+            token_to_id_[token] = next_id;
+            id_to_token_[next_id] = token;
+            next_id++;
+        }
+    }
+    
+    vocab_size_ = next_id;
+    std::cout << "Built vocabulary with from data" << vocab_size_ << " tokens" << std::endl;
+}
+
+std::string TiktokenTokenizer::preprocess_text(const std::string& text) {
+    // Convert to lowercase
+    std::string processed = text;
+    std::transform(processed.begin(), processed.end(), processed.begin(), ::tolower);
+    
+    // Replace multiple spaces with single space
+    std::regex space_pattern(R"(\s+)");
+    processed = std::regex_replace(processed, space_pattern, " ");
+    
+    // Trim leading/trailing whitespace
+    processed = std::regex_replace(processed, std::regex("^\\s+|\\s+$"), "");
+    
+    return processed;
+}
+
+void TiktokenTokenizer::save_vocabulary(const std::string& vocab_file) const {
+    json vocab_json;
+    
+    // Save token to id mappings
+    json token_mappings;
+    for (const auto& [token, id] : token_to_id_) {
+        token_mappings[token] = id;
+    }
+    vocab_json["token_to_id"] = token_mappings;
+    
+    // Save to file
+    std::ofstream file(vocab_file);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open vocabulary file for writing: " + vocab_file);
+    }
+    file << vocab_json.dump(2);
+}
+
+void TiktokenTokenizer::load_vocabulary(const std::string& vocab_file) {
+    std::ifstream file(vocab_file);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open vocabulary file for reading: " + vocab_file);
+    }
+    
+    json vocab_json;
+    file >> vocab_json;
+    
+    // Load token to id mappings
+    token_to_id_.clear();
+    id_to_token_.clear();
+    
+    for (const auto& [token, id] : vocab_json["token_to_id"].items()) {
+        token_to_id_[token] = id;
+        id_to_token_[id] = token;
+    }
+    
+    vocab_size_ = token_to_id_.size();
+    initialized_ = true;
+    
+    std::cout << "Loaded vocabulary with " << vocab_size_ << " tokens" << std::endl;
 }

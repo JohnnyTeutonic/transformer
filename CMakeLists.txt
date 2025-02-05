@@ -152,6 +152,12 @@ set(HEADERS
     include/tensor.hpp
 )
 
+# Add the debug header to the includes
+set(HEADERS
+    ${HEADERS}
+    include/debug.hpp
+)
+
 # Add CUDA compilation flags
 if(CUDAToolkit_FOUND)
     set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_60)

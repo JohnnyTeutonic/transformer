@@ -10,6 +10,10 @@
 #include "../include/count_vocabulary.hpp"
 #include "../include/cuda/matrix_ops.cuh"
 #include <iostream>
+#include <chrono>
+#include <ctime>
+#include <mutex>
+#include "../include/debug.hpp"
 
 // Add necessary forward declarations and structures
 std::unique_ptr<Tokenizer> tokenizer;
@@ -25,176 +29,113 @@ size_t global_step = 0;
 TrainingStateManagerPtr training_manager;
 TrainingMonitorPtr training_monitor;
 
+// Initialize tokenizer function
+bool initialize_tokenizer(size_t custom_vocab_size, TransformerConfig& config) {
+    std::cout << "\nInitializing tiktoken with encoding: gpt2" << std::endl;
+    tokenizer = std::make_unique<Tokenizer>("gpt2");  // Constructor will handle initialization
+
+    try {
+        std::cout << "Initialized tokenizer with default vocabulary size: " << tokenizer->vocab_size() << std::endl;
+        std::cout << "Using custom vocabulary size from data: " << custom_vocab_size << std::endl;
+        
+        // Set the custom vocabulary size in the tokenizer
+        tokenizer->set_vocab_size(custom_vocab_size);
+        
+        // Verify the vocabulary size was properly set
+        size_t current_vocab_size = tokenizer->vocab_size();
+        if (current_vocab_size != custom_vocab_size) {
+            throw std::runtime_error("Failed to set custom vocabulary size. Expected: " + 
+                                   std::to_string(custom_vocab_size) + ", Got: " + 
+                                   std::to_string(current_vocab_size));
+        }
+        std::cout << "Successfully updated tokenizer vocabulary size to: " << current_vocab_size << std::endl;
+        
+        // Override config vocabulary size with our custom size
+        config.vocab_size = custom_vocab_size;
+        config.tokenizer.vocab_size = custom_vocab_size;
+        std::cout << "Updated config vocabulary sizes:"
+                  << "\n- config.vocab_size: " << config.vocab_size
+                  << "\n- config.tokenizer.vocab_size: " << config.tokenizer.vocab_size << std::endl;
+
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
+        return false;
+    }
+}
+
 // Data structure for preprocessing
 struct Data {
     std::vector<std::vector<float>> samples;
     std::vector<int> labels;
 };
 
-// Make predictions after each batch
+// Add debug logging to the generate_predictions function
 void generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer) {
-    std::cout << "\n=== Batch 0 Predictions for '" << input_text << "' ===" << std::endl;
-    std::cout << "--" << std::endl;
+    debug::log_message("Generating predictions for: '" + input_text + "'", "INFO");
     
     // Preprocess input
     std::string processed_input = input_text;
     tokenizer->preprocess_text(processed_input);
     std::vector<int> input_tokens = tokenizer->encode(processed_input);
+    debug::log_vector(input_tokens, "Encoded input tokens");
     
-    // Clear transformer state and set to eval mode
-    transformer.clear_kv_cache();
-    transformer.set_training(false);
-    
-    // Generate prediction
-    Matrix hidden_states = transformer.forward(input_tokens, input_text, *tokenizer);
-    std::cout << "\nAbout to call lm_head->forward" << std::endl << std::flush;
+    // Get model prediction
+    transformer.set_training(false);  // Set to evaluation mode
+    debug::log_message("Running forward pass through transformer", "DEBUG");
+    Matrix hidden_states = transformer.forward(input_tokens, processed_input, *tokenizer);
     Matrix logits = transformer.get_lm_head()->forward(hidden_states);
-    std::cout << "Finished lm_head->forward" << std::endl << std::flush;
     
-    // Get probabilities for last token with proper temperature scaling
-    Vector last_row = logits.row(logits.rows() - 1);
-    Matrix final_logits(1, last_row.size());
-    for (size_t i = 0; i < last_row.size(); ++i) {
-        final_logits(0, i) = last_row[i];
-    }
-    
-    // Create a unique random generator for this prediction
-    std::random_device rd;
-    std::seed_seq seq{rd(), rd(), rd(), static_cast<unsigned int>(std::time(nullptr))};
-    std::mt19937 gen(seq);
-    
-    // Get beam search config parameters
-    const auto& config = transformer.getConfig();
-    const auto& beam_config = config.beam_search;
-    
-    // Use configured temperature with dynamic adjustment
-    float base_temperature = beam_config.temperature;
-    float initial_temp_boost = beam_config.initial_temperature / base_temperature;
-    
-    // Increase temperature for more randomness
-    float effective_temperature = base_temperature * initial_temp_boost * 1.5f;
-    
-    // Add stronger random noise for more variation
-    std::normal_distribution<float> noise_dist(0.0f, beam_config.token_noise_scale * 2.0f);
-    for (size_t i = 0; i < final_logits.cols(); ++i) {
-        final_logits(0, i) += noise_dist(gen);
-    }
-    
-    // Get token frequencies from the language model head
-    const auto& token_frequencies = transformer.get_lm_head()->get_token_frequencies();
-    
-    // Create default frequencies if none available
-    std::vector<float> default_frequencies;
-    const std::vector<float>& freq_ref = token_frequencies.empty() ? default_frequencies : token_frequencies;
-    if (freq_ref.empty()) {
-        default_frequencies.resize(final_logits.cols(), 1.0f); // Equal frequencies if not available
-    }
-    
-    // Convert logits to probabilities with temperature scaling and frequency debiasing
-    float max_logit = -std::numeric_limits<float>::infinity();
-    for (size_t i = 0; i < final_logits.cols(); ++i) {
-        max_logit = std::max(max_logit, final_logits(0, i));
-    }
-    
-    // Compute exponentials with temperature scaling and frequency debiasing
-    float sum_exp = 0.0f;
-    std::vector<float> exps(final_logits.cols());
-    
-    // Calculate frequency-based penalties
-    std::vector<float> freq_penalties(final_logits.cols());
-    float max_freq = freq_ref.empty() ? 1.0f : *std::max_element(freq_ref.begin(), freq_ref.end());
-    max_freq = std::max(max_freq, 1.0f); // Ensure non-zero max frequency
-    
-    #pragma omp parallel for
-    for (size_t i = 0; i < final_logits.cols(); ++i) {
-        if (i < freq_ref.size()) {
-            // Normalize frequency to [0, 1] and apply penalty
-            float norm_freq = freq_ref[i] / max_freq;
-            freq_penalties[i] = std::pow(1.0f - norm_freq, 0.4f); // Adjust power for penalty strength
-        } else {
-            freq_penalties[i] = 1.0f;
-        }
-    }
-    
-    #pragma omp parallel for reduction(+:sum_exp)
-    for (size_t i = 0; i < final_logits.cols(); ++i) {
-        // Apply frequency penalty to logits
-        float penalized_logit = final_logits(0, i) * freq_penalties[i];
-        float scaled_logit = (penalized_logit - max_logit) / effective_temperature;
-        exps[i] = std::exp(scaled_logit);
-        sum_exp += exps[i];
-    }
-    
-    // Convert to probabilities and store token-probability pairs
+    // Get probabilities for last token
+    Vector last_logits = logits.row(logits.rows() - 1);
     std::vector<std::pair<float, int>> token_probs;
-    token_probs.reserve(final_logits.cols());
-    for (size_t i = 0; i < final_logits.cols(); ++i) {
-        float prob = exps[i] / sum_exp;
-        
-        // Additional diversity boost for less common tokens
-        if (i < freq_ref.size() && freq_ref[i] < max_freq * 0.1f) {
-            prob *= 1.2f; // Boost rare tokens
-        }
-        
+    
+    // Convert logits to probabilities using softmax
+    float max_logit = -std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < last_logits.size(); i++) {
+        max_logit = std::max(max_logit, last_logits[i]);
+    }
+    
+    debug::log_message("Max logit value: " + std::to_string(max_logit), "DEBUG");
+    
+    float sum_exp = 0.0f;
+    for (size_t i = 0; i < last_logits.size(); i++) {
+        float prob = std::exp(last_logits[i] - max_logit);
+        sum_exp += prob;
         token_probs.push_back({prob, static_cast<int>(i)});
+    }
+    
+    debug::log_message("Sum of exponentials: " + std::to_string(sum_exp), "DEBUG");
+    
+    // Normalize probabilities
+    for (auto& pair : token_probs) {
+        pair.first /= sum_exp;
     }
     
     // Sort by probability
     std::sort(token_probs.begin(), token_probs.end(),
-              [](const auto& a, const auto& b) { return a.first > b.first; });
+              std::greater<std::pair<float, int>>());
     
-    // Apply more aggressive top-k filtering to remove very common tokens
-    size_t effective_top_k = beam_config.top_k * 2; // Double the top-k to consider more candidates
-    if (effective_top_k > 0 && effective_top_k < token_probs.size()) {
-        token_probs.resize(effective_top_k);
-    }
-    
-    // Apply nucleus sampling with higher threshold for more diversity
-    float effective_top_p = std::min(0.98f, beam_config.top_p + 0.1f); // Increase top-p slightly
-    float cumsum = 0.0f;
-    std::vector<std::pair<float, int>> filtered_probs;
-    filtered_probs.reserve(token_probs.size());
-    
-    for (const auto& [prob, token_id] : token_probs) {
-        if (cumsum >= effective_top_p) break;
+    // Log top 5 predictions
+    std::ostringstream oss;
+    oss << "Top 5 predictions:";
+    for (int i = 0; i < std::min(5, static_cast<int>(token_probs.size())); i++) {
+        float prob = token_probs[i].first;
+        int token_id = token_probs[i].second;
+        std::string token = tokenizer->decode({token_id});
         
-        // Skip very common tokens unless they're exceptionally high probability
-        if (token_id < freq_ref.size() && 
-            freq_ref[token_id] > max_freq * 0.8f && 
-            prob < 0.5f) {
-            continue;
-        }
+        // Add token type annotation
+        std::string token_type = "";
+        if (tokenizer->is_verb(token)) token_type = " (VERB)";
+        else if (tokenizer->is_adjective(token)) token_type = " (ADJ)";
+        else if (tokenizer->is_noun(token)) token_type = " (NOUN)";
         
-        filtered_probs.push_back({prob, token_id});
-        cumsum += prob;
+        oss << "\n" << (i + 1) << ". \"" << token << "\"" << token_type 
+            << " (p=" << std::fixed << std::setprecision(4) << prob * 100 << "%)";
     }
+    debug::log_message(oss.str(), "INFO");
     
-    // Add some rare tokens to the mix
-    size_t rare_tokens_added = 0;
-    for (const auto& [prob, token_id] : token_probs) {
-        if (rare_tokens_added >= 3) break; // Limit the number of rare tokens
-        
-        if (token_id < freq_ref.size() && 
-            freq_ref[token_id] < max_freq * 0.05f && // Very rare tokens
-            prob > 0.01f) { // But still somewhat relevant
-            filtered_probs.push_back({prob * 1.5f, token_id}); // Boost their probability
-            rare_tokens_added++;
-        }
-    }
-    
-    // Renormalize probabilities after filtering
-    float filtered_sum = 0.0f;
-    for (const auto& [prob, _] : filtered_probs) {
-        filtered_sum += prob;
-    }
-    for (auto& [prob, _] : filtered_probs) {
-        prob /= filtered_sum;
-    }
-    
-    // Show predictions using the standard utility function
-    Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
-    
-    std::cout << "Nonzero final: " << filtered_probs.size() << "/" << token_probs.size() << std::endl << std::endl;
+    transformer.set_training(true);  // Reset to training mode
 }
 
 // Add this function before the main training loop
@@ -298,8 +239,12 @@ void test_model_predictions(Transformer& transformer, std::unique_ptr<Tokenizer>
     }
 }
 
+// Add debug logging to main function
 int main(int argc, char* argv[]) {
     try {
+        debug::init_logging();
+        debug::log_message("Starting transformer application", "INFO");
+        
         // Initialize CUDA at program startup
         cuda::initialize_cuda();
         std::cout << "CUDA initialized successfully" << std::endl;
@@ -391,35 +336,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Loaded " << training_pairs.size() << " training pairs" << std::endl;
         
         // Initialize tokenizer with config
-        std::cout << "\nInitializing tiktoken with encoding: gpt2" << std::endl;
-        tokenizer = std::make_unique<Tokenizer>("gpt2");
-        
-        try {
-            tokenizer->initialize("cl100k_base");
-            std::cout << "Initialized tokenizer with default vocabulary size: " << tokenizer->vocab_size() << std::endl;
-            std::cout << "Using custom vocabulary size from data: " << custom_vocab_size << std::endl;
-            
-            // Set the custom vocabulary size in the tokenizer
-            tokenizer->set_vocab_size(custom_vocab_size);
-            
-            // Verify the vocabulary size was properly set
-            size_t current_vocab_size = tokenizer->vocab_size();
-            if (current_vocab_size != custom_vocab_size) {
-                throw std::runtime_error("Failed to set custom vocabulary size. Expected: " + 
-                                       std::to_string(custom_vocab_size) + ", Got: " + 
-                                       std::to_string(current_vocab_size));
-            }
-            std::cout << "Successfully updated tokenizer vocabulary size to: " << current_vocab_size << std::endl;
-            
-            // Override config vocabulary size with our custom size
-            config.vocab_size = custom_vocab_size;
-            config.tokenizer.vocab_size = custom_vocab_size;
-            std::cout << "Updated config vocabulary sizes:"
-                      << "\n- config.vocab_size: " << config.vocab_size
-                      << "\n- config.tokenizer.vocab_size: " << config.tokenizer.vocab_size << std::endl;
-
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
+        if (!initialize_tokenizer(custom_vocab_size, config)) {
+            std::cerr << "Failed to initialize tokenizer" << std::endl;
             return 1;
         }
 
