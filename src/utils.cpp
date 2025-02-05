@@ -24,43 +24,6 @@ bool starts_with(const std::string& str, const std::string& prefix) {
            str.compare(0, prefix.size(), prefix) == 0;
 }
 
-float Utils::adjust_learning_rate(float current_lr, float loss_ratio, size_t step, const TransformerConfig& config) {
-    const auto& lr_config = config.training.learning_rate;
-    
-    // During warmup, increase learning rate linearly
-    if (step < lr_config.warmup_steps) {
-        return lr_config.initial_lr + (lr_config.peak_lr - lr_config.initial_lr) * 
-               (static_cast<float>(step) / lr_config.warmup_steps);
-    }
-
-    // After warmup, adjust based on validation performance
-    float progress = static_cast<float>(step - lr_config.warmup_steps) / lr_config.decay_steps;
-    progress = std::min(1.0f, progress);
-
-    // Compute adaptive learning rate based on loss ratio
-    float ratio_factor = std::min(loss_ratio, config.training.cross_validation.early_stopping_threshold) / 
-                        config.training.cross_validation.early_stopping_threshold;
-    float adaptive_factor = 1.0f - (ratio_factor * progress);
-    
-    // More aggressive early in training but for fewer steps
-    if (step < lr_config.warmup_steps * 3) {
-        adaptive_factor *= 1.1f;
-    }
-
-    float new_lr = lr_config.peak_lr * adaptive_factor;
-    new_lr = std::max(lr_config.min_lr, std::min(lr_config.peak_lr, new_lr));
-
-    std::cout << "Learning rate adjustment:"
-              << "\n- Step: " << step
-              << "\n- Loss ratio: " << loss_ratio
-              << "\n- Progress: " << progress
-              << "\n- Adaptive factor: " << adaptive_factor
-              << "\n- Old LR: " << current_lr
-              << "\n- New LR: " << new_lr << std::endl;
-
-    return new_lr;
-}
-
 Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
                                                const Tokenizer& tokenizer, size_t vocab_size,
                                                size_t input_max_seq_len) {
@@ -925,62 +888,6 @@ float Utils::evaluate_validation(
     std::cout << "Warning: No valid predictions made!" << std::endl;
     transformer.set_training(true);
     return 0.0f;
-}
-
-void Utils::apply_sampling_parameters(std::vector<float>& logits, float temperature, float top_p) {
-    // Apply temperature scaling first
-    if (temperature != 1.0f) {
-        for (auto& logit : logits) {
-            logit /= temperature;
-        }
-    }
-
-    // Apply top-p (nucleus) sampling if enabled
-    if (top_p < 1.0f) {
-        // Convert logits to probabilities
-        std::vector<std::pair<float, size_t>> probs_with_indices;
-        float max_logit = *std::max_element(logits.begin(), logits.end());
-        float sum_exp = 0.0f;
-
-        for (size_t i = 0; i < logits.size(); i++) {
-            float prob = std::exp(logits[i] - max_logit);
-            sum_exp += prob;
-            probs_with_indices.push_back({prob, i});
-        }
-
-        // Normalize probabilities
-        for (auto& pair : probs_with_indices) {
-            pair.first /= sum_exp;
-        }
-
-        // Sort by probability in descending order
-        std::sort(probs_with_indices.begin(), probs_with_indices.end(),
-                  std::greater<std::pair<float, size_t>>());
-
-        // Find cutoff index for top-p
-        float cumsum = 0.0f;
-        size_t cutoff_idx = probs_with_indices.size() - 1;
-        for (size_t i = 0; i < probs_with_indices.size(); i++) {
-            cumsum += probs_with_indices[i].first;
-            if (cumsum > top_p) {
-                cutoff_idx = i;
-                break;
-            }
-        }
-
-        // Create mask for filtered tokens
-        std::vector<bool> keep_token(logits.size(), false);
-        for (size_t i = 0; i <= cutoff_idx; i++) {
-            keep_token[probs_with_indices[i].second] = true;
-        }
-
-        // Apply mask to logits
-        for (size_t i = 0; i < logits.size(); i++) {
-            if (!keep_token[i]) {
-                logits[i] = -std::numeric_limits<float>::infinity();
-            }
-        }
-    }
 }
 
 std::vector<std::string>& Utils::get_vocabulary(const Tokenizer& tokenizer) {
