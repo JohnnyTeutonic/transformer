@@ -213,11 +213,13 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
     }
 
     // Parse training settings
-    auto& training = j["training"];
-    config.batch_size = training["batch_size"];
-    config.num_epochs = training["num_epochs"];
-    config.dropout_rate = training["dropout_rate"];
-    config.weight_decay = training["weight_decay"];
+    if (j.contains("training")) {
+        auto& training = j["training"];
+        config.batch_size = training.value("batch_size", 32);
+        config.num_epochs = training.value("num_epochs", 3);
+        config.dropout_rate = training.value("dropout_rate", 0.1f);
+        config.weight_decay = training.value("weight_decay", 0.01f);
+    }
     
     // Parse learning rate settings
     if (j.contains("learning_rate")) {
@@ -315,6 +317,12 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
             config.token_prediction.category_bonus.adjective = cb.value("adjective", 0.2f);
             config.token_prediction.category_bonus.noun = cb.value("noun", 0.3f);
         }
+    }
+
+    // Parse cross validation settings
+    if (j.contains("cross_validation")) {
+        auto& cv = j["cross_validation"];
+        config.num_folds = cv.value("num_folds", 5);
     }
 
     return config;
@@ -1024,12 +1032,13 @@ float Utils::perform_cross_validation(
     const size_t num_folds,
     const float early_stopping_threshold
 ) {
+    const auto& config = transformer.getConfig();
     std::cout << "\nPerforming " << num_folds << "-fold cross-validation..." << std::endl;
     
     auto folds = create_cross_validation_folds(train_data, num_folds);
     float total_loss = 0.0f;
     size_t early_stops = 0;
-    const float learning_rate = 0.001f;
+    const float learning_rate = config.initial_lr; // Use configured learning rate
     
     // Evaluate each fold
     for (size_t fold = 0; fold < folds.size(); fold++) {
@@ -1039,18 +1048,18 @@ float Utils::perform_cross_validation(
         
         // Train on this fold
         transformer.set_training(true);
-        const size_t EPOCHS_PER_FOLD = 3;
+        const size_t epochs_per_fold = config.num_epochs; // Use configured epochs
         
-        for (size_t epoch = 0; epoch < EPOCHS_PER_FOLD; epoch++) {
-            std::cout << "Epoch " << (epoch + 1) << "/" << EPOCHS_PER_FOLD << std::endl;
+        for (size_t epoch = 0; epoch < epochs_per_fold; epoch++) {
+            std::cout << "Epoch " << (epoch + 1) << "/" << epochs_per_fold << std::endl;
             
             // Process training data in batches
-            const size_t BATCH_SIZE = 32;
+            const size_t batch_size = config.batch_size; // Use configured batch size
             std::vector<std::vector<int>> batch_input_tokens;
             Matrix batch_target_distribution;
             
-            for (size_t i = 0; i < train_fold.size(); i += BATCH_SIZE) {
-                size_t batch_end = std::min(i + BATCH_SIZE, train_fold.size());
+            for (size_t i = 0; i < train_fold.size(); i += batch_size) {
+                size_t batch_end = std::min(i + batch_size, train_fold.size());
                 size_t current_batch_size = batch_end - i;
                 
                 std::cout << "\n=== Processing Batch ===" << std::endl;
@@ -1121,8 +1130,8 @@ float Utils::perform_cross_validation(
             float val_loss = evaluate_validation(transformer, tokenizer, val_fold);
             std::cout << "Validation Loss after epoch " << (epoch + 1) << ": " << val_loss << std::endl;
             
-            // Check for early stopping
-            if (val_loss > early_stopping_threshold) {
+            // Check for early stopping using configured threshold
+            if (val_loss > config.early_stopping_threshold) {
                 std::cout << "Early stopping triggered on fold " << (fold + 1) << std::endl;
                 early_stops++;
                 break;

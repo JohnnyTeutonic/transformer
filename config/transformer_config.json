@@ -23,6 +23,10 @@
         "use_beam_search": false
     },
     "checkpoint_to_load": "",
+    "early_stopping": {
+        "patience": 3,
+        "threshold": 1.5
+    },
     "load_from_checkpoint": false,
     "model": {
         "head_dim": 32,
@@ -83,8 +87,8 @@
         "cross_validation": {
             "early_stopping_patience": 2,
             "early_stopping_threshold": 1.5,
-            "num_folds": 3,
-            "validation_frequency": 2
+            "num_folds": 2,
+            "validation_frequency": 1
         },
         "dropout_rate": 0.1,
         "learning_rate": {
@@ -95,7 +99,7 @@
             "peak_lr": 0.002,
             "warmup_steps": 15
         },
-        "num_epochs": 5,
+        "num_epochs": 6,
         "tuning": {
             "enabled": true,
             "evaluation_steps": 50,

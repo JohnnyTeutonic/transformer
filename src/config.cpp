@@ -132,6 +132,12 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
             gradient_clip_threshold = opt.value("gradient_clip_threshold", gradient_clip_threshold);
             layer_norm_epsilon = opt.value("layer_norm_epsilon", layer_norm_epsilon);
             gradient_accumulation_steps = opt.value("gradient_accumulation_steps", gradient_accumulation_steps);
+            use_momentum = opt.value("use_momentum", use_momentum);
+            use_adam = opt.value("use_adam", use_adam);
+            momentum = opt.value("momentum", momentum);
+            beta1 = opt.value("beta1", beta1);
+            beta2 = opt.value("beta2", beta2);
+            epsilon = opt.value("epsilon", epsilon);
         }
 
         // Load paths
