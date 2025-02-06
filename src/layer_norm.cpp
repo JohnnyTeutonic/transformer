@@ -19,8 +19,6 @@ LayerNorm::LayerNorm(size_t hidden_size_, float eps_)
 Matrix LayerNorm::forward(const Matrix& input) {
     try {
         std::cout << "\n=== LayerNorm::forward START ===" << std::endl;
-        std::cout << "Input dims: " << input.rows() << "x" << input.cols() << std::endl;
-        std::cout << "Expected hidden_size: " << hidden_size_ << std::endl;
         std::cout << "Using epsilon: " << eps_ << std::endl;
         
         if (input.cols() != hidden_size_) {
@@ -33,8 +31,6 @@ Matrix LayerNorm::forward(const Matrix& input) {
         
         Matrix mean(input.rows(), 1, 0.0f);
         Matrix var(input.rows(), 1, 0.0f);
-        std::cout << "Mean dims: " << mean.rows() << "x" << mean.cols() << std::endl;
-        std::cout << "Var dims: " << var.rows() << "x" << var.cols() << std::endl;
 
         // Compute mean for each row
         #pragma omp parallel for
@@ -58,9 +54,6 @@ Matrix LayerNorm::forward(const Matrix& input) {
         }
 
         Matrix output(input.rows(), input.cols());
-        std::cout << "Output dims: " << output.rows() << "x" << output.cols() << std::endl;
-        std::cout << "Gamma dims: " << params_.gamma.rows() << "x" << params_.gamma.cols() << std::endl;
-        std::cout << "Beta dims: " << params_.beta.rows() << "x" << params_.beta.cols() << std::endl;
 
         // Normalize and apply scale/shift using configured epsilon
         #pragma omp parallel for collapse(2)

@@ -30,8 +30,6 @@ namespace cuda {
                 float* buffer = buffers.back();
                 buffers.pop_back();
                 reuse_count++;
-                std::cout << "Reusing buffer of size " << size << " (reuse count: " 
-                          << reuse_count << ")" << std::endl;
                 return buffer;
             }
             
@@ -40,8 +38,6 @@ namespace cuda {
             CUDA_CHECK(cudaMalloc(&buffer, size * sizeof(float)));
             buffer_sizes[buffer] = size;
             total_allocated += size;
-            std::cout << "New allocation of size " << size << " (total: " 
-                      << total_allocated << " elements)" << std::endl;
             return buffer;
         }
         
@@ -49,8 +45,6 @@ namespace cuda {
             if (buffer == nullptr) return;
             auto size = buffer_sizes[buffer];
             free_buffers[size].push_back(buffer);
-            std::cout << "Returned buffer of size " << size << " to pool (available buffers: " 
-                      << free_buffers[size].size() << ")" << std::endl;
         }
         
         void cleanup() {

@@ -274,11 +274,9 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
               << "Nonzero ff: " << nonzero_ff << "/" 
               << (ff_output.rows() * ff_output.cols()) << "\n\n";
     
-    std::cout << "FF output dimensions: " << ff_output.rows() << "x" << ff_output.cols() << std::endl;
     if (training) {
         ff_output = ffn_dropout->forward(ff_output, true);
     }
-    std::cout << "FF dropout dimensions: " << ff_output.rows() << "x" << ff_output.cols() << std::endl;
     residual = ff_output + norm1;
     
     // Debug final residual

@@ -90,16 +90,35 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
 
 Matrix FeedForward::forward(const Matrix& input) {
     try {
+        #ifdef USE_CUDA
+        // First layer - matrix multiplication using CUDA
+        Matrix intermediate(input.rows(), params_.ff1_weights.cols(), 0.0f);
+        cuda::matmul(input, params_.ff1_weights, intermediate);
+        
+        // Add bias using Matrix's method
+        intermediate.add_bias(params_.ff1_bias);
+        
+        // Apply GELU using CUDA
+        cuda::gelu_forward(intermediate);
+        
+        // Cache intermediate values
+        intermediate_cache = intermediate;
+        input_cache_ = input;
+        
+        // Second layer - matrix multiplication using CUDA
+        Matrix output(intermediate.rows(), params_.ff2_weights.cols(), 0.0f);
+        cuda::matmul(intermediate, params_.ff2_weights, output);
+        
+        // Add bias using Matrix's method
+        output.add_bias(params_.ff2_bias);
+        
+        return output;
+        #else
+        // Original CPU implementation
         std::cout << "\n=== FeedForward::forward START ===" << std::endl;
-        std::cout << "Input dims: " << input.rows() << "x" << input.cols() << std::endl;
-        std::cout << "FF1 weights dims: " << params_.ff1_weights.rows() << "x" << params_.ff1_weights.cols() << std::endl;
-        std::cout << "FF2 weights dims: " << params_.ff2_weights.rows() << "x" << params_.ff2_weights.cols() << std::endl;
-        std::cout << "FF1 bias size: " << params_.ff1_bias.size() << std::endl;
-        std::cout << "FF2 bias size: " << params_.ff2_bias.size() << std::endl;
 
         // First layer
         Matrix intermediate = matmul(input, params_.ff1_weights);
-        std::cout << "After FF1 dims: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
 
         for (size_t i = 0; i < intermediate.rows(); ++i) {
             for (size_t j = 0; j < intermediate.cols(); ++j) {
@@ -133,7 +152,7 @@ Matrix FeedForward::forward(const Matrix& input) {
 
         std::cout << "=== FeedForward::forward END ===\n" << std::endl;
         return output;
-
+        #endif
     } catch (const std::exception& e) {
         throw std::runtime_error("FeedForward forward failed: " + std::string(e.what()));
     }
@@ -179,6 +198,35 @@ std::unique_ptr<FeedForward> FeedForward::load(std::istream& is) {
 
 Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
     try {
+        #ifdef USE_CUDA
+        // Second layer backward
+        Matrix d_intermediate(grad_output.rows(), params_.ff2_weights.rows(), 0.0f);
+        cuda::matmul(grad_output, params_.ff2_weights.transpose(), d_intermediate);
+        
+        // Update ff2 gradients
+        Matrix ff2_grad(intermediate_cache.cols(), grad_output.cols(), 0.0f);
+        cuda::matmul(intermediate_cache.transpose(), grad_output, ff2_grad);
+        grads_.ff2_grad = ff2_grad;
+        
+        // Apply GELU gradient using CUDA
+        cuda::gelu_backward(d_intermediate, intermediate_cache);
+        
+        // First layer backward
+        Matrix d_input(d_intermediate.rows(), params_.ff1_weights.rows(), 0.0f);
+        cuda::matmul(d_intermediate, params_.ff1_weights.transpose(), d_input);
+        
+        // Update ff1 gradients
+        Matrix ff1_grad(input.cols(), d_intermediate.cols(), 0.0f);
+        cuda::matmul(input.transpose(), d_intermediate, ff1_grad);
+        grads_.ff1_grad = ff1_grad;
+        
+        // Update bias gradients
+        cuda::compute_bias_gradients(grads_.ff1_bias_grad, d_intermediate);
+        cuda::compute_bias_gradients(grads_.ff2_bias_grad, grad_output);
+        
+        return d_input;
+        #else
+        // Original CPU implementation
         std::cout << "\n=== FeedForward::backward START ===" << std::endl;
         std::cout << "grad_output dims: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
         std::cout << "input dims: " << input.rows() << "x" << input.cols() << std::endl;
@@ -216,7 +264,7 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
 
         std::cout << "=== FeedForward::backward END ===\n" << std::endl;
         return d_input;
-
+        #endif
     } catch (const std::exception& e) {
         std::cerr << "\nError in FeedForward::backward: " << e.what() << std::endl;
         throw;
