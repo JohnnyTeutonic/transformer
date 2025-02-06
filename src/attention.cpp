@@ -269,11 +269,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
         Matrix K = matmul(input, params_.key_weights);
         Matrix V = matmul(input, params_.value_weights);
         #endif
-        
-        std::cout << "Q dims: " << Q.rows() << "x" << Q.cols() << std::endl;
-        std::cout << "K dims: " << K.rows() << "x" << K.cols() << std::endl;
-        std::cout << "V dims: " << V.rows() << "x" << V.cols() << std::endl;
-        
+                
         // Cache for backward pass
         GradientCheckpoint::cache_activation("query", Q);
         GradientCheckpoint::cache_activation("key", K);
@@ -453,11 +449,6 @@ Matrix MultiHeadAttention::compute_query_gradients(const Matrix& grad, const Mat
     Matrix scores = matmul(grad, input.transpose());
     d_query = scores * (1.0f / std::sqrt(float(input.cols())));
     #endif
-    
-    std::cout << "compute_query_gradients dimensions:" << std::endl;
-    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
-    std::cout << "input: " << input.rows() << "x" << input.cols() << std::endl;
-    std::cout << "d_query: " << d_query.rows() << "x" << d_query.cols() << std::endl;
 
     return d_query;
 }
@@ -664,14 +655,6 @@ Matrix MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     size_t seq_len = Q.rows();
     size_t head_size = Q.cols() / num_heads;
 
-    // Debug dimensions
-    std::cout << "Attention dimensions:" << std::endl;
-    std::cout << "Q: " << Q.rows() << "x" << Q.cols() << std::endl;
-    std::cout << "K: " << K.rows() << "x" << K.cols() << std::endl;
-    std::cout << "V: " << V.rows() << "x" << V.cols() << std::endl;
-    std::cout << "seq_len: " << seq_len << ", head_size: " << head_size
-              << ", num_heads: " << num_heads << std::endl;
-
     // Reshape maintaining [seq_len, hidden_size] as the basic shape
     Tensor Q_reshaped = reshape_for_attention(Q, 1, num_heads, seq_len, head_size);
     Tensor K_reshaped = reshape_for_attention(K, 1, num_heads, seq_len, head_size);
@@ -790,10 +773,6 @@ Tensor MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
 
     size_t expected_rows = batch_size * num_heads * seq_len;
     size_t expected_cols = head_dim;
-
-    std::cout << "Q dimensions: " << Q.rows() << "x" << Q.cols() << std::endl;
-    std::cout << "K dimensions: " << K.rows() << "x" << K.cols() << std::endl;
-    std::cout << "V dimensions: " << V.rows() << "x" << V.cols() << std::endl;
 
     // Dimension validation...
     if (Q.rows() != expected_rows || Q.cols() != expected_cols) {

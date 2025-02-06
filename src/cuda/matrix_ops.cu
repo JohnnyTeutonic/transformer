@@ -3,6 +3,7 @@
 #include "../../include/cuda/matrix_ops.cuh"
 #include "../../include/cuda/cuda_check.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
+#include <unordered_map>
 
 // Forward declare all kernels
 __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C, 
@@ -10,6 +11,45 @@ __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C,
 __global__ void gelu_forward_kernel(float* x, int size);
 
 namespace cuda {
+    // Memory pool for GPU buffers
+    struct MemoryPool {
+        std::unordered_map<size_t, std::vector<float*>> free_buffers;
+        std::unordered_map<float*, size_t> buffer_sizes;
+        
+        float* allocate(size_t size) {
+            // Check if we have a free buffer of the right size
+            auto& buffers = free_buffers[size];
+            if (!buffers.empty()) {
+                float* buffer = buffers.back();
+                buffers.pop_back();
+                return buffer;
+            }
+            
+            // Allocate new buffer
+            float* buffer;
+            CUDA_CHECK(cudaMalloc(&buffer, size * sizeof(float)));
+            buffer_sizes[buffer] = size;
+            return buffer;
+        }
+        
+        void free(float* buffer) {
+            if (buffer == nullptr) return;
+            auto size = buffer_sizes[buffer];
+            free_buffers[size].push_back(buffer);
+        }
+        
+        void cleanup() {
+            for (auto& pair : free_buffers) {
+                for (float* buffer : pair.second) {
+                    cudaFree(buffer);
+                }
+            }
+            free_buffers.clear();
+            buffer_sizes.clear();
+        }
+    };
+    
+    static MemoryPool memory_pool;
     // Global cuBLAS handle with proper initialization
     static cublasHandle_t cublas_handle = nullptr;
     static bool cuda_initialized = false;
@@ -44,6 +84,7 @@ namespace cuda {
 
     void cleanup_cuda() {
         if (cublas_handle != nullptr) {
+            memory_pool.cleanup();
             cublasDestroy(cublas_handle);
             cublas_handle = nullptr;
             cuda_initialized = false;
@@ -74,50 +115,54 @@ namespace cuda {
                 std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
         }
 
-        float* d_A, *d_B, *d_C;
+        // Use memory pool instead of direct allocation
+        float *d_A = memory_pool.allocate(A.rows() * A.cols());
+        float *d_B = memory_pool.allocate(B.rows() * B.cols());
+        float *d_C = memory_pool.allocate(C.rows() * C.cols());
+
         size_t A_size = A.rows() * A.cols() * sizeof(float);
         size_t B_size = B.rows() * B.cols() * sizeof(float);
-        size_t C_size = A.rows() * B.cols() * sizeof(float);
+        size_t C_size = C.rows() * C.cols() * sizeof(float);
 
-        CUDA_CHECK(cudaMalloc(&d_A, A_size));
-        CUDA_CHECK(cudaMalloc(&d_B, B_size));
-        CUDA_CHECK(cudaMalloc(&d_C, C_size));
-
-        CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
+        // Use asynchronous memory transfers
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_A, A.data(), A_size, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_B, B.data(), B_size, cudaMemcpyHostToDevice, stream));
 
         float alpha = 1.0f;
         float beta = 0.0f;
 
-        // For row-major matrices A[m,k] * B[k,n] = C[m,n], we compute:
-        // C = A * B in column-major order
-        cublasStatus_t status = cublasSgemm(cublas_handle,
-                                          CUBLAS_OP_N, CUBLAS_OP_N,  // No transposition needed
-                                          B.cols(), A.rows(), A.cols(),  // Dimensions for the operation
-                                          &alpha,
-                                          d_B, B.cols(),  // Leading dimension is cols for B
-                                          d_A, A.cols(),  // Leading dimension is cols for A
-                                          &beta,
-                                          d_C, B.cols()); // Leading dimension is cols for C
+        // Set stream for cuBLAS operation
+        cublasSetStream(cublas_handle, stream);
 
-        // Print dimensions for debugging
-        std::cout << "Matrix multiplication dimensions:" << std::endl;
-        std::cout << "A: " << A.rows() << "x" << A.cols() << std::endl;
-        std::cout << "B: " << B.rows() << "x" << B.cols() << std::endl;
-        std::cout << "C: " << C.rows() << "x" << C.cols() << std::endl;
+        cublasStatus_t status = cublasSgemm(cublas_handle,
+                                          CUBLAS_OP_N, CUBLAS_OP_N,
+                                          B.cols(), A.rows(), A.cols(),
+                                          &alpha,
+                                          d_B, B.cols(),
+                                          d_A, A.cols(),
+                                          &beta,
+                                          d_C, B.cols());
 
         if (status != CUBLAS_STATUS_SUCCESS) {
-            cudaFree(d_A);
-            cudaFree(d_B);
-            cudaFree(d_C);
-            throw std::runtime_error("cuBLAS matrix multiplication failed with status: " + std::to_string(status));
+            memory_pool.free(d_A);
+            memory_pool.free(d_B);
+            memory_pool.free(d_C);
+            cudaStreamDestroy(stream);
+            throw std::runtime_error("cuBLAS matrix multiplication failed: " + std::to_string(status));
         }
 
-        CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(C.data(), d_C, C_size, cudaMemcpyDeviceToHost, stream));
+        
+        // Synchronize stream before returning buffers to pool
+        cudaStreamSynchronize(stream);
+        cudaStreamDestroy(stream);
 
-        CUDA_CHECK(cudaFree(d_A));
-        CUDA_CHECK(cudaFree(d_B));
-        CUDA_CHECK(cudaFree(d_C));
+        memory_pool.free(d_A);
+        memory_pool.free(d_B);
+        memory_pool.free(d_C);
     }
 
     void matmul_transposed(const Matrix& A, const Matrix& B, Matrix& C) {

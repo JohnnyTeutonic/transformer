@@ -124,68 +124,36 @@ Matrix Utils::create_batch_target_distribution(
     size_t input_max_seq_len) {
     debug::init_logging();
     debug::debug_log << "\nCreating target distribution for batch:" << std::endl;
-    debug::debug_log << "Batch size: " << target_tokens.size() << std::endl;
-    debug::debug_log << "Vocab size: " << vocab_size << std::endl;
-    debug::debug_log << "Max sequence length: " << input_max_seq_len << std::endl;
     
     size_t batch_size = target_tokens.size();
     size_t total_tokens = batch_size * input_max_seq_len;
     
-    // Log sequence lengths
-    debug::debug_log << "\nSequence lengths in batch:" << std::endl;
-    for (size_t i = 0; i < target_tokens.size(); ++i) {
-        debug::debug_log << "Sequence " << i << ": " << target_tokens[i].size() << " tokens" << std::endl;
-    }
-    
-    Matrix target_distribution(total_tokens, vocab_size, 0.0f);
-    
-    // Track token frequency for analysis
-    std::unordered_map<int, int> token_frequency;
+    // Create sparse matrix representation
+    std::vector<std::tuple<size_t, size_t, float>> non_zero_elements;
+    non_zero_elements.reserve(batch_size); // Reserve space for efficiency
     
     size_t current_pos = 0;
     for (size_t seq = 0; seq < target_tokens.size(); seq++) {
         const auto& sequence = target_tokens[seq];
         
-        debug::debug_log << "\nProcessing sequence " << seq << ":" << std::endl;
-        debug::log_vector(sequence, "Token IDs");
-        
-        for (size_t i = 0; i < input_max_seq_len; i++) {
-            if (i < sequence.size()) {
-                if (i == sequence.size() - 1) {
-                    int token_id = sequence[i];
-                    token_frequency[token_id]++;
-                    
-                    if (token_id >= 0 && static_cast<size_t>(token_id) < vocab_size) {
-                        target_distribution(current_pos + i, token_id) = 1.0f;
-                        debug::debug_log << "Set target for position " << (current_pos + i) 
-                                       << " to token " << token_id << std::endl;
-                    } else {
-                        debug::debug_log << "WARNING: Token ID " << token_id 
-                                       << " out of vocabulary range [0, " 
-                                       << vocab_size << ")" << std::endl;
-                    }
+        for (size_t i = 0; i < input_max_seq_len && i < sequence.size(); i++) {
+            if (i == sequence.size() - 1) {
+                int token_id = sequence[i];
+                if (token_id >= 0 && static_cast<size_t>(token_id) < vocab_size) {
+                    non_zero_elements.emplace_back(current_pos + i, token_id, 1.0f);
                 }
             }
         }
         current_pos += input_max_seq_len;
     }
     
-    // Log token frequency statistics
-    debug::debug_log << "\nToken frequency statistics:" << std::endl;
-    std::vector<std::pair<int, int>> freq_vec(token_frequency.begin(), token_frequency.end());
-    std::sort(freq_vec.begin(), freq_vec.end(), 
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-    
-    debug::debug_log << "Top 10 most frequent tokens:" << std::endl;
-    for (size_t i = 0; i < std::min(freq_vec.size(), size_t(10)); ++i) {
-        debug::debug_log << "Token " << freq_vec[i].first << ": " 
-                        << freq_vec[i].second << " occurrences" << std::endl;
+    // Create sparse matrix
+    Matrix sparse_target(total_tokens, vocab_size, 0.0f);
+    for (const auto& [row, col, val] : non_zero_elements) {
+        sparse_target(row, col) = val;
     }
     
-    // Analyze distribution sparsity
-    debug::log_token_distribution(target_distribution, "Target Distribution");
-    
-    return target_distribution;
+    return sparse_target;
 }
 
 float Utils::compute_batch_loss(

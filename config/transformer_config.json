@@ -1,7 +1,7 @@
 {
     "attention": {
         "num_kv_heads": 1,
-        "use_flash_attention": false,
+        "use_flash_attention": true,
         "use_gqa": true,
         "use_rope": true,
         "use_sliding_window": true,
@@ -38,10 +38,10 @@
         "vocab_size": 2857
     },
     "optimization": {
-        "gradient_accumulation_steps": 4,
+        "gradient_accumulation_steps": 8,
         "gradient_clip_threshold": 5.0,
         "layer_norm_epsilon": 1e-05,
-        "memory_pool_size": 1024,
+        "memory_pool_size": 4096,
         "use_fp16": true,
         "use_gradient_checkpointing": true
     },
