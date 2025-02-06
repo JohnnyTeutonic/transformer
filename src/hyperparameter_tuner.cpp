@@ -1,7 +1,7 @@
 #include "../include/hyperparameter_tuner.hpp"
 #include "../include/transformer.hpp"
 #include "../include/utils.hpp"
-#include "../include/tokenizer.hpp"
+#include "../include/tiktoken_tokenizer.hpp"
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -221,7 +221,7 @@ bool HyperparameterTuner::validate_config(const HyperparameterConfig& config) co
 TuningResult HyperparameterTuner::evaluate_config(
     const HyperparameterConfig& config,
     const std::vector<std::pair<std::string, std::string>>& data,
-    const Tokenizer& tokenizer,
+    const TiktokenTokenizer& tokenizer,
     const TransformerConfig& transformer_config) {
     
     TuningResult result;
@@ -323,7 +323,7 @@ void HyperparameterUtils::log_result(const TuningResult& result) {
 
 std::vector<TuningResult> HyperparameterTuner::tune(
     const std::vector<std::pair<std::string, std::string>>& training_data,
-    const Tokenizer& tokenizer) {
+    const TiktokenTokenizer& tokenizer) {
     
     // Store transformer_config as member variable or pass it to tune
     const TransformerConfig& transformer_config = config_;  // Add this as member variable

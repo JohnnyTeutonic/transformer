@@ -1,7 +1,7 @@
 #include "../include/phrase_analysis.hpp"
 
 float compute_verb_penalty(const Matrix& logits, const std::vector<int>& final_tokens,
-                         const Tokenizer& tokenizer) {
+                         const TiktokenTokenizer& tokenizer) {
     // Get the final token's logits
     Vector final_token_logits = logits.row(logits.rows() - 1);
     float penalty = 0.0f;
@@ -29,7 +29,7 @@ float compute_verb_penalty(const Matrix& logits, const std::vector<int>& final_t
 }
 
 float compute_adjective_penalty(const Matrix& logits, const std::vector<int>& final_tokens,
-                              const Tokenizer& tokenizer) {
+                              const TiktokenTokenizer& tokenizer) {
     // Get the final token's logits
     Vector final_token_logits = logits.row(logits.rows() - 1);
     float penalty = 0.0f;
@@ -57,7 +57,7 @@ float compute_adjective_penalty(const Matrix& logits, const std::vector<int>& fi
 }
 
 float verb_gradient_factor(size_t position, const std::vector<int>& tokens,
-                         const Tokenizer& tokenizer) {
+                         const TiktokenTokenizer& tokenizer) {
     // Increase gradient impact for verb-like tokens
     // This is a simple implementation - you might want to enhance it based on your needs
     if (position < tokens.size()) {
@@ -74,7 +74,7 @@ float verb_gradient_factor(size_t position, const std::vector<int>& tokens,
 }
 
 float adjective_gradient_factor(size_t position, const std::vector<int>& tokens,
-                              const Tokenizer& tokenizer) {
+                              const TiktokenTokenizer& tokenizer) {
     // Increase gradient impact for adjective-like tokens
     // This is a simple implementation - you might want to enhance it based on your needs
     if (position < tokens.size()) {

@@ -1,6 +1,6 @@
 #pragma once
+#include "tiktoken_tokenizer.hpp"
 #include "matrix.hpp"
-#include "tokenizer.hpp"
 #include "transformer.hpp"
 #include <string>
 #include <utility>
@@ -78,27 +78,27 @@ public:
                              size_t max_cols = 5);
     static void print_top_predictions(
         const Matrix& logits,
-        const Tokenizer& tokenizer,
+        const TiktokenTokenizer& tokenizer,
         Transformer& transformer,
         int k
     );
     static std::vector<std::pair<std::string, std::string>> create_training_data();
     static void
     analyze_token_mappings(const std::vector<std::pair<std::string, std::string>>& training_data,
-                           const Tokenizer& tokenizer);
+                           const TiktokenTokenizer& tokenizer);
     static std::vector<std::pair<std::string, std::string>> load_validation_data();
     static float
-    evaluate_validation(Transformer& transformer, const Tokenizer& tokenizer,
+    evaluate_validation(Transformer& transformer, const TiktokenTokenizer& tokenizer,
                         const std::vector<std::pair<std::string, std::string>>& validation_data);
     static TransformerConfig load_config(const std::string& config_path);
     static Matrix
     create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
-                                     const Tokenizer& tokenizer, size_t vocab_size,
+                                     const TiktokenTokenizer& tokenizer, size_t vocab_size,
                                      size_t input_max_seq_len);
-    static float compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const Tokenizer& tokenizer);
-    static std::vector<std::string>& get_vocabulary(const Tokenizer& tokenizer);
+    static float compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const TiktokenTokenizer& tokenizer);
+    static std::vector<std::string>& get_vocabulary(const TiktokenTokenizer& tokenizer);
     static std::vector<std::pair<std::string, float>> get_multi_token_predictions(
-        const Matrix& logits, const Tokenizer& tokenizer, int beam_width);
+        const Matrix& logits, const TiktokenTokenizer& tokenizer, int beam_width);
     
     // Token category analysis functions
     static TokenCategories analyze_token_categories(const std::vector<std::pair<std::string, std::string>>& training_data);
@@ -113,7 +113,7 @@ public:
 
     static float perform_cross_validation(
         Transformer& transformer,
-        const Tokenizer& tokenizer,
+        const TiktokenTokenizer& tokenizer,
         const std::vector<std::pair<std::string, std::string>>& train_data
     );
 
@@ -245,11 +245,11 @@ public:
         prediction_counter = 0;
     }
 
-    static void generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer);
+    static void generate_predictions(Transformer& transformer, const std::string& input_text, TiktokenTokenizer* tokenizer);
 
     // Debugging utilities
     static void analyze_gradients(const Matrix& gradients, const std::string& label);
     static void analyze_loss_progression(const std::vector<float>& losses, size_t window_size);
     static void debug_token_processing(const std::string& input, const std::vector<int>& tokens, 
-                                     const Tokenizer& tokenizer);
+                                     const TiktokenTokenizer& tokenizer);
 };

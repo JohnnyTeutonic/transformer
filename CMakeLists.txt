@@ -98,7 +98,6 @@ set(CORE_SOURCES
     src/gqa.cpp
     src/beam_search.cpp
     src/config.cpp
-    src/tokenizer.cpp
     src/tiktoken_tokenizer.cpp
     src/matrix.cpp
     src/data_augmentation.cpp
@@ -193,8 +192,18 @@ endif()
 # Create single executable
 add_executable(transformer src/main.cpp)
 
+# Create test tokenizer executable
+add_executable(test_tokenizer src/test_tokenizer.cpp)
+
 # Link everything to the executable
 target_link_libraries(transformer
+    PRIVATE
+    transformer_lib
+    nlohmann_json::nlohmann_json
+)
+
+# Link test tokenizer
+target_link_libraries(test_tokenizer
     PRIVATE
     transformer_lib
     nlohmann_json::nlohmann_json

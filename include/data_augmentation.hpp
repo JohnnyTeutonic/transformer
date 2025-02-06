@@ -4,7 +4,8 @@
 #include <vector>
 #include <utility>
 #include <random>
-#include "tokenizer.hpp"
+#include "matrix.hpp"
+#include "tiktoken_tokenizer.hpp"
 
 class DataAugmentation {
 public:

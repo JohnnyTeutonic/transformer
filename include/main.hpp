@@ -24,7 +24,7 @@
 #include "performance_metrics.hpp"
 #include "preprocessing.hpp"
 #include "quantization.hpp"
-#include "tokenizer.hpp"
+#include "tiktoken_tokenizer.hpp"
 #include "transformer.hpp"
 #include "utils.hpp"
 #include "utils/tensor_cache.hpp"
@@ -35,14 +35,13 @@
 #endif
 
 // Forward declarations
-class Tokenizer;
 class Matrix;
 class Transformer;
 class TransformerConfig;
 class LanguageModelHead;
 
 // Declare global variables as extern
-extern std::unique_ptr<Tokenizer> tokenizer;
+extern std::unique_ptr<TiktokenTokenizer> tokenizer;
 extern PerformanceMetrics metrics;
 
 #ifndef MAIN_HPP

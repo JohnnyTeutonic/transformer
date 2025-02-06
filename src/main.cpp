@@ -2,7 +2,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <random>
-#include "../include/tokenizer.hpp"
+#include "../include/tiktoken_tokenizer.hpp"
 #include "../include/utils.hpp"
 #include "../include/phrase_analysis.hpp"
 #include "../include/training/training.hpp"  // Include unified training header
@@ -16,7 +16,7 @@
 #include "../include/debug.hpp"
 
 // Add necessary forward declarations and structures
-std::unique_ptr<Tokenizer> tokenizer;
+std::unique_ptr<TiktokenTokenizer> tokenizer;
 PerformanceMetrics metrics;
 
 // Configuration constants
@@ -30,36 +30,24 @@ TrainingStateManagerPtr training_manager;
 TrainingMonitorPtr training_monitor;
 
 // Initialize tokenizer function
-bool initialize_tokenizer(size_t custom_vocab_size, TransformerConfig& config) {
-    std::cout << "\nInitializing tiktoken with encoding: gpt2" << std::endl;
-    tokenizer = std::make_unique<Tokenizer>("gpt2");  // Constructor will handle initialization
+bool initialize_tokenizer(TransformerConfig& config) {
+    std::cout << "\nInitializing tokenizer..." << std::endl;
+    tokenizer = std::make_unique<TiktokenTokenizer>();
 
     try {
-        std::cout << "Initialized tokenizer with default vocabulary size: " << tokenizer->vocab_size() << std::endl;
-        std::cout << "Using custom vocabulary size from data: " << custom_vocab_size << std::endl;
+        // Build vocabulary from training data
+        tokenizer->build_vocabulary_from_file("../data/training_pairs.txt");
         
-        // Set the custom vocabulary size in the tokenizer
-        tokenizer->set_vocab_size(custom_vocab_size);
+        // Print vocabulary for debugging
+        tokenizer->print_vocabulary();
         
-        // Verify the vocabulary size was properly set
-        size_t current_vocab_size = tokenizer->vocab_size();
-        if (current_vocab_size != custom_vocab_size) {
-            throw std::runtime_error("Failed to set custom vocabulary size. Expected: " + 
-                                   std::to_string(custom_vocab_size) + ", Got: " + 
-                                   std::to_string(current_vocab_size));
-        }
-        std::cout << "Successfully updated tokenizer vocabulary size to: " << current_vocab_size << std::endl;
+        // Update config with actual vocabulary size
+        config.vocab_size = tokenizer->vocab_size();
+        std::cout << "Initialized tokenizer with vocabulary size: " << config.vocab_size << std::endl;
         
-        // Override config vocabulary size with our custom size
-        config.vocab_size = custom_vocab_size;
-        config.tokenizer.vocab_size = custom_vocab_size;
-        std::cout << "Updated config vocabulary sizes:"
-                  << "\n- config.vocab_size: " << config.vocab_size
-                  << "\n- config.tokenizer.vocab_size: " << config.tokenizer.vocab_size << std::endl;
-
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
+        std::cerr << "Error initializing tokenizer: " << e.what() << std::endl;
         return false;
     }
 }
@@ -71,71 +59,22 @@ struct Data {
 };
 
 // Add debug logging to the generate_predictions function
-void generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer) {
-    debug::log_message("Generating predictions for: '" + input_text + "'", "INFO");
-    
-    // Preprocess input
-    std::string processed_input = input_text;
-    tokenizer->preprocess_text(processed_input);
-    std::vector<int> input_tokens = tokenizer->encode(processed_input);
-    debug::log_vector(input_tokens, "Encoded input tokens");
-    
-    // Get model prediction
-    transformer.set_training(false);  // Set to evaluation mode
-    debug::log_message("Running forward pass through transformer", "DEBUG");
-    Matrix hidden_states = transformer.forward(input_tokens, processed_input, *tokenizer);
-    Matrix logits = transformer.get_lm_head()->forward(hidden_states);
-    
-    // Get probabilities for last token
-    Vector last_logits = logits.row(logits.rows() - 1);
-    std::vector<std::pair<float, int>> token_probs;
-    
-    // Convert logits to probabilities using softmax
-    float max_logit = -std::numeric_limits<float>::infinity();
-    for (size_t i = 0; i < last_logits.size(); i++) {
-        max_logit = std::max(max_logit, last_logits[i]);
+void generate_predictions(Transformer& transformer, const std::string& input_text, TiktokenTokenizer* tokenizer) {
+    if (!tokenizer) {
+        std::cerr << "Error: TiktokenTokenizer is null" << std::endl;
+        return;
     }
+
+    // Tokenize input
+    std::vector<int> input_tokens = tokenizer->encode(input_text);
     
-    debug::log_message("Max logit value: " + std::to_string(max_logit), "DEBUG");
+    // Generate prediction
+    std::vector<int> output_tokens = transformer.generate(input_tokens);
     
-    float sum_exp = 0.0f;
-    for (size_t i = 0; i < last_logits.size(); i++) {
-        float prob = std::exp(last_logits[i] - max_logit);
-        sum_exp += prob;
-        token_probs.push_back({prob, static_cast<int>(i)});
-    }
-    
-    debug::log_message("Sum of exponentials: " + std::to_string(sum_exp), "DEBUG");
-    
-    // Normalize probabilities
-    for (auto& pair : token_probs) {
-        pair.first /= sum_exp;
-    }
-    
-    // Sort by probability
-    std::sort(token_probs.begin(), token_probs.end(),
-              std::greater<std::pair<float, int>>());
-    
-    // Log top 5 predictions
-    std::ostringstream oss;
-    oss << "Top 5 predictions:";
-    for (int i = 0; i < std::min(5, static_cast<int>(token_probs.size())); i++) {
-        float prob = token_probs[i].first;
-        int token_id = token_probs[i].second;
-        std::string token = tokenizer->decode({token_id});
-        
-        // Add token type annotation
-        std::string token_type = "";
-        if (tokenizer->is_verb(token)) token_type = " (VERB)";
-        else if (tokenizer->is_adjective(token)) token_type = " (ADJ)";
-        else if (tokenizer->is_noun(token)) token_type = " (NOUN)";
-        
-        oss << "\n" << (i + 1) << ". \"" << token << "\"" << token_type 
-            << " (p=" << std::fixed << std::setprecision(4) << prob * 100 << "%)";
-    }
-    debug::log_message(oss.str(), "INFO");
-    
-    transformer.set_training(true);  // Reset to training mode
+    // Decode and print result
+    std::string output_text = tokenizer->decode(output_tokens);
+    std::cout << "Input: " << input_text << std::endl;
+    std::cout << "Output: " << output_text << std::endl;
 }
 
 // Add this function before the main training loop
@@ -207,7 +146,7 @@ void reinitialize_batch_weights(Transformer& transformer, const TransformerConfi
     }
 }
 
-void test_model_predictions(Transformer& transformer, std::unique_ptr<Tokenizer>& tokenizer) {
+void test_model_predictions(Transformer& transformer, std::unique_ptr<TiktokenTokenizer>& tokenizer) {
     std::vector<std::string> test_queries = {
         "The cat begins to",          // Simple action start
         "The old house looks very",   // Descriptive context
@@ -336,7 +275,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Loaded " << training_pairs.size() << " training pairs" << std::endl;
         
         // Initialize tokenizer with config
-        if (!initialize_tokenizer(custom_vocab_size, config)) {
+        if (!initialize_tokenizer(config)) {
             std::cerr << "Failed to initialize tokenizer" << std::endl;
             return 1;
         }
@@ -348,7 +287,7 @@ int main(int argc, char* argv[]) {
 
         // Print vocabulary mappings
         std::cout << "\nPrinting vocabulary mappings:\n";
-        tokenizer->print_vocabulary_mappings();
+        tokenizer->print_vocabulary();
 
         // Training parameters
         const size_t checkpoint_frequency =
@@ -416,15 +355,15 @@ int main(int argc, char* argv[]) {
         std::cout << "Initial cross-validation loss: " << initial_cv_loss << std::endl;
 
         // Update any hardcoded token references
-        int pad_id = tokenizer->get_pad_token_id();    // Should be 0
+        int pad_id = 0;    // UNK_ID
         std::cout << "pad_id: " << pad_id << std::endl;
-        int unk_id = tokenizer->get_unk_token_id();    // Should be 1
+        int unk_id = 0;    // UNK_ID
         std::cout << "unk_id: " << unk_id << std::endl;
-        int bos_id = tokenizer->get_bos_token_id();    // Should be 2
+        int bos_id = 0;    // We don't use these in our simple tokenizer
         std::cout << "bos_id: " << bos_id << std::endl;
-        int eos_id = tokenizer->get_eos_token_id();    // Should be 3
+        int eos_id = 0;    // We don't use these in our simple tokenizer
         std::cout << "eos_id: " << eos_id << std::endl;
-        int mask_id = tokenizer->get_mask_token_id();  // Should be 4
+        int mask_id = 0;   // We don't use these in our simple tokenizer
         std::cout << "mask_id: " << mask_id << std::endl;
         std::cout << "epochs: " << config.num_epochs << std::endl;
 
@@ -534,10 +473,10 @@ int main(int argc, char* argv[]) {
 
                     // Pad sequences to max_seq_len
                     while (input_tokens.size() < max_seq_len) {
-                        input_tokens.push_back(tokenizer->get_pad_token_id());
+                        input_tokens.push_back(0);  // Use 0 for padding
                     }
                     while (target_tokens.size() < max_seq_len) {  // Add padding for target tokens
-                        target_tokens.push_back(tokenizer->get_pad_token_id());
+                        target_tokens.push_back(0);  // Use 0 for padding
                     }
 
                     input_batch.push_back(input_tokens);
@@ -594,6 +533,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "Flattened batch size: " << flattened_batch.size() << " tokens\n";
 
                 // Forward pass through the model
+                transformer.set_tokenizer(tokenizer.get());
                 Matrix hidden_states = transformer.forward(flattened_batch, "", *tokenizer);
 
                 // Project hidden states to vocabulary space using LM head

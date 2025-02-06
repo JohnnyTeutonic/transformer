@@ -1,5 +1,4 @@
-#ifndef TRANSFORMER_HPP
-#define TRANSFORMER_HPP
+#pragma once
 
 #include <memory>
 #include <vector>
@@ -22,7 +21,7 @@
 #include "half_precision.hpp"
 #include "memory_pool.hpp"
 #include "phrase_types.hpp"
-#include "tokenizer.hpp"
+#include "tiktoken_tokenizer.hpp"
 
 // Forward declarations
 class TransformerLayer;
@@ -285,13 +284,13 @@ private:
     // Helper methods for phrase prediction
     void boost_verb_probabilities(
         std::vector<float>& probabilities,
-        const Tokenizer& tokenizer,
+        const TiktokenTokenizer& tokenizer,
         std::mt19937* gen = nullptr
     );
 
     void boost_adjective_probabilities(
         std::vector<float>& probabilities,
-        const Tokenizer& tokenizer,
+        const TiktokenTokenizer& tokenizer,
         std::mt19937* gen = nullptr
     );
 
@@ -301,7 +300,7 @@ private:
     std::string extract_prediction(
         const Matrix& hidden_states,
         PhraseType phrase_type,
-        const Tokenizer& tokenizer
+        const TiktokenTokenizer& tokenizer
     );
 
 public:
@@ -332,7 +331,7 @@ public:
      * @param use_cache Whether to use key-value caching for inference
      * @return Output logits for each position
      */
-    Matrix forward(const std::vector<int>& input_tokens, const std::string& original_query, const Tokenizer& tokenizer);
+    Matrix forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer);
 
     /**
      * @brief Performs backward pass and updates model parameters
@@ -442,7 +441,7 @@ public:
 
     void train_step(const std::vector<std::vector<int>>& input_tokens, 
                     const Matrix& target_distribution,
-                    const Tokenizer& tokenizer);
+                    const TiktokenTokenizer& tokenizer);
 
     void save_checkpoint(const std::string& path);
 
@@ -468,7 +467,7 @@ public:
      */
     std::pair<std::string, PhraseType> predict_final_phrase(
         const std::string& input_text,
-        const Tokenizer& tokenizer
+        const TiktokenTokenizer& tokenizer
     );
 
     /**
@@ -479,8 +478,65 @@ public:
      */
     PhraseType predict_phrase_type(
         const std::string& input_text,
-        const Tokenizer& tokenizer
+        const TiktokenTokenizer& tokenizer
     );
+
+    // Add softmax helper function
+    Vector softmax(const Vector& input) const {
+        Vector output(input.size());
+        float max_val = *std::max_element(input.begin(), input.end());
+        float sum = 0.0f;
+        
+        // Compute exp and sum
+        for (size_t i = 0; i < input.size(); i++) {
+            output[i] = std::exp(input[i] - max_val);
+            sum += output[i];
+        }
+        
+        // Normalize
+        for (size_t i = 0; i < output.size(); i++) {
+            output[i] /= sum;
+        }
+        
+        return output;
+    }
+
+    std::vector<int> generate(const std::vector<int>& input_tokens, 
+                            size_t max_length = 100,
+                            float temperature = 1.0f) {
+        std::vector<int> output_tokens = input_tokens;
+        
+        while (output_tokens.size() < max_length) {
+            // Forward pass through the model - fix the forward call
+            Matrix logits = forward(output_tokens, "", *tokenizer_);  // Add empty string for query and tokenizer reference
+            
+            // Get the last token's logits
+            Vector last_token_logits = logits.row(logits.rows() - 1);
+            
+            // Apply temperature
+            if (temperature != 1.0f) {
+                for (size_t i = 0; i < last_token_logits.size(); i++) {
+                    last_token_logits[i] /= temperature;
+                }
+            }
+            
+            // Apply softmax using the helper function
+            Vector probabilities = softmax(last_token_logits);
+            
+            // Sample next token
+            int next_token = sample_token(probabilities);
+            
+            // Add to output
+            output_tokens.push_back(next_token);
+            
+            // Check for end of sequence token
+            if (next_token == eos_token_) {
+                break;
+            }
+        }
+        
+        return output_tokens;
+    }
 
 private:
     /**
@@ -491,10 +547,27 @@ private:
      */
     PhraseType analyze_phrase_type(
         const Matrix& logits,
-        const Tokenizer& tokenizer
+        const TiktokenTokenizer& tokenizer
     );
+
+    // Helper method for token sampling
+    int sample_token(const Vector& probabilities) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::discrete_distribution<> dist(probabilities.begin(), probabilities.end());
+        return dist(gen);
+    }
+    
+    int eos_token_ = 50256;  // Default GPT-2 EOS token
+
+    // Add tokenizer member variable
+    const TiktokenTokenizer* tokenizer_ = nullptr;
+
+public:
+    // Add setter for tokenizer
+    void set_tokenizer(const TiktokenTokenizer* tokenizer) {
+        tokenizer_ = tokenizer;
+    }
 };
 
 class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp
-
-#endif // TRANSFORMER_HPP

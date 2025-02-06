@@ -117,9 +117,11 @@ bool starts_with(const std::string& str, const std::string& prefix) {
            str.compare(0, prefix.size(), prefix) == 0;
 }
 
-Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
-                                               const Tokenizer& tokenizer, size_t vocab_size,
-                                               size_t input_max_seq_len) {
+Matrix Utils::create_batch_target_distribution(
+    const std::vector<std::vector<int>>& target_tokens,
+    const TiktokenTokenizer& tokenizer,
+    size_t vocab_size,
+    size_t input_max_seq_len) {
     debug::init_logging();
     debug::debug_log << "\nCreating target distribution for batch:" << std::endl;
     debug::debug_log << "Batch size: " << target_tokens.size() << std::endl;
@@ -186,7 +188,10 @@ Matrix Utils::create_batch_target_distribution(const std::vector<std::vector<int
     return target_distribution;
 }
 
-float Utils::compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const Tokenizer& tokenizer) {
+float Utils::compute_batch_loss(
+    const Matrix& logits,
+    const Matrix& target_distribution,
+    const TiktokenTokenizer& tokenizer) {
     // Input validation with detailed error messages
     if (logits.empty() || target_distribution.empty()) {
         std::cout << "Logits shape: " << (logits.empty() ? "empty" : 
@@ -431,9 +436,7 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
 
 std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
     std::vector<std::pair<std::string, std::string>> training_pairs;
-    std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
-    std::filesystem::path data_dir = exe_path / "data";
-    std::filesystem::path file_path = data_dir / "training_pairs.txt";
+    std::filesystem::path file_path = "../data/training_pairs.txt";
 
     std::ifstream file(file_path);
     if (!file.is_open()) {
@@ -530,7 +533,7 @@ std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
 
 void Utils::analyze_token_mappings(
     const std::vector<std::pair<std::string, std::string>>& training_data,
-    const Tokenizer& tokenizer) {
+    const TiktokenTokenizer& tokenizer) {
     std::cout << "\n=== Analyzing Token Mappings ===\n";
     size_t total_words = 0;
     size_t unknown_tokens = 0;
@@ -686,7 +689,9 @@ void Utils::print_matrix(const Matrix& m, const std::string& name, size_t max_ro
 
 // Helper function to get multi-token predictions
 std::vector<std::pair<std::string, float>> Utils::get_multi_token_predictions(
-    const Matrix& logits, const Tokenizer& tokenizer, int beam_width) {
+    const Matrix& logits,
+    const TiktokenTokenizer& tokenizer,
+    int beam_width) {
     
     const int last_pos = logits.rows() - 1;
     std::vector<std::pair<std::string, float>> predictions;
@@ -764,8 +769,11 @@ std::string Utils::get_token_category(const std::string& token, const TokenCateg
 }
 
 // Modify the print_top_predictions function to show token categories
-void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokenizer, 
-                                Transformer& transformer, int k) {
+void Utils::print_top_predictions(
+    const Matrix& logits,
+    const TiktokenTokenizer& tokenizer,
+    Transformer& transformer,
+    int k) {
     std::cout << "\nDebug: Entering print_top_predictions" << std::endl;
     const auto& config = transformer.getConfig();
     const auto& tp_config = config.token_prediction;
@@ -832,8 +840,8 @@ void Utils::print_top_predictions(const Matrix& logits, const Tokenizer& tokeniz
 }
 
 float Utils::evaluate_validation(
-    Transformer& transformer, 
-    const Tokenizer& tokenizer,
+    Transformer& transformer,
+    const TiktokenTokenizer& tokenizer,
     const std::vector<std::pair<std::string, std::string>>& validation_data) {
     
     std::cout << "\n=== Starting evaluate_validation ===" << std::endl << std::flush;
@@ -1015,7 +1023,7 @@ float Utils::evaluate_validation(
     return 0.0f;
 }
 
-std::vector<std::string>& Utils::get_vocabulary(const Tokenizer& tokenizer) {
+std::vector<std::string>& Utils::get_vocabulary(const TiktokenTokenizer& tokenizer) {
     static std::vector<std::string> vocabulary;
     if (vocabulary.empty()) {
         vocabulary.reserve(tokenizer.vocab_size());
@@ -1144,9 +1152,8 @@ Utils::create_cross_validation_folds(const std::vector<std::pair<std::string, st
 
 float Utils::perform_cross_validation(
     Transformer& transformer,
-    const Tokenizer& tokenizer,
-    const std::vector<std::pair<std::string, std::string>>& train_data)
-{
+    const TiktokenTokenizer& tokenizer,
+    const std::vector<std::pair<std::string, std::string>>& train_data) {
     const auto& config = transformer.getConfig();
     // Get values from the nested config structure
     const size_t num_folds = config.training.cross_validation.num_folds;
@@ -1277,7 +1284,10 @@ float Utils::perform_cross_validation(
     return avg_loss;
 }
 
-void Utils::generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer) {
+void Utils::generate_predictions(
+    Transformer& transformer,
+    const std::string& input_text,
+    TiktokenTokenizer* tokenizer) {
     std::cout << "\n=== Generating predictions for: '" << input_text << "' ===" << std::endl;
     
     // Preprocess input
@@ -1379,8 +1389,10 @@ void Utils::analyze_gradients(const Matrix& gradients, const std::string& label)
 }
 
 // Add debugging for token processing
-void Utils::debug_token_processing(const std::string& input, const std::vector<int>& tokens, 
-                              const Tokenizer& tokenizer) {
+void Utils::debug_token_processing(
+    const std::string& input,
+    const std::vector<int>& tokens,
+    const TiktokenTokenizer& tokenizer) {
     std::ostringstream oss;
     oss << "Token processing debug for input: '" << input << "'\n"
         << "  Input length: " << input.length() << " characters\n"

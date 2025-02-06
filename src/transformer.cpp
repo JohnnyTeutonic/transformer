@@ -433,7 +433,10 @@ struct BatchSequence {
     std::vector<size_t> lengths;  // Original sequence lengths
 };
 
-Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& input_text, const Tokenizer& tokenizer) {
+Matrix Transformer::forward(
+    const std::vector<int>& input_tokens,
+    const std::string& input_text,
+    const TiktokenTokenizer& tokenizer) {
     // Get embeddings
     Matrix embeddings = token_embedding->forward(input_tokens);
     
@@ -657,7 +660,7 @@ void Transformer::backward(const Matrix& logits, const Matrix& target_distributi
 
 void Transformer::train_step(const std::vector<std::vector<int>>& input_tokens, 
                          const Matrix& target_distribution,
-                         const Tokenizer& tokenizer) {
+                         const TiktokenTokenizer& tokenizer) {
     std::cout << "\n=== Starting train_step ===" << std::endl;
     std::cout << "Input batch details:"
               << "\n  Number of sequences: " << input_tokens.size()
@@ -963,8 +966,7 @@ void Transformer::set_training(bool training_mode) {
 
 std::pair<std::string, PhraseType> Transformer::predict_final_phrase(
     const std::string& input_text,
-    const Tokenizer& tokenizer
-) {
+    const TiktokenTokenizer& tokenizer) {
     // First predict the phrase type
     PhraseType predicted_type = predict_phrase_type(input_text, tokenizer);
     
@@ -982,8 +984,7 @@ std::pair<std::string, PhraseType> Transformer::predict_final_phrase(
 
 PhraseType Transformer::predict_phrase_type(
     const std::string& input_text,
-    const Tokenizer& tokenizer
-) {
+    const TiktokenTokenizer& tokenizer) {
     // Tokenize input
     std::vector<int> tokens = tokenizer.encode(input_text);
     
@@ -996,8 +997,7 @@ PhraseType Transformer::predict_phrase_type(
 
 PhraseType Transformer::analyze_phrase_type(
     const Matrix& hidden_states,
-    const Tokenizer& tokenizer
-) {
+    const TiktokenTokenizer& tokenizer) {
     // Get the final token predictions
     Matrix final_hidden_states = Matrix(hidden_states.row(hidden_states.rows() - 1));
     
@@ -1099,8 +1099,7 @@ PhraseType Transformer::analyze_phrase_type(
 std::string Transformer::extract_prediction(
     const Matrix& hidden_states,
     PhraseType phrase_type,
-    const Tokenizer& tokenizer
-) {
+    const TiktokenTokenizer& tokenizer) {
     // Create a local generator if none provided
     std::mt19937 local_gen = Utils::get_new_generator();
     
@@ -1181,9 +1180,8 @@ std::string Transformer::extract_prediction(
 
 void Transformer::boost_verb_probabilities(
     std::vector<float>& probabilities,
-    const Tokenizer& tokenizer,
-    std::mt19937* gen
-) {
+    const TiktokenTokenizer& tokenizer,
+    std::mt19937* gen) {
     // Create a local generator if none provided
     std::mt19937 local_gen = gen ? *gen : Utils::get_new_generator();
     
@@ -1206,9 +1204,8 @@ void Transformer::boost_verb_probabilities(
 
 void Transformer::boost_adjective_probabilities(
     std::vector<float>& probabilities,
-    const Tokenizer& tokenizer,
-    std::mt19937* gen
-) {
+    const TiktokenTokenizer& tokenizer,
+    std::mt19937* gen) {
     // Create a local generator if none provided
     std::mt19937 local_gen = gen ? *gen : Utils::get_new_generator();
     
