@@ -69,7 +69,6 @@ void TiktokenTokenizer::build_vocabulary_from_file(const std::string& filepath) 
     }
     
     initialized_ = true;
-    std::cout << "Built vocabulary with " << word_to_id_.size() << " words" << std::endl;
 }
 
 std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {

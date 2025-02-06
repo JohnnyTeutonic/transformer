@@ -37,10 +37,6 @@ bool initialize_tokenizer(TransformerConfig& config) {
     try {
         // Build vocabulary from training data
         tokenizer->build_vocabulary_from_file("../data/training_pairs.txt");
-        
-        // Print vocabulary for debugging
-        tokenizer->print_vocabulary();
-        
         // Update config with actual vocabulary size
         config.vocab_size = tokenizer->vocab_size();
         std::cout << "Initialized tokenizer with vocabulary size: " << config.vocab_size << std::endl;
@@ -284,11 +280,6 @@ int main(int argc, char* argv[]) {
         std::cout << "\nInitializing transformer with custom vocabulary size: " << config.vocab_size << std::endl;
         Transformer transformer(config);
         std::cout << "\nTransformer initialized with language model head" << std::endl << std::flush;
-
-        // Print vocabulary mappings
-        std::cout << "\nPrinting vocabulary mappings:\n";
-        tokenizer->print_vocabulary();
-
         // Training parameters
         const size_t checkpoint_frequency =
             config.paths.checkpoint_frequency; // Save checkpoint every 2 epochs
