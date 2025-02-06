@@ -11,10 +11,17 @@ __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C,
 __global__ void gelu_forward_kernel(float* x, int size);
 
 namespace cuda {
+    // Add persistent streams
+    static const int NUM_STREAMS = 4;
+    static cudaStream_t streams[NUM_STREAMS];
+    static int current_stream = 0;
+    
     // Memory pool for GPU buffers
     struct MemoryPool {
         std::unordered_map<size_t, std::vector<float*>> free_buffers;
         std::unordered_map<float*, size_t> buffer_sizes;
+        size_t total_allocated = 0;
+        size_t reuse_count = 0;
         
         float* allocate(size_t size) {
             // Check if we have a free buffer of the right size
@@ -22,6 +29,9 @@ namespace cuda {
             if (!buffers.empty()) {
                 float* buffer = buffers.back();
                 buffers.pop_back();
+                reuse_count++;
+                std::cout << "Reusing buffer of size " << size << " (reuse count: " 
+                          << reuse_count << ")" << std::endl;
                 return buffer;
             }
             
@@ -29,6 +39,9 @@ namespace cuda {
             float* buffer;
             CUDA_CHECK(cudaMalloc(&buffer, size * sizeof(float)));
             buffer_sizes[buffer] = size;
+            total_allocated += size;
+            std::cout << "New allocation of size " << size << " (total: " 
+                      << total_allocated << " elements)" << std::endl;
             return buffer;
         }
         
@@ -36,16 +49,26 @@ namespace cuda {
             if (buffer == nullptr) return;
             auto size = buffer_sizes[buffer];
             free_buffers[size].push_back(buffer);
+            std::cout << "Returned buffer of size " << size << " to pool (available buffers: " 
+                      << free_buffers[size].size() << ")" << std::endl;
         }
         
         void cleanup() {
+            size_t total_freed = 0;
             for (auto& pair : free_buffers) {
+                total_freed += pair.first * pair.second.size();
                 for (float* buffer : pair.second) {
                     cudaFree(buffer);
                 }
             }
+            std::cout << "Memory pool cleanup:"
+                      << "\n- Total allocated: " << total_allocated << " elements"
+                      << "\n- Buffer reuse count: " << reuse_count
+                      << "\n- Freed buffers: " << total_freed << " elements" << std::endl;
             free_buffers.clear();
             buffer_sizes.clear();
+            total_allocated = 0;
+            reuse_count = 0;
         }
     };
     
@@ -64,7 +87,11 @@ namespace cuda {
         if (err != cudaSuccess) {
             throw std::runtime_error("Failed to set CUDA device: " + std::string(cudaGetErrorString(err)));
         }
-        std::cout << "CUDA device set successfully" << std::endl;
+
+        // Create persistent streams
+        for (int i = 0; i < NUM_STREAMS; i++) {
+            CUDA_CHECK(cudaStreamCreate(&streams[i]));
+        }
 
         // Print CUDA device properties
         cudaDeviceProp prop;
@@ -77,7 +104,6 @@ namespace cuda {
         if (status != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("Failed to create cuBLAS handle: " + std::to_string(status));
         }
-        std::cout << "cuBLAS handle created successfully" << std::endl;
 
         cuda_initialized = true;
     }
@@ -85,11 +111,23 @@ namespace cuda {
     void cleanup_cuda() {
         if (cublas_handle != nullptr) {
             memory_pool.cleanup();
+            
+            // Cleanup streams
+            for (int i = 0; i < NUM_STREAMS; i++) {
+                cudaStreamDestroy(streams[i]);
+            }
+            
             cublasDestroy(cublas_handle);
             cublas_handle = nullptr;
             cuda_initialized = false;
-            std::cout << "cuBLAS handle destroyed successfully" << std::endl;
         }
+    }
+
+    // Helper to get next stream in round-robin fashion
+    cudaStream_t get_next_stream() {
+        cudaStream_t stream = streams[current_stream];
+        current_stream = (current_stream + 1) % NUM_STREAMS;
+        return stream;
     }
 
     void matmul(const Matrix& A, const Matrix& B, Matrix& C) {
@@ -124,9 +162,8 @@ namespace cuda {
         size_t B_size = B.rows() * B.cols() * sizeof(float);
         size_t C_size = C.rows() * C.cols() * sizeof(float);
 
-        // Use asynchronous memory transfers
-        cudaStream_t stream;
-        cudaStreamCreate(&stream);
+        // Use persistent stream
+        cudaStream_t stream = get_next_stream();
         
         CUDA_CHECK(cudaMemcpyAsync(d_A, A.data(), A_size, cudaMemcpyHostToDevice, stream));
         CUDA_CHECK(cudaMemcpyAsync(d_B, B.data(), B_size, cudaMemcpyHostToDevice, stream));
@@ -134,7 +171,6 @@ namespace cuda {
         float alpha = 1.0f;
         float beta = 0.0f;
 
-        // Set stream for cuBLAS operation
         cublasSetStream(cublas_handle, stream);
 
         cublasStatus_t status = cublasSgemm(cublas_handle,
@@ -150,15 +186,13 @@ namespace cuda {
             memory_pool.free(d_A);
             memory_pool.free(d_B);
             memory_pool.free(d_C);
-            cudaStreamDestroy(stream);
             throw std::runtime_error("cuBLAS matrix multiplication failed: " + std::to_string(status));
         }
 
         CUDA_CHECK(cudaMemcpyAsync(C.data(), d_C, C_size, cudaMemcpyDeviceToHost, stream));
         
-        // Synchronize stream before returning buffers to pool
+        // Only synchronize the specific stream
         cudaStreamSynchronize(stream);
-        cudaStreamDestroy(stream);
 
         memory_pool.free(d_A);
         memory_pool.free(d_B);
@@ -172,74 +206,84 @@ namespace cuda {
         }
 
         // Verify dimensions for transposed multiplication
-        // A: [M x K], B: [N x K] (transposed), C: [M x N]
         if (A.cols() != B.cols()) {
             throw std::runtime_error("Matrix multiplication dimension mismatch for transposed operation: " +
                 std::to_string(A.rows()) + "x" + std::to_string(A.cols()) + " * " +
                 std::to_string(B.rows()) + "x" + std::to_string(B.cols()));
         }
         
-        // Ensure output matrix has correct dimensions
         if (C.rows() != A.rows() || C.cols() != B.rows()) {
             throw std::runtime_error("Output matrix has wrong dimensions: expected " +
                 std::to_string(A.rows()) + "x" + std::to_string(B.rows()) + " got " +
                 std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
         }
 
-        float* d_A, *d_B, *d_C;
+        // Use memory pool instead of direct allocation
+        float *d_A = memory_pool.allocate(A.rows() * A.cols());
+        float *d_B = memory_pool.allocate(B.rows() * B.cols());
+        float *d_C = memory_pool.allocate(C.rows() * C.cols());
+
         size_t A_size = A.rows() * A.cols() * sizeof(float);
         size_t B_size = B.rows() * B.cols() * sizeof(float);
         size_t C_size = C.rows() * C.cols() * sizeof(float);
 
-        CUDA_CHECK(cudaMalloc(&d_A, A_size));
-        CUDA_CHECK(cudaMalloc(&d_B, B_size));
-        CUDA_CHECK(cudaMalloc(&d_C, C_size));
-
-        CUDA_CHECK(cudaMemcpy(d_A, A.data(), A_size, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_B, B.data(), B_size, cudaMemcpyHostToDevice));
+        // Use persistent stream
+        cudaStream_t stream = get_next_stream();
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_A, A.data(), A_size, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_B, B.data(), B_size, cudaMemcpyHostToDevice, stream));
 
         float alpha = 1.0f;
         float beta = 0.0f;
 
-        // For A[M,K] * B[N,K]^T = C[M,N], we compute:
-        // C = A * B^T
+        cublasSetStream(cublas_handle, stream);
+
         cublasStatus_t status = cublasSgemm(cublas_handle,
-                                          CUBLAS_OP_T, CUBLAS_OP_N,  // Transpose B, no transpose A
-                                          B.rows(), A.rows(), A.cols(),  // M, N, K dimensions
+                                          CUBLAS_OP_T, CUBLAS_OP_N,
+                                          B.rows(), A.rows(), A.cols(),
                                           &alpha,
-                                          d_B, B.cols(),  // Leading dimension is cols for B
-                                          d_A, A.cols(),  // Leading dimension is cols for A
+                                          d_B, B.cols(),
+                                          d_A, A.cols(),
                                           &beta,
-                                          d_C, B.rows()); // Leading dimension is rows of B for C
+                                          d_C, B.rows());
 
         if (status != CUBLAS_STATUS_SUCCESS) {
-            CUDA_CHECK(cudaFree(d_A));
-            CUDA_CHECK(cudaFree(d_B));
-            CUDA_CHECK(cudaFree(d_C));
+            memory_pool.free(d_A);
+            memory_pool.free(d_B);
+            memory_pool.free(d_C);
             throw std::runtime_error("cuBLAS matrix multiplication failed: " + std::to_string(status));
         }
 
-        CUDA_CHECK(cudaMemcpy(C.data(), d_C, C_size, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(C.data(), d_C, C_size, cudaMemcpyDeviceToHost, stream));
+        
+        // Only synchronize the specific stream
+        cudaStreamSynchronize(stream);
 
-        CUDA_CHECK(cudaFree(d_A));
-        CUDA_CHECK(cudaFree(d_B));
-        CUDA_CHECK(cudaFree(d_C));
+        memory_pool.free(d_A);
+        memory_pool.free(d_B);
+        memory_pool.free(d_C);
     }
 
     void gelu_forward(Matrix& x) {
-        float* d_x;
+        // Use memory pool instead of direct allocation
+        float* d_x = memory_pool.allocate(x.size());
         size_t size = x.size() * sizeof(float);
         
-        CUDA_CHECK(cudaMalloc(&d_x, size));
-        CUDA_CHECK(cudaMemcpy(d_x, x.data(), size, cudaMemcpyHostToDevice));
+        // Use persistent stream
+        cudaStream_t stream = get_next_stream();
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_x, x.data(), size, cudaMemcpyHostToDevice, stream));
         
         dim3 block(256);
         dim3 grid((x.size() + 255) / 256);
         
-        gelu_forward_kernel<<<grid, block>>>(d_x, x.size());
+        gelu_forward_kernel<<<grid, block, 0, stream>>>(d_x, x.size());
         
-        CUDA_CHECK(cudaMemcpy(x.data(), d_x, size, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(d_x));
+        CUDA_CHECK(cudaMemcpyAsync(x.data(), d_x, size, cudaMemcpyDeviceToHost, stream));
+        
+        cudaStreamSynchronize(stream);
+        
+        memory_pool.free(d_x);
     }
 }
 
