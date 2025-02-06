@@ -1197,29 +1197,15 @@ float Utils::perform_cross_validation(
                 batch_input_tokens.clear();
                 size_t max_seq_length = 0;
                 
-                // First pass: determine max sequence length in this batch
-                std::cout << "\nAnalyzing sequence lengths and token mappings:" << std::endl;
+                // First pass: determine max sequence length in this batch and validate tokens
                 for (size_t j = 0; j < current_batch_size; j++) {
                     const auto& [input, target] = train_fold[i + j];
                     std::vector<int> input_tokens = tokenizer.encode(input);
-                    std::cout << "Sequence " << j << ":"
-                              << "\n  Input: '" << input << "'"
-                              << "\n  Token length: " << input_tokens.size() << std::endl;
                     
-                    // Print token mapping details
-                    std::cout << "  Token mappings:" << std::endl;
-                    for (size_t k = 0; k < input_tokens.size(); k++) {
-                        std::string token_text = tokenizer.decode({input_tokens[k]});
-                        bool is_unk = input_tokens[k] == 0;  // Assuming 0 is UNK token ID
-                        std::cout << "    Token " << k << ": ID=" << input_tokens[k] 
-                                 << " Text='" << token_text << "'"
-                                 << (is_unk ? " (UNK)" : "") << std::endl;
-                    }
-                    
-                    // Count UNK tokens
+                    // Validate tokens silently
                     size_t unk_count = std::count(input_tokens.begin(), input_tokens.end(), 0);
                     if (unk_count > 0) {
-                        std::cout << "  WARNING: Found " << unk_count << " unknown tokens!" << std::endl;
+                        debug::log_message("Found " + std::to_string(unk_count) + " unknown tokens in sequence " + std::to_string(j), "WARNING");
                     }
                     
                     max_seq_length = std::max(max_seq_length, input_tokens.size());
