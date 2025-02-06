@@ -99,7 +99,7 @@
             "peak_lr": 0.002,
             "warmup_steps": 15
         },
-        "num_epochs": 3,
+        "num_epochs": 4,
         "tuning": {
             "enabled": true,
             "evaluation_steps": 50,

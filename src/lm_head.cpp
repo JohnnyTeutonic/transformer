@@ -53,17 +53,10 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
         }
     }
     
-    std::cout << "Initialized LM Head with:" << std::endl;
-    std::cout << "- Hidden size: " << hidden_size << std::endl;
-    std::cout << "- Vocab size: " << vocab_size << std::endl;
-    std::cout << "- Projection matrix: " << projection.rows() << "x" << projection.cols() << std::endl;
-    std::cout << "- Projection matrix shape: [hidden_size x vocab_size] = [" 
-              << hidden_size << " x " << vocab_size << "]" << std::endl;
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     std::cout << "\nLM Head forward pass:" << std::endl;
-    std::cout << "Hidden states shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
     
     if (hidden_states.cols() != hidden_size_) {
         throw std::runtime_error("Hidden dimension mismatch: " + std::to_string(hidden_states.cols()) +
@@ -77,13 +70,7 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
     // hidden_states: [batch_size x hidden_size]
     // projection: [hidden_size x vocab_size]
     // result: [batch_size x vocab_size]
-    Matrix logits(hidden_states.rows(), vocab_size_);
-    
-    std::cout << "Matrix dimensions:" << std::endl;
-    std::cout << "- Hidden states: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-    std::cout << "- Projection: " << projection.rows() << "x" << projection.cols() << std::endl;
-    std::cout << "- Output logits: " << logits.rows() << "x" << logits.cols() << std::endl;
-    
+    Matrix logits(hidden_states.rows(), vocab_size_);    
     // Perform matrix multiplication (no need for transposition now)
     cuda::matmul(hidden_states, projection, logits);
     
@@ -102,7 +89,6 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
     this->hidden_states = hidden_states;
     size_t total_size = hidden_states.rows();
     size_t hidden_dim = hidden_states.cols();
-    std::cout << " within LM project to vocab hidden_dim: " << hidden_dim << std::endl;
 
     if (hidden_dim != hidden_size_) {
         throw std::runtime_error("Hidden dimension mismatch: " + std::to_string(hidden_dim) +
@@ -113,12 +99,7 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
 }
 
 Matrix LanguageModelHead::backward(const Matrix& grad_output, const Matrix& target_distribution) {
-    std::cout << "\n=== LanguageModelHead::backward START ===" << std::endl;
-    std::cout << "Input dimensions:" << std::endl;
-    std::cout << "- Gradient output: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-    std::cout << "- Target distribution: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
-    std::cout << "- Cached hidden states: " << hidden_states_.rows() << "x" << hidden_states_.cols() << std::endl;
-    
+    std::cout << "\n=== LanguageModelHead::backward START ===" << std::endl;    
     // Verify input dimensions
     if (grad_output.cols() != vocab_size_) {
         throw std::runtime_error("Gradient output dimension mismatch in backward pass. Expected vocab_size: " + 
@@ -288,11 +269,6 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
                                std::to_string(hidden_size_) + ", got: " + std::to_string(hidden_states.cols()));
     }
 
-    std::cout << "\nLM Head Backward Pass Dimensions:" << std::endl;
-    std::cout << "- grad_output: [" << grad_output.rows() << " x " << grad_output.cols() << "]" << std::endl;
-    std::cout << "- hidden_states: [" << hidden_states.rows() << " x " << hidden_states.cols() << "]" << std::endl;
-    std::cout << "- projection: [" << projection.rows() << " x " << projection.cols() << "]" << std::endl;
-    
     // Compute gradients for projection matrix
     // hidden_states.T: [hidden_size x batch_size]
     // grad_output: [batch_size x vocab_size]
@@ -313,12 +289,6 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     const float max_update = 0.05f * scale_factor;
     
     bool has_unstable_update = false;
-    std::cout << "Before parallel section dimensions:" << std::endl;
-    std::cout << "- grad_proj: " << grad_proj.rows() << "x" << grad_proj.cols() << std::endl;
-    std::cout << "- m_proj: " << m_proj.rows() << "x" << m_proj.cols() << std::endl;
-    std::cout << "- v_proj: " << v_proj.rows() << "x" << v_proj.cols() << std::endl;
-    std::cout << "- projection: " << projection.rows() << "x" << projection.cols() << std::endl;
-
     // Remove OpenMP parallelization temporarily to debug
     //#pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
     for (size_t i = 0; i < grad_proj.rows(); ++i) {
