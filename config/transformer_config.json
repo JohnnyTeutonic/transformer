@@ -102,7 +102,7 @@
         },
         "num_epochs": 4,
         "tuning": {
-            "enabled": true,
+            "enabled": false,
             "evaluation_steps": 50,
             "num_trials": 10
         },

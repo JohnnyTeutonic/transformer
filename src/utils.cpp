@@ -1351,7 +1351,7 @@ float Utils::perform_cross_validation(
                 val_loss += batch_loss;
                 
                 debug::log_progress("Validation", val_processed, val_fold.size(),
-                                  "Epoch " + std::to_string(epoch + 1) + 
+                                  "Epoch " + std::to_string(epoch + 1) + "/" + 
                                   std::to_string(epochs_per_fold) + " | Fold " + 
                                   std::to_string(fold + 1) + "/" + std::to_string(num_folds) +
                                   " | Current Loss: " + std::to_string(batch_loss));
