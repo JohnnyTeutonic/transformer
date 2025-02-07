@@ -338,12 +338,13 @@ int main(int argc, char* argv[]) {
         all_data.insert(all_data.end(), validation_data.begin(), validation_data.end());
         
         // Perform initial cross-validation to establish baseline
+        std::cout << "\n=== Performing Initial Baseline Cross-Validation ===" << std::endl;
         float initial_cv_loss = Utils::perform_cross_validation(
             transformer, 
             *tokenizer, 
             all_data
         );
-        std::cout << "Initial cross-validation loss: " << initial_cv_loss << std::endl;
+        std::cout << "=== Initial baseline cross-validation loss: " << initial_cv_loss << " ===" << std::endl;
 
         // Update any hardcoded token references
         int pad_id = 0;    // UNK_ID
@@ -645,23 +646,21 @@ int main(int argc, char* argv[]) {
                     if (!update_tokens.empty()) {
                         transformer.get_lm_head()->update_token_frequencies(update_tokens);
                     }
-                    
-                    // For frequent tokens, we'll need to implement a separate method in LanguageModelHead
-                    // to handle frequency decay. For now, we'll skip the decay to fix the compilation error.
                 }
             }
 
             std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.training.num_epochs
                       << " (Loss: " << epoch_loss / total_batches << ")" << std::endl;
 
-            // Perform cross-validation every few epochs
-            if ((epoch + 1) % 3 == 0) {  // Every 3 epochs
+            // Perform cross-validation every two epochs
+            if ((epoch + 1) % 2 == 0) {
+                std::cout << "\n=== Performing Periodic Cross-Validation (Epoch " << epoch + 1 << ") ===" << std::endl;
                 float cv_loss = Utils::perform_cross_validation(
                     transformer, 
                     *tokenizer, 
                     all_data
                 );
-                std::cout << "Cross-validation loss after epoch " << epoch + 1 << ": " << cv_loss << std::endl;
+                std::cout << "=== Periodic cross-validation loss: " << cv_loss << " ===" << std::endl;
                 
                 // Early stopping based on cross-validation with tuned parameters
                 if (cv_loss < best_cv_loss) {
