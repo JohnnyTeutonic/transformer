@@ -618,23 +618,34 @@ std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
     }
     std::cout << "Total pairs before balancing: " << total_pairs << std::endl;
 
-    // Instead of taking the minimum, we'll take up to 80% of the largest category size
-    size_t target_size = static_cast<size_t>(max_category_size * 0.8);
+    // Take a larger portion of each category - use 95% of the largest category
+    size_t target_size = static_cast<size_t>(max_category_size * 0.95);
     std::cout << "Target size per category: " << target_size << std::endl;
 
     // Random number generator for shuffling
     std::mt19937 gen(42);  // Fixed seed for reproducibility
     
-    // Sample from each category
+    // Sample from each category with oversampling for smaller categories
     for (const auto& [category, pairs] : category_pairs) {
         std::vector<size_t> indices(pairs.size());
         std::iota(indices.begin(), indices.end(), 0);
+        
+        // If category is smaller than target size, oversample by repeating indices
+        if (pairs.size() < target_size) {
+            size_t repeats = (target_size + pairs.size() - 1) / pairs.size();  // Ceiling division
+            std::vector<size_t> expanded_indices;
+            for (size_t r = 0; r < repeats; r++) {
+                expanded_indices.insert(expanded_indices.end(), indices.begin(), indices.end());
+            }
+            indices = expanded_indices;
+        }
+        
+        // Shuffle all indices (including repeats for oversampling)
         std::shuffle(indices.begin(), indices.end(), gen);
         
-        // Take up to target_size samples from each category
-        size_t samples_to_take = std::min(target_size, pairs.size());
-        for (size_t i = 0; i < samples_to_take; ++i) {
-            training_pairs.push_back(pairs[indices[i]]);
+        // Take exactly target_size samples (with possible repeats for small categories)
+        for (size_t i = 0; i < target_size; ++i) {
+            training_pairs.push_back(pairs[indices[i % indices.size()]]);
         }
     }
     
@@ -1340,7 +1351,7 @@ float Utils::perform_cross_validation(
                 val_loss += batch_loss;
                 
                 debug::log_progress("Validation", val_processed, val_fold.size(),
-                                  "Epoch " + std::to_string(epoch + 1) + "/" + 
+                                  "Epoch " + std::to_string(epoch + 1) + 
                                   std::to_string(epochs_per_fold) + " | Fold " + 
                                   std::to_string(fold + 1) + "/" + std::to_string(num_folds) +
                                   " | Current Loss: " + std::to_string(batch_loss));
