@@ -254,7 +254,7 @@ Matrix MultiHeadAttention::flash_attention(const Matrix& Q, const Matrix& K, con
 Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& attention_mask,
                                  const std::optional<KVCache>& kv_cache) {
     size_t batch_size = input.rows();
-    size_t seq_length = batch_size;  // Each row is one position in the sequence
+    size_t seq_length = batch_size;  // Each row represents a token in the sequence
     
     // Debug dimensions
     std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
@@ -270,14 +270,6 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
                                std::to_string(input.cols()));
     }
 
-    // Verify weight matrix dimensions
-    if (params_.key_weights.rows() != hidden_size || params_.key_weights.cols() != hidden_size) {
-        throw std::runtime_error("Key weight matrix dimensions mismatch: expected " + 
-                               std::to_string(hidden_size) + "x" + std::to_string(hidden_size) + 
-                               ", got " + std::to_string(params_.key_weights.rows()) + "x" + 
-                               std::to_string(params_.key_weights.cols()));
-    }
-
     // Project input to Q, K, V using matmul
     Matrix Q = matmul(input, params_.query_weights);
     Matrix K = matmul(input, params_.key_weights);
@@ -285,7 +277,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     
     // Debug print dimensions after matmul
     std::cout << "K dimensions after matmul: " << K.rows() << "x" << K.cols() << std::endl;
-
+    
     // Add biases
     for (size_t i = 0; i < Q.rows(); i++) {
         for (size_t j = 0; j < Q.cols(); j++) {
@@ -306,40 +298,20 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     
     // Debug print dimensions before reshape
     std::cout << "K dimensions before reshape: " << K.rows() << "x" << K.cols() << std::endl;
-    std::cout << "Expected reshaped dimensions: [" << batch_size << ", " << num_heads << ", " 
-              << seq_length << ", " << head_dim << "]" << std::endl;
     
-    // First reshape to [batch_size * seq_length * num_heads, head_dim]
-    Matrix K_reshaped(batch_size * seq_length * num_heads, head_dim);
-    Matrix Q_reshaped(batch_size * seq_length * num_heads, head_dim);
-    Matrix V_reshaped(batch_size * seq_length * num_heads, head_dim);
-    
-    // Debug dimensions
-    std::cout << "Reshaping matrices:" << std::endl;
-    std::cout << "Input shape: " << batch_size << "x" << seq_length << "x" << hidden_size << std::endl;
-    std::cout << "Output shape: " << batch_size * seq_length * num_heads << "x" << head_dim << std::endl;
+    // First reshape to [batch_size * num_heads, seq_length, head_dim]
+    Matrix K_reshaped(batch_size * num_heads * seq_length, head_dim);
+    Matrix Q_reshaped(batch_size * num_heads * seq_length, head_dim);
+    Matrix V_reshaped(batch_size * num_heads * seq_length, head_dim);
     
     // Perform the reshape
     for (size_t b = 0; b < batch_size; b++) {
         for (size_t s = 0; s < seq_length; s++) {
             for (size_t h = 0; h < num_heads; h++) {
                 for (size_t d = 0; d < head_dim; d++) {
-                    // Input is [batch_size x hidden_size]
-                    size_t input_row = s;  // Each row is one position in the sequence
-                    size_t input_col = h * head_dim + d;  // Split hidden_size into num_heads * head_dim
-                    
-                    // Output is [batch_size * seq_length * num_heads, head_dim]
+                    size_t input_row = s;
+                    size_t input_col = h * head_dim + d;
                     size_t output_row = b * (seq_length * num_heads) + s * num_heads + h;
-                    
-                    // Verify indices are in bounds
-                    if (input_row >= Q.rows() || input_col >= Q.cols()) {
-                        throw std::runtime_error(
-                            "Index out of bounds in reshape: input_row=" + std::to_string(input_row) + 
-                            ", input_col=" + std::to_string(input_col) + 
-                            "\nMatrix dimensions: " + std::to_string(Q.rows()) + "x" + std::to_string(Q.cols()) +
-                            "\nHead info: h=" + std::to_string(h) + ", d=" + std::to_string(d) +
-                            ", head_dim=" + std::to_string(head_dim));
-                    }
                     
                     Q_reshaped(output_row, d) = Q(input_row, input_col);
                     K_reshaped(output_row, d) = K(input_row, input_col);
@@ -349,17 +321,9 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
         }
     }
     
-    // Debug the reshaped matrices
-    std::cout << "Reshaped dimensions:" << std::endl;
-    std::cout << "Q_reshaped: " << Q_reshaped.rows() << "x" << Q_reshaped.cols() << std::endl;
-    std::cout << "K_reshaped: " << K_reshaped.rows() << "x" << K_reshaped.cols() << std::endl;
-    std::cout << "V_reshaped: " << V_reshaped.rows() << "x" << V_reshaped.cols() << std::endl;
-    
     Q = Q_reshaped;
     K = K_reshaped;
     V = V_reshaped;
-    
-    std::cout << "Q dimensions after reshape: " << Q.rows() << "x" << Q.cols() << std::endl;
     
     // Apply RoPE if enabled
     if (use_rope) {
@@ -441,17 +405,16 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     Matrix attention_output = matmul(scores, V);
     std::cout << "Attention output dimensions: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
     
-    // First reshape to combine batch and sequence dimensions
-    Matrix reshaped_output(batch_size * seq_length, hidden_size);
+    // Final reshape back to input dimensions
+    Matrix reshaped_output(batch_size, hidden_size);  // Match input dimensions exactly
     
-    // Rearrange the data from [batch_size * seq_length * num_heads, head_dim]
-    // to [batch_size * seq_length, hidden_size]
+    // Rearrange the data back to original shape
     for (size_t b = 0; b < batch_size; b++) {
-        for (size_t s = 0; s < seq_length; s++) {
-            for (size_t h = 0; h < num_heads; h++) {
+        for (size_t h = 0; h < num_heads; h++) {
+            for (size_t s = 0; s < seq_length; s++) {
                 for (size_t d = 0; d < head_dim; d++) {
                     size_t src_idx = (b * seq_length * num_heads + s * num_heads + h);
-                    size_t tgt_idx = b * seq_length + s;
+                    size_t tgt_idx = b;  // Keep batch dimension only
                     size_t tgt_dim = h * head_dim + d;
                     
                     reshaped_output(tgt_idx, tgt_dim) = attention_output(src_idx, d);
@@ -461,18 +424,18 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     }
     
     attention_output = reshaped_output;
-    std::cout << "Attention output dimensions after reshape: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
+    
     // Project output
     Matrix output = matmul(attention_output, params_.output_weights);
-    std::cout << "Output dimensions: " << output.rows() << "x" << output.cols() << std::endl;
+    
     // Add output bias
     for (size_t i = 0; i < output.rows(); i++) {
         for (size_t j = 0; j < output.cols(); j++) {
             output(i, j) += params_.output_bias[j];
         }
     }
-    std::cout << "Output dimensions after bias addition: " << output.rows() << "x" << output.cols() << std::endl;
-    return output;
+    
+    return output;  // Will have shape [batch_size, hidden_size] matching the input
 }
 
 Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matrix& K, const AttentionMask& mask) {

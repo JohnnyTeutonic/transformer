@@ -191,7 +191,10 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
     
     if (training) {
         attention_output = attention_dropout->forward(attention_output, true);
+        std::cout << "Attention output dimensions after dropout: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
     }
+    std::cout << "Attention output dimensions before residual: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
+    std::cout << "Normalized dimensions before residual: " << normalized.rows() << "x" << normalized.cols() << std::endl;
     Matrix residual = attention_output + normalized;
     
     // Debug residual
