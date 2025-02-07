@@ -446,16 +446,6 @@ public:
         return training;
     }
 
-    /**
-     * @brief Perform a single training step on a batch of data
-     * @param input_tokens Batch of input token sequences
-     * @param target_distribution Target probability distribution
-     * @param tokenizer Tokenizer instance for encoding/decoding
-     */
-    void train_step(const std::vector<std::vector<int>>& input_tokens,
-                   const Matrix& target_distribution,
-                   const TiktokenTokenizer& tokenizer);
-
     void save_checkpoint(const std::string& path);
 
     const std::vector<int>& get_last_input() const {
@@ -592,34 +582,6 @@ public:
         return tokenizer_.get();
     }
 
-    /**
-     * @brief Train the model on pairs of input/output strings
-     * @param training_data Vector of input/output string pairs for training
-     * @param validation_data Vector of input/output string pairs for validation
-     */
-    void train(const std::vector<std::pair<std::string, std::string>>& training_data,
-               const std::vector<std::pair<std::string, std::string>>& validation_data);
-
-    /**
-     * @brief Process a single batch of training data
-     * @param training_data Vector of input/output string pairs
-     * @param batch_start Start index of the batch
-     * @param batch_end End index of the batch
-     */
-    void train_batch(const std::vector<std::pair<std::string, std::string>>& training_data,
-                    size_t batch_start, size_t batch_end);
-
-    /**
-     * @brief Accumulate gradients for batch processing
-     * @param current_grad Current gradient to accumulate
-     * @param batch_idx Index of the current batch
-     */
-    void accumulate_gradients(const Matrix& current_grad, size_t batch_idx);
-
-    /**
-     * @brief Update parameters using accumulated gradients
-     */
-    void update_parameters_with_accumulated_grads();
 };
 
 class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp

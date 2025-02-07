@@ -255,14 +255,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
                                  const std::optional<KVCache>& kv_cache) {
     size_t batch_size = input.rows();
     size_t seq_length = batch_size;  // Each row represents a token in the sequence
-    
-    // Debug dimensions
-    std::cout << "Input dimensions: " << input.rows() << "x" << input.cols() << std::endl;
-    std::cout << "Batch size: " << batch_size << std::endl;
-    std::cout << "Sequence length: " << seq_length << std::endl;
-    std::cout << "Number of heads: " << num_heads << std::endl;
-    std::cout << "Head dimension: " << head_dim << std::endl;
-    
+        
     // Verify dimensions
     if (input.cols() != hidden_size) {
         throw std::runtime_error("Input dimension mismatch: expected hidden_size=" + 
@@ -274,10 +267,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     Matrix Q = matmul(input, params_.query_weights);
     Matrix K = matmul(input, params_.key_weights);
     Matrix V = matmul(input, params_.value_weights);
-    
-    // Debug print dimensions after matmul
-    std::cout << "K dimensions after matmul: " << K.rows() << "x" << K.cols() << std::endl;
-    
+        
     // Add biases
     for (size_t i = 0; i < Q.rows(); i++) {
         for (size_t j = 0; j < Q.cols(); j++) {
@@ -286,18 +276,12 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
             V(i, j) += params_.value_bias[j];
         }
     }
-    
-    // Debug print dimensions after bias addition
-    std::cout << "K dimensions after bias: " << K.rows() << "x" << K.cols() << std::endl;
-    
+        
     // If KV cache is provided, use cached values
     if (kv_cache && !kv_cache->empty()) {
         K = kv_cache->key_cache;
         V = kv_cache->value_cache;
     }
-    
-    // Debug print dimensions before reshape
-    std::cout << "K dimensions before reshape: " << K.rows() << "x" << K.cols() << std::endl;
     
     // First reshape to [batch_size * num_heads, seq_length, head_dim]
     Matrix K_reshaped(batch_size * num_heads * seq_length, head_dim);
@@ -343,13 +327,10 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     // Compute attention scores using matmul and scale
     Matrix scores = matmul(Q, K.transpose());
     scores *= (1.0f / std::sqrt(static_cast<float>(head_dim)));
-    std::cout << "Scores dimensions: " << scores.rows() << "x" << scores.cols() << std::endl;
     // Create and apply causal mask
     Matrix causal_mask = create_causal_mask(seq_length);
-    std::cout << "Causal mask dimensions: " << causal_mask.rows() << "x" << causal_mask.cols() << std::endl;
     // Apply attention mask if provided
     if (!attention_mask.mask.empty()) {
-        std::cout << "Applying attention mask" << std::endl;
         for (size_t b = 0; b < batch_size; b++) {
             for (size_t h = 0; h < num_heads; h++) {
                 for (size_t i = 0; i < seq_length; i++) {
