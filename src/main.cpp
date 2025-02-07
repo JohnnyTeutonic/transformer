@@ -557,6 +557,50 @@ int main(int argc, char* argv[]) {
                 // Ensure learning rate doesn't go below initial_lr
                 current_lr = std::max(current_lr, initial_lr);
 
+                // Open loss log file in append mode
+                std::ofstream loss_log("../build/loss.log", std::ios::app);
+                if (loss_log.is_open()) {
+                    // Get current timestamp
+                    auto now = std::chrono::system_clock::now();
+                    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+                    std::string timestamp = std::ctime(&now_time);
+                    timestamp.pop_back(); // Remove trailing newline
+                    
+                    // Write detailed metrics to loss log
+                    loss_log << "[" << timestamp << "] "
+                            << "Epoch: " << (epoch + 1) << "/" << config.training.num_epochs << ", "
+                            << "Batch: " << (batch + 1) << "/" << total_batches << ", "
+                            << "Batch Loss: " << batch_loss << ", "
+                            << "Avg Epoch Loss: " << (epoch_loss / (batch + 1)) << ", "
+                            << "Gradient Norm: " << grad_norm << ", "
+                            << "Learning Rate: " << current_lr << ", "
+                            << "Global Step: " << global_step << std::endl;
+                    
+                    // If this is the first batch of the first epoch, write header
+                    if (epoch == 0 && batch == 0) {
+                        loss_log << "\nTraining Configuration:\n"
+                                << "- Batch Size: " << config.training.batch_size << "\n"
+                                << "- Initial Learning Rate: " << initial_lr << "\n"
+                                << "- Peak Learning Rate: " << peak_lr << "\n"
+                                << "- Warmup Steps: " << warmup_steps << "\n"
+                                << "- Decay Factor: " << decay_factor << "\n"
+                                << "- Gradient Clip Threshold: " << gradient_clip_threshold << "\n"
+                                << "- Early Stopping Patience: " << early_stopping_patience << "\n"
+                                << "- Early Stopping Threshold: " << early_stopping_threshold << "\n\n";
+                    }
+                    
+                    // Add validation metrics when available
+                    if ((batch + 1) % config.training.cross_validation.validation_frequency == 0) {
+                        loss_log << "[" << timestamp << "] "
+                                << "=== Validation Metrics ===\n"
+                                << "Current Validation Loss: " << batch_loss << "\n"
+                                << "Best Validation Loss: " << best_cv_loss << "\n"
+                                << "Epochs Without Improvement: " << epochs_without_improvement << "\n\n";
+                    }
+                    
+                    loss_log.close();
+                }
+
                 // Apply gradient clipping
                 if (grad_norm > gradient_clip_threshold) {
                     float scale = gradient_clip_threshold / (grad_norm + 1e-6f);
@@ -576,22 +620,6 @@ int main(int argc, char* argv[]) {
                 std::cout << "Gradient Norm: " << grad_norm << std::endl;
                 std::cout << "Learning Rate: " << current_lr << std::endl;
                 
-                // Generate predictions every 2 batches
-                if ((batch + 1) % 2 == 0) {
-                    // Make predictions after each batch
-                    generate_predictions(transformer, "I go to the", tokenizer.get());
-                    generate_predictions(transformer, "The weather is", tokenizer.get());
-                    generate_predictions(transformer, "I want to", tokenizer.get());
-                    generate_predictions(transformer, "The cat", tokenizer.get());
-                    generate_predictions(transformer, "She likes to", tokenizer.get());
-                    // Add 5 more diverse queries
-                    generate_predictions(transformer, "The students eagerly", tokenizer.get());  // Academic/action context
-                    generate_predictions(transformer, "The ocean waves", tokenizer.get());       // Nature/movement context
-                    generate_predictions(transformer, "His voice sounds", tokenizer.get());      // Sensory/descriptive context
-                    generate_predictions(transformer, "The code begins to", tokenizer.get());    // Technical/action context
-                    generate_predictions(transformer, "The chef skillfully", tokenizer.get());   // Professional/adverb context
-                }
-
                 // Print progress and metrics every 10 batches
                 if ((batch + 1) % 10 == 0 || batch + 1 == total_batches) {
                     std::cout << "\rBatch " << batch + 1 << "/" << total_batches << " in epoch "
@@ -601,6 +629,33 @@ int main(int argc, char* argv[]) {
 
                     // Print performance metrics
                     metrics.print_metrics();
+                }
+
+                // Make predictions every 2 batches with clear separation
+                if ((batch + 1) % 2 == 0) {
+                    std::cout << "\n\n=== Making Predictions After Batch " << (batch + 1) 
+                              << " in Epoch " << (epoch + 1) << " ===\n" << std::endl;
+                    
+                    // Test verb completions
+                    std::cout << "\n--- Testing Verb Completions ---" << std::endl;
+                    generate_predictions(transformer, "I go to the", tokenizer.get());
+                    generate_predictions(transformer, "I want to", tokenizer.get());
+                    generate_predictions(transformer, "The code begins to", tokenizer.get());
+                    
+                    // Test adjective completions
+                    std::cout << "\n--- Testing Adjective Completions ---" << std::endl;
+                    generate_predictions(transformer, "The weather is", tokenizer.get());
+                    generate_predictions(transformer, "His voice sounds", tokenizer.get());
+                    generate_predictions(transformer, "The food tastes", tokenizer.get());
+                    
+                    // Test mixed contexts
+                    std::cout << "\n--- Testing Mixed Contexts ---" << std::endl;
+                    generate_predictions(transformer, "The students eagerly", tokenizer.get());
+                    generate_predictions(transformer, "The ocean waves", tokenizer.get());
+                    generate_predictions(transformer, "The chef skillfully", tokenizer.get());
+                    
+                    std::cout << "\n=== End of Predictions ===\n" << std::endl;
+                    std::cout.flush();  // Ensure output is displayed
                 }
 
                 // Update tracking variables

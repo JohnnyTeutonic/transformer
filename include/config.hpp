@@ -139,6 +139,7 @@ struct TransformerConfig {
             size_t validation_frequency = 1;
             float early_stopping_threshold = 1.5f;
             size_t early_stopping_patience = 2;
+            size_t num_epochs = 10;
         } cross_validation;
         
         // Learning rate parameters

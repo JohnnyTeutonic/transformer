@@ -239,11 +239,34 @@ Matrix Utils::create_batch_target_distribution(
     for (size_t seq = 0; seq < target_tokens.size(); seq++) {
         const auto& sequence = target_tokens[seq];
         
+        // Get the original string to determine the target type
+        std::string decoded = tokenizer.decode(sequence);
+        bool is_verb = (decoded.find('#') != std::string::npos);
+        bool is_adjective = (decoded.find('*') != std::string::npos);
+        
         for (size_t i = 0; i < input_max_seq_len && i < sequence.size(); i++) {
-            if (i == sequence.size() - 1) {
+            if (i == sequence.size() - 1) {  // Only create distribution for last token
                 int token_id = sequence[i];
                 if (token_id >= 0 && static_cast<size_t>(token_id) < vocab_size) {
+                    // Add the target token with full probability
                     non_zero_elements.emplace_back(current_pos + i, token_id, 1.0f);
+                    
+                    // Optionally boost similar tokens based on type
+                    if (is_verb) {
+                        // Boost other verbs slightly
+                        for (size_t v = 0; v < vocab_size; v++) {
+                            if (v != token_id && tokenizer.is_verb(tokenizer.decode({static_cast<int>(v)}))) {
+                                non_zero_elements.emplace_back(current_pos + i, v, 0.1f);  // Small boost
+                            }
+                        }
+                    } else if (is_adjective) {
+                        // Boost other adjectives slightly
+                        for (size_t a = 0; a < vocab_size; a++) {
+                            if (a != token_id && tokenizer.is_adjective(tokenizer.decode({static_cast<int>(a)}))) {
+                                non_zero_elements.emplace_back(current_pos + i, a, 0.1f);  // Small boost
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -254,6 +277,19 @@ Matrix Utils::create_batch_target_distribution(
     Matrix sparse_target(total_tokens, vocab_size, 0.0f);
     for (const auto& [row, col, val] : non_zero_elements) {
         sparse_target(row, col) = val;
+    }
+    
+    // Normalize each row to ensure probabilities sum to 1
+    for (size_t i = 0; i < total_tokens; i++) {
+        float row_sum = 0.0f;
+        for (size_t j = 0; j < vocab_size; j++) {
+            row_sum += sparse_target(i, j);
+        }
+        if (row_sum > 0.0f) {
+            for (size_t j = 0; j < vocab_size; j++) {
+                sparse_target(i, j) /= row_sum;
+            }
+        }
     }
     
     return sparse_target;
@@ -389,13 +425,22 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
         config.intermediate_size = model["intermediate_size"];
     }
 
-    // Parse training settings
+    // Parse training settings with cross validation
     if (j.contains("training")) {
         auto& training = j["training"];
-        config.batch_size = training.value("batch_size", 32);
-        config.num_epochs = training.value("num_epochs", 3);
-        config.dropout_rate = training.value("dropout_rate", 0.1f);
-        config.weight_decay = training.value("weight_decay", 0.01f);
+        config.training.batch_size = training.value("batch_size", 32);
+        config.training.num_epochs = training.value("num_epochs", 3);
+        config.training.dropout_rate = training.value("dropout_rate", 0.1f);
+        config.training.weight_decay = training.value("weight_decay", 0.01f);
+        
+        if (training.contains("cross_validation")) {
+            auto& cv = training["cross_validation"];
+            config.training.cross_validation.num_folds = cv.value("num_folds", 2);
+            config.training.cross_validation.validation_frequency = cv.value("validation_frequency", 1);
+            config.training.cross_validation.early_stopping_threshold = cv.value("early_stopping_threshold", 1.5f);
+            config.training.cross_validation.early_stopping_patience = cv.value("early_stopping_patience", 2);
+            config.training.cross_validation.num_epochs = cv.value("num_epochs", 10);
+        }
     }
     
     // Parse learning rate settings
@@ -1226,10 +1271,12 @@ float Utils::perform_cross_validation(
     const TiktokenTokenizer& tokenizer,
     const std::vector<std::pair<std::string, std::string>>& train_data) {
     const auto& config = transformer.getConfig();
-    const size_t num_folds = 2;  // Fixed to 2 folds for now
+    const size_t num_folds = config.training.cross_validation.num_folds;
     const float early_stopping_threshold = config.training.cross_validation.early_stopping_threshold;
+    const size_t epochs_per_fold = config.training.cross_validation.num_epochs;  // Use configured value
 
-    std::cout << "\nPerforming " << num_folds << "-fold cross-validation..." << std::endl;
+    std::cout << "\nPerforming " << num_folds << "-fold cross-validation with "
+              << epochs_per_fold << " epochs per fold..." << std::endl;
     
     auto folds = create_cross_validation_folds(train_data, num_folds);
     float total_loss = 0.0f;
@@ -1238,7 +1285,7 @@ float Utils::perform_cross_validation(
     const float learning_rate = config.initial_lr;
     
     // Track overall progress
-    size_t total_operations = num_folds * config.num_epochs * (train_data.size() + train_data.size()/4);
+    size_t total_operations = num_folds * epochs_per_fold * (train_data.size() + train_data.size()/4);
     size_t completed_operations = 0;
     
     // Evaluate each fold
@@ -1250,7 +1297,6 @@ float Utils::perform_cross_validation(
         
         // Train on this fold
         transformer.set_training(true);
-        const size_t epochs_per_fold = config.num_epochs;
         
         for (size_t epoch = 0; epoch < epochs_per_fold; epoch++) {
             debug::log_progress("Epoch", epoch + 1, epochs_per_fold,

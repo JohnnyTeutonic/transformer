@@ -327,8 +327,10 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     // Compute attention scores using matmul and scale
     Matrix scores = matmul(Q, K.transpose());
     scores *= (1.0f / std::sqrt(static_cast<float>(head_dim)));
+    
     // Create and apply causal mask
     Matrix causal_mask = create_causal_mask(seq_length);
+    
     // Apply attention mask if provided
     if (!attention_mask.mask.empty()) {
         for (size_t b = 0; b < batch_size; b++) {
@@ -338,8 +340,8 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
                         size_t idx = b * num_heads * seq_length * seq_length + 
                                    h * seq_length * seq_length + 
                                    i * seq_length + j;
-                        if (causal_mask(i, j) == 0.0f || 
-                            (attention_mask.mask.size() > 0 && attention_mask.mask(i, j) == 0.0f)) {
+                        // Only mask future tokens (j > i) and any additional masked positions
+                        if (j > i || (attention_mask.mask.size() > 0 && attention_mask.mask(i, j) == 0.0f)) {
                             scores.data()[idx] = -std::numeric_limits<float>::infinity();
                         }
                     }
@@ -356,7 +358,8 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
                         size_t idx = b * num_heads * seq_length * seq_length + 
                                    h * seq_length * seq_length + 
                                    i * seq_length + j;
-                        if (causal_mask(i, j) == 0.0f) {
+                        // Only mask future tokens (j > i)
+                        if (j > i) {
                             scores.data()[idx] = -std::numeric_limits<float>::infinity();
                         }
                     }
@@ -368,6 +371,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     // Apply softmax using our helper method
     scores = softmax(scores);
     std::cout << "Scores dimensions after softmax: " << scores.rows() << "x" << scores.cols() << std::endl;
+    
     // Apply attention dropout during training
     if (training && dropout_prob > 0.0f) {
         std::cout << "Applying attention dropout" << std::endl;
