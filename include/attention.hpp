@@ -8,6 +8,7 @@
 #include <optional>
 #include <memory>
 #include <vector>
+#include <random>
 using FloatVector = Vector;
 
 // Utility functions for gradient computation
@@ -262,6 +263,23 @@ class MultiHeadAttention {
         cached_value_layer = Matrix();
     }
 
+    /**
+     * @brief Creates a causal attention mask.
+     * @param seq_length Length of the sequence
+     * @return Matrix containing the causal mask
+     */
+    Matrix create_causal_mask(size_t seq_length);
+    
+    /**
+     * @brief Performs forward pass of multi-head attention.
+     * @param input Input tensor
+     * @param attention_mask Optional attention mask
+     * @return Output tensor after attention
+     */
+    Matrix forward(const Matrix& input, const AttentionMask& attention_mask);
+
+    void set_training(bool mode) { training = mode; }
+
   private:
     Parameters params_;
     Gradients grads_;
@@ -410,6 +428,66 @@ class MultiHeadAttention {
 
     // Add static initialization method
     static void initialize_static_rope_cache(size_t max_seq_len, size_t dim, size_t num_heads);
+
+    // Add missing member variables
+    bool training = false;
+    std::mt19937 gen{std::random_device{}()};  // Random number generator
+
+    // Add helper methods
+    Matrix softmax(const Matrix& input) const {
+        Matrix output = input;
+        for (size_t i = 0; i < input.rows(); i++) {
+            float max_val = -std::numeric_limits<float>::infinity();
+            for (size_t j = 0; j < input.cols(); j++) {
+                max_val = std::max(max_val, input(i, j));
+            }
+            
+            float sum_exp = 0.0f;
+            for (size_t j = 0; j < input.cols(); j++) {
+                output(i, j) = std::exp(input(i, j) - max_val);
+                sum_exp += output(i, j);
+            }
+            
+            for (size_t j = 0; j < input.cols(); j++) {
+                output(i, j) /= sum_exp;
+            }
+        }
+        return output;
+    }
+
+    Matrix elementwise_multiply(const Matrix& a, const Matrix& b) const {
+        if (a.rows() != b.rows() || a.cols() != b.cols()) {
+            throw std::runtime_error("Matrix dimensions must match for elementwise multiplication");
+        }
+        Matrix result(a.rows(), a.cols());
+        for (size_t i = 0; i < a.rows(); i++) {
+            for (size_t j = 0; j < a.cols(); j++) {
+                result(i, j) = a(i, j) * b(i, j);
+            }
+        }
+        return result;
+    }
+
+    Matrix reshape(const Matrix& input, size_t batch_size, size_t num_heads, 
+                  size_t seq_length, size_t head_dim) const {
+        if (input.rows() * input.cols() != batch_size * num_heads * seq_length * head_dim) {
+            throw std::runtime_error("Invalid dimensions for reshape");
+        }
+        Matrix result(batch_size * num_heads * seq_length, head_dim);
+        // Copy data with proper reshaping
+        for (size_t b = 0; b < batch_size; b++) {
+            for (size_t h = 0; h < num_heads; h++) {
+                for (size_t s = 0; s < seq_length; s++) {
+                    for (size_t d = 0; d < head_dim; d++) {
+                        size_t new_idx = (b * num_heads * seq_length + h * seq_length + s);
+                        size_t old_idx = b * seq_length + s;
+                        result(new_idx, d) = input(old_idx, h * head_dim + d);
+                    }
+                }
+            }
+        }
+        return result;
+    }
 };
 
 // Add sliding window attention

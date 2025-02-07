@@ -435,8 +435,18 @@ Matrix Transformer::forward(
     const std::vector<int>& input_tokens,
     const std::string& input_text,
     const TiktokenTokenizer& tokenizer) {
-    // Get embeddings
+    // Get token embeddings
     Matrix embeddings = token_embedding->forward(input_tokens);
+    
+    // Create position IDs tensor
+    Matrix position_ids(embeddings.rows(), 1);
+    for (size_t i = 0; i < position_ids.rows(); i++) {
+        position_ids(i, 0) = i;
+    }
+    
+    // Get positional embeddings and add them to token embeddings
+    Matrix pos_emb = pos_encoding->forward(position_ids);
+    embeddings = embeddings + pos_emb;  // Element-wise addition
     
     // Pass through transformer layers
     Matrix hidden_states = embeddings;
@@ -489,8 +499,6 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         const float global_max_grad_norm = config.gradient_clip_threshold;
         static DynamicLossScaler loss_scaler;
         
-        std::cout << "Starting backward pass with " << layers.size() << " layers" << std::endl;
-        
         // If using FP16, apply loss scaling
         if (config.use_fp16) {
             float scale = loss_scaler.get_scale();
@@ -504,26 +512,14 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         
         bool has_inf_nan = false;
         
-        // Gradient accumulation setup
-        static size_t accum_step = 0;
-        const size_t grad_accum_steps = config.gradient_accumulation_steps;
-        
-        // Backward pass through transformer layers
-        for (int i = layers.size() - 1; i >= 0; --i) {
-            std::string ffn_key = "ffn_norm_" + std::to_string(i);
-            std::string attn_key = "attn_norm_" + std::to_string(i);
-            
-            Matrix ffn_input = GradientCheckpoint::get_activation(ffn_key);
-            Matrix attn_input = GradientCheckpoint::get_activation(attn_key);
+        // Backward through layers with proper sequence handling
+        for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+            std::string layer_key = "layer_" + std::to_string(i) + "_input";
+            Matrix layer_input = GradientCheckpoint::get_activation(layer_key);
             
             try {
-                std::cout << "Layer " << i << " backward pass..." << std::endl;
-                std::cout << "Current gradient dimensions: " << current_grad.rows() << "x" << current_grad.cols() << std::endl;
-                std::cout << "Layer input dimensions: " << attn_input.rows() << "x" << attn_input.cols() << std::endl;
-                
-                Matrix layer_grad = layers[i]->backward(current_grad, attn_input, Matrix());
+                Matrix layer_grad = layers[i]->backward(current_grad, layer_input);
                 if (!layer_grad.empty()) {
-                    // Check for inf/nan if using FP16
                     if (config.use_fp16 && loss_scaler.has_inf_or_nan(layer_grad)) {
                         has_inf_nan = true;
                         break;
@@ -533,63 +529,63 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
-                std::cerr << "Attempting to proceed with remaining layers..." << std::endl;
+                throw;
             }
         }
-
-        // Accumulate gradients
-        accum_step++;
-        if (accum_step < grad_accum_steps) {
-            std::cout << "Accumulating gradients: step " << accum_step << "/" << grad_accum_steps << std::endl;
-            return;
+        
+        // Split gradients for token and position embeddings
+        Matrix d_token_emb = current_grad;
+        Matrix d_pos_emb = current_grad;  // Both embeddings receive the same gradient
+        
+        // Create position IDs tensor (same as in forward pass)
+        Matrix position_ids(input_tokens.size(), 1);
+        for (size_t i = 0; i < position_ids.rows(); i++) {
+            position_ids(i, 0) = i;
         }
         
-        // Reset accumulation counter
-        accum_step = 0;
-
-        // Apply gradient clipping
-        float total_grad_norm = 0.0f;
-        for (const auto& grad : layer_gradients) {
-            for (size_t j = 0; j < grad.size(); j++) {
-                total_grad_norm += grad.data()[j] * grad.data()[j];
+        // Backward through token embeddings
+        token_embedding->backward(d_token_emb, input_tokens);
+        
+        // Backward through positional embeddings
+        pos_encoding->backward(d_pos_emb, position_ids);
+        
+        // Handle FP16 loss scaling
+        if (config.use_fp16) {
+            bool should_skip = !loss_scaler.update_scale(has_inf_nan);
+            if (should_skip) {
+                std::cout << "Skipping step due to inf/nan in gradients" << std::endl;
+                return;
+            }
+            
+            // Unscale gradients
+            float inv_scale = 1.0f / loss_scaler.get_scale();
+            for (auto& grad : layer_gradients) {
+                grad *= inv_scale;
+            }
+            
+            // Unscale parameter gradients
+            for (auto& layer : layers) {
+                if (auto* attention = layer->getAttention()) {
+                    auto& grads = attention->param_gradients();
+                    unscale_gradients(grads, inv_scale);
+                }
+                if (auto* ffn = layer->getFeedForward()) {
+                    auto& grads = ffn->param_gradients();
+                    unscale_gradients(grads, inv_scale);
+                }
             }
         }
-        total_grad_norm = std::sqrt(total_grad_norm);
         
-        float global_scale = 1.0f;
-        if (total_grad_norm > global_max_grad_norm) {
-            global_scale = global_max_grad_norm / total_grad_norm;
-            std::cout << "Clipping gradients with scale: " << global_scale << std::endl;
-        }
-
-        // Update parameters with proper learning rate schedule
-        float current_lr = learning_rate;
-        if (update_step < config.warmup_steps) {
-            current_lr = config.initial_lr + 
-                        (config.peak_lr - config.initial_lr) * 
-                        (float)update_step / config.warmup_steps;
-        } else {
-            current_lr *= config.decay_factor;
-        }
-        update_step++;
-
-        // Update parameters
+        // Update parameters with proper sequence handling
         for (size_t i = 0; i < layers.size(); i++) {
-            try {
-                if (auto* attention = layers[i]->getAttention()) {
-                    update_attention_parameters(attention, current_lr * global_scale, config);
-                }
-                if (auto* ffn = layers[i]->getFeedForward()) {
-                    update_ffn_parameters(ffn, current_lr * global_scale, config);
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Error in layer " << i << " parameter update: " << e.what() << std::endl;
+            auto& layer = layers[i];
+            if (auto* attention = layer->getAttention()) {
+                update_attention_parameters(attention, learning_rate, config);
+            }
+            if (auto* ffn = layer->getFeedForward()) {
+                update_ffn_parameters(ffn, learning_rate, config);
             }
         }
-        
-        std::cout << "Backward pass complete" << std::endl;
-        std::cout << "Final gradient norm after scaling: " << (total_grad_norm * global_scale) << std::endl;
-        std::cout << "Current learning rate: " << current_lr << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
@@ -1627,4 +1623,185 @@ void Transformer::backward(const Matrix& grad, const Matrix& activation, size_t 
     // Compute gradients through the layer
     Matrix layer_grads = layers[layer_idx]->backward(grad, activation);
     parameter_grads->push_back(layer_grads);
+}
+
+void Transformer::train_batch(const std::vector<std::pair<std::string, std::string>>& training_data,
+                            size_t batch_start, size_t batch_end) {
+    size_t batch_size = batch_end - batch_start;
+    std::cout << "Processing batch of size " << batch_size << std::endl;
+
+    // Prepare input tokens and target distributions for the batch
+    std::vector<std::vector<int>> batch_input_tokens;
+    std::vector<std::vector<int>> batch_target_tokens;
+    batch_input_tokens.reserve(batch_size);
+    batch_target_tokens.reserve(batch_size);
+
+    // Process each example in the batch
+    for (size_t i = batch_start; i < batch_end; ++i) {
+        const auto& [input_text, target_text] = training_data[i];
+        
+        // Tokenize input and target
+        std::string processed_input = input_text;
+        std::string processed_target = target_text;
+        tokenizer_->preprocess_text(processed_input);
+        tokenizer_->preprocess_text(processed_target);
+        
+        std::vector<int> input_tokens = tokenizer_->encode(processed_input);
+        std::vector<int> target_tokens = tokenizer_->encode(processed_target);
+        
+        batch_input_tokens.push_back(input_tokens);
+        batch_target_tokens.push_back(target_tokens);
+    }
+
+    // Create target distribution
+    Matrix target_distribution = Utils::create_batch_target_distribution(
+        batch_target_tokens, *tokenizer_, config.vocab_size, config.max_seq_length);
+
+    // Train step with the batch
+    train_step(batch_input_tokens, target_distribution, *tokenizer_);
+}
+
+void Transformer::train(const std::vector<std::pair<std::string, std::string>>& training_data,
+                    const std::vector<std::pair<std::string, std::string>>& validation_data) {
+    std::cout << "\nStarting training with:"
+              << "\n- Training examples: " << training_data.size()
+              << "\n- Validation examples: " << validation_data.size()
+              << "\n- Batch size: " << config.batch_size
+              << "\n- Number of epochs: " << config.num_epochs << std::endl;
+
+    for (size_t epoch = 0; epoch < config.num_epochs; ++epoch) {
+        std::cout << "\nEpoch " << (epoch + 1) << "/" << config.num_epochs << std::endl;
+
+        // Training loop
+        size_t batch_start = 0;
+        while (batch_start < training_data.size()) {
+            size_t batch_end = std::min(batch_start + config.batch_size, training_data.size());
+            size_t current_batch_size = batch_end - batch_start;
+
+            // Prepare batch data
+            std::vector<std::vector<int>> batch_input_tokens;
+            std::vector<std::vector<int>> batch_target_tokens;
+            batch_input_tokens.reserve(current_batch_size);
+            batch_target_tokens.reserve(current_batch_size);
+
+            // Process each example in the batch
+            for (size_t i = batch_start; i < batch_end; ++i) {
+                const auto& [input_text, target_text] = training_data[i];
+                
+                // Tokenize input and target
+                std::string processed_input = input_text;
+                std::string processed_target = target_text;
+                tokenizer_->preprocess_text(processed_input);
+                tokenizer_->preprocess_text(processed_target);
+                
+                std::vector<int> input_tokens = tokenizer_->encode(processed_input);
+                std::vector<int> target_tokens = tokenizer_->encode(processed_target);
+                
+                batch_input_tokens.push_back(input_tokens);
+                batch_target_tokens.push_back(target_tokens);
+            }
+
+            // Create target distribution
+            Matrix target_distribution = Utils::create_batch_target_distribution(
+                batch_target_tokens, *tokenizer_, config.vocab_size, config.max_seq_length);
+
+            // Use existing train_step method
+            train_step(batch_input_tokens, target_distribution, *tokenizer_);
+            
+            batch_start = batch_end;
+            std::cout << "Processed batch: " << batch_start << "/" << training_data.size() << std::endl;
+        }
+
+        // Validation
+        if (!validation_data.empty()) {
+            std::cout << "\nRunning validation..." << std::endl;
+            float val_loss = Utils::evaluate_validation(*this, *tokenizer_, validation_data);
+            std::cout << "Validation Loss: " << val_loss << std::endl;
+        }
+    }
+
+    std::cout << "Training completed." << std::endl;
+}
+
+void Transformer::accumulate_gradients(const Matrix& current_grad, size_t batch_idx) {
+    static size_t accum_step = 0;
+    const size_t grad_accum_steps = config.gradient_accumulation_steps;
+    
+    // Store gradients
+    if (!parameter_grads.has_value()) {
+        parameter_grads = std::vector<Matrix>();
+        parameter_grads->reserve(layers.size());
+    }
+    
+    // Add current gradients to accumulation
+    if (batch_idx < parameter_grads->size()) {
+        (*parameter_grads)[batch_idx] += current_grad;
+    } else {
+        parameter_grads->push_back(current_grad);
+    }
+    
+    accum_step++;
+    
+    // Only update parameters after accumulating enough gradients
+    if (accum_step >= grad_accum_steps) {
+        // Compute average gradients
+        for (auto& grad : *parameter_grads) {
+            grad *= (1.0f / grad_accum_steps);
+        }
+        
+        // Apply gradient clipping
+        float total_grad_norm = 0.0f;
+        for (const auto& grad : *parameter_grads) {
+            for (size_t j = 0; j < grad.size(); j++) {
+                total_grad_norm += grad.data()[j] * grad.data()[j];
+            }
+        }
+        total_grad_norm = std::sqrt(total_grad_norm);
+        
+        // Apply clipping if needed
+        float clip_scale = 1.0f;
+        if (total_grad_norm > config.gradient_clip_threshold) {
+            clip_scale = config.gradient_clip_threshold / total_grad_norm;
+            for (auto& grad : *parameter_grads) {
+                grad *= clip_scale;
+            }
+        }
+        
+        // Update parameters and clear accumulation
+        update_parameters_with_accumulated_grads();
+        parameter_grads->clear();
+        accum_step = 0;
+    }
+}
+
+void Transformer::update_parameters_with_accumulated_grads() {
+    // Compute current learning rate
+    float current_lr = config.initial_lr;
+    if (update_step < config.warmup_steps) {
+        current_lr = config.initial_lr + 
+                    (config.peak_lr - config.initial_lr) * 
+                    (float)update_step / config.warmup_steps;
+    } else {
+        current_lr *= std::pow(config.decay_factor, 
+                             (float)(update_step - config.warmup_steps) / 
+                             config.training.learning_rate.decay_steps);
+    }
+    current_lr = std::max(current_lr, config.training.learning_rate.min_lr);
+    
+    // Update each layer's parameters
+    for (size_t i = 0; i < layers.size(); i++) {
+        if (i >= parameter_grads->size()) break;
+        
+        auto& layer = layers[i];
+        const auto& layer_grad = (*parameter_grads)[i];
+        
+        if (auto* attention = layer->getAttention()) {
+            update_attention_parameters(attention, current_lr, config);
+        }
+        if (auto* ffn = layer->getFeedForward()) {
+            update_ffn_parameters(ffn, current_lr, config);
+        }
+    }
+    
+    update_step++;
 }

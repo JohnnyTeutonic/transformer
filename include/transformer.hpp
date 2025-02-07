@@ -303,6 +303,16 @@ private:
         const TiktokenTokenizer& tokenizer
     );
 
+    // Change tokenizer member to unique_ptr
+    std::unique_ptr<TiktokenTokenizer> tokenizer_;
+
+    // Helper method to ensure tokenizer is available
+    void check_tokenizer() const {
+        if (!tokenizer_) {
+            throw std::runtime_error("Tokenizer not set. Call set_tokenizer before using this method.");
+        }
+    }
+
 public:
     Transformer() = default;
 
@@ -436,12 +446,15 @@ public:
         return training;
     }
 
-    void train_step(const std::vector<std::vector<int>>& input_tokens, 
-                    const Matrix& target_distribution);
-
-    void train_step(const std::vector<std::vector<int>>& input_tokens, 
-                    const Matrix& target_distribution,
-                    const TiktokenTokenizer& tokenizer);
+    /**
+     * @brief Perform a single training step on a batch of data
+     * @param input_tokens Batch of input token sequences
+     * @param target_distribution Target probability distribution
+     * @param tokenizer Tokenizer instance for encoding/decoding
+     */
+    void train_step(const std::vector<std::vector<int>>& input_tokens,
+                   const Matrix& target_distribution,
+                   const TiktokenTokenizer& tokenizer);
 
     void save_checkpoint(const std::string& path);
 
@@ -560,14 +573,53 @@ private:
     
     int eos_token_ = 50256;  // Default GPT-2 EOS token
 
-    // Add tokenizer member variable
-    const TiktokenTokenizer* tokenizer_ = nullptr;
-
 public:
-    // Add setter for tokenizer
-    void set_tokenizer(const TiktokenTokenizer* tokenizer) {
-        tokenizer_ = tokenizer;
+    /**
+     * @brief Set the tokenizer for this transformer
+     * @param tokenizer Raw pointer to tokenizer instance
+     */
+    void set_tokenizer(TiktokenTokenizer* tokenizer) {
+        if (tokenizer) {
+            tokenizer_ = std::unique_ptr<TiktokenTokenizer>(tokenizer);
+        }
     }
+
+    /**
+     * @brief Get the current tokenizer
+     * @return Raw pointer to current tokenizer
+     */
+    TiktokenTokenizer* get_tokenizer() const {
+        return tokenizer_.get();
+    }
+
+    /**
+     * @brief Train the model on pairs of input/output strings
+     * @param training_data Vector of input/output string pairs for training
+     * @param validation_data Vector of input/output string pairs for validation
+     */
+    void train(const std::vector<std::pair<std::string, std::string>>& training_data,
+               const std::vector<std::pair<std::string, std::string>>& validation_data);
+
+    /**
+     * @brief Process a single batch of training data
+     * @param training_data Vector of input/output string pairs
+     * @param batch_start Start index of the batch
+     * @param batch_end End index of the batch
+     */
+    void train_batch(const std::vector<std::pair<std::string, std::string>>& training_data,
+                    size_t batch_start, size_t batch_end);
+
+    /**
+     * @brief Accumulate gradients for batch processing
+     * @param current_grad Current gradient to accumulate
+     * @param batch_idx Index of the current batch
+     */
+    void accumulate_gradients(const Matrix& current_grad, size_t batch_idx);
+
+    /**
+     * @brief Update parameters using accumulated gradients
+     */
+    void update_parameters_with_accumulated_grads();
 };
 
 class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp

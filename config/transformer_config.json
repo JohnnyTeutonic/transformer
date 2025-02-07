@@ -29,7 +29,7 @@
     },
     "load_from_checkpoint": false,
     "model": {
-        "head_dim": 128,
+        "head_dim": 64,
         "hidden_size": 1024,
         "intermediate_size": 4096,
         "max_seq_length": 512,
