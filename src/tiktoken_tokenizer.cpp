@@ -72,28 +72,6 @@ void TiktokenTokenizer::build_vocabulary_from_file(const std::string& filepath) 
     initialized_ = true;
     size_t actual_vocab_size = word_to_id_.size();
     std::cout << "Built vocabulary with " << actual_vocab_size << " tokens" << std::endl;
-    
-    // Update config file with actual vocabulary size
-    std::ifstream config_file("config/transformer_config.json");
-    if (config_file.is_open()) {
-        nlohmann::json config;
-        config_file >> config;
-        config_file.close();
-        
-        // Update both model and tokenizer vocab sizes
-        config["model"]["vocab_size"] = actual_vocab_size;
-        config["tokenizer"]["vocab_size"] = actual_vocab_size;
-        
-        std::ofstream out_config("config/transformer_config.json");
-        if (out_config.is_open()) {
-            out_config << config.dump(4);
-            std::cout << "Updated config file with vocabulary size: " << actual_vocab_size << std::endl;
-        } else {
-            std::cerr << "Failed to write updated config file" << std::endl;
-        }
-    } else {
-        std::cerr << "Failed to open config file for updating vocabulary size" << std::endl;
-    }
 }
 
 std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {

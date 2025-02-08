@@ -344,29 +344,12 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
     if (j.contains("tokenizer")) {
         const auto& tok = j["tokenizer"];
         config.tokenizer.use_subword = tok.value("use_subword", true);
-        // Only set vocab_size if it exists in the config
-        if (tok.contains("vocab_size")) {
-            size_t vocab_size = tok["vocab_size"].get<size_t>();
-            config.tokenizer.vocab_size = vocab_size;
-            // Ensure model vocab size matches tokenizer vocab size
-            if (j.contains("model")) {
-                j["model"]["vocab_size"] = vocab_size;
-            }
-            std::cout << "Setting vocabulary size from config: " << vocab_size << std::endl;
-        }
         config.tokenizer.model_path = tok.value("model_path", "model/tokenizer.model");
     }
 
     // Parse model settings
     if (j.contains("model")) {
         auto& model = j["model"];
-        // Use tokenizer vocab size if available, otherwise use model vocab size
-        config.vocab_size = config.tokenizer.vocab_size > 0 ? 
-                           config.tokenizer.vocab_size : 
-                           model.value("vocab_size", 32000);
-        
-        std::cout << "Final vocabulary size in config: " << config.vocab_size << std::endl;
-        
         // Load other model settings
         config.hidden_size = model["hidden_size"];
         config.num_heads = model["num_heads"];
@@ -979,7 +962,7 @@ float Utils::evaluate_validation(
         total_samples += input_batch.size();
     }
 
-    transformer.set_training(true);
+        transformer.set_training(true);
     return total_samples > 0 ? total_loss / total_samples : 0.0f;
 }
 
@@ -1038,9 +1021,6 @@ void from_json(const nlohmann::json& j, TokenizerConfig& t) {
     if (j.contains("use_subword")) {
         t.use_subword = j["use_subword"].get<bool>();
     }
-    if (j.contains("vocab_size")) {
-        t.vocab_size = j["vocab_size"].get<size_t>();
-    }
     if (j.contains("model_path")) {
         t.model_path = j["model_path"].get<std::string>();
     }
@@ -1052,7 +1032,6 @@ void from_json(const nlohmann::json& j, TokenizerConfig& t) {
 void to_json(nlohmann::json& j, const TokenizerConfig& t) {
     j = nlohmann::json{
         {"use_subword", t.use_subword},
-        {"vocab_size", t.vocab_size},
         {"model_path", t.model_path},
         {"special_tokens", t.special_tokens}
     };
@@ -1152,7 +1131,7 @@ float Utils::perform_cross_validation(
                   << " (Loss: " << fold_loss 
                   << ", Time: " << duration.count() << "s)" << std::endl;
     }
-
+    
     float avg_loss = total_loss / num_folds;
     std::cout << "Cross-validation complete. Average loss: " << avg_loss << std::endl;
     return avg_loss;
@@ -1161,63 +1140,27 @@ float Utils::perform_cross_validation(
 void Utils::generate_predictions(
     Transformer& transformer,
     const std::string& input_text,
-    TiktokenTokenizer* tokenizer) {
-    std::cout << "\n=== Generating predictions for: '" << input_text << "' ===" << std::endl;
+    std::shared_ptr<TiktokenTokenizer> tokenizer) {
+    
+    if (!tokenizer) {
+        std::cerr << "Error: TiktokenTokenizer is null" << std::endl;
+        return;
+    }
+
+    std::cout << "\n=== Processing prompt: '" << input_text << "' ===" << std::endl;
     
     // Preprocess input
     std::string processed_input = input_text;
     tokenizer->preprocess_text(processed_input);
-    std::vector<int> input_tokens = tokenizer->encode(processed_input);
+    std::vector<int> test_tokens = tokenizer->encode(processed_input);
     
     // Get model prediction
     transformer.set_training(false);  // Set to evaluation mode
-    Matrix logits = transformer.forward(input_tokens, processed_input, *tokenizer);  // Already includes LM head projection
+    Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
     
-    // Get probabilities for last token
-    Vector last_logits = logits.row(logits.rows() - 1);
-    std::vector<std::pair<float, int>> token_probs;
-    
-    // Convert logits to probabilities using softmax
-    float max_logit = -std::numeric_limits<float>::infinity();
-    for (size_t i = 0; i < last_logits.size(); i++) {
-        max_logit = std::max(max_logit, last_logits[i]);
-    }
-    
-    float sum_exp = 0.0f;
-    for (size_t i = 0; i < last_logits.size(); i++) {
-        float prob = std::exp(last_logits[i] - max_logit);
-        sum_exp += prob;
-        token_probs.push_back({prob, static_cast<int>(i)});
-    }
-    
-    // Normalize probabilities
-    for (auto& pair : token_probs) {
-        pair.first /= sum_exp;
-    }
-    
-    // Sort by probability
-    std::sort(token_probs.begin(), token_probs.end(),
-              std::greater<std::pair<float, int>>());
-    
-    // Print top 5 predictions
-    std::cout << "Top 5 predictions:" << std::endl;
-    for (int i = 0; i < std::min(5, static_cast<int>(token_probs.size())); i++) {
-        float prob = token_probs[i].first;
-        int token_id = token_probs[i].second;
-        std::string token = tokenizer->decode({token_id});
-        
-        // Add token type annotation
-        std::string token_type = "";
-        if (tokenizer->is_verb(token)) token_type = " (VERB)";
-        else if (tokenizer->is_adjective(token)) token_type = " (ADJ)";
-        else if (tokenizer->is_noun(token)) token_type = " (NOUN)";
-        
-        std::cout << i + 1 << ". \"" << token << "\"" << token_type 
-                  << " (p=" << std::fixed << std::setprecision(4) << prob * 100 << "%)" << std::endl;
-    }
-    
-    std::cout << "===" << std::endl;
-    transformer.set_training(true);  // Reset to training mode
+    // Show the top predictions
+    std::cout << "\nTop Predictions:\n";
+    print_top_predictions(logits, *tokenizer, transformer, 5);
 }
 
 // Add debugging for gradient analysis

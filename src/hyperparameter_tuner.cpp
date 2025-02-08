@@ -107,16 +107,14 @@ HyperparameterConfig HyperparameterConfig::load(const std::string& path) {
 HyperparameterTuner::HyperparameterTuner(
     const HyperparameterRanges& ranges,
     const TransformerConfig& config,
+    std::shared_ptr<TiktokenTokenizer> tokenizer,
     unsigned int seed)
-    : ranges_(ranges), 
-      config_(config),
-      num_trials_(config.training.tuning.num_trials),
-      num_folds_(config.training.cross_validation.num_folds),
-      rng_(seed) {
-    std::cout << "Initializing HyperparameterTuner with:"
-              << "\n- Number of trials: " << num_trials_
-              << "\n- Number of folds: " << num_folds_
-              << "\n- Random seed: " << seed << std::endl;
+    : ranges_(ranges), config_(config), tokenizer_(tokenizer), rng_(seed) {
+    if (!tokenizer_) {
+        throw std::runtime_error("Tokenizer cannot be null");
+    }
+    num_trials_ = 10;  // Default number of trials
+    num_folds_ = 2;    // Default number of folds
 }
 
 template<typename T>
@@ -239,14 +237,14 @@ TuningResult HyperparameterTuner::evaluate_config(
     for (size_t fold = 0; fold < folds.size(); fold++) {
         const auto& [train_data, val_data] = folds[fold];
         
-        // Create transformer with current config
-        auto trial_transformer_config = config.to_transformer_config();
-        Transformer transformer(trial_transformer_config);
+        // Create transformer with trial config
+        TransformerConfig trial_transformer_config = config.to_transformer_config();
+        Transformer transformer(trial_transformer_config, tokenizer_);  // Use stored tokenizer
         
         // Train and evaluate - updated to match new signature
         float fold_loss = Utils::perform_cross_validation(
             transformer,  // The transformer already contains the config
-            tokenizer,
+            *tokenizer_,  // Dereference the shared_ptr
             train_data
         );
         

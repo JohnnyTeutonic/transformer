@@ -25,7 +25,6 @@ struct BeamSearchConfig {
 
 struct TokenizerConfig {
     bool use_subword = true;
-    size_t vocab_size = 0;
     std::string model_path;
     std::vector<std::string> special_tokens;
 };
@@ -65,7 +64,6 @@ struct PathConfig {
  */
 struct TransformerConfig {
     // Model architecture
-    size_t vocab_size;
     size_t hidden_size;
     size_t num_heads;
     size_t num_layers;
@@ -162,7 +160,6 @@ struct TransformerConfig {
 
     /**
      * @brief Constructs a transformer configuration with default values.
-     * @param vocab_size Size of the vocabulary (default: 32000)
      * @param max_seq_length Maximum sequence length (default: 512)
      * @param hidden_size Dimension of hidden states (default: 768)
      * @param num_layers Number of transformer layers (default: 12)
@@ -170,7 +167,7 @@ struct TransformerConfig {
      * @param batch_size Training batch size (default: 32)
      * @param num_epochs Number of training epochs (default: 10)
      */
-    TransformerConfig(size_t vocab_size = 32000, size_t max_seq_length = 512,
+    TransformerConfig(size_t max_seq_length = 512,
                      size_t hidden_size = 768, size_t num_layers = 12, size_t num_heads = 12,
                      size_t batch_size = 32, size_t num_epochs = 10);
 

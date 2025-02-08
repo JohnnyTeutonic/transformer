@@ -222,6 +222,7 @@ class Transformer {
 private:
     // Change from reference to value to avoid const issues
     TransformerConfig config;  // Store by value instead of reference
+    std::shared_ptr<TiktokenTokenizer> tokenizer_;  // Add shared_ptr to tokenizer
 
     // Components
     std::unique_ptr<TokenEmbedding> token_embedding;
@@ -303,9 +304,6 @@ private:
         const TiktokenTokenizer& tokenizer
     );
 
-    // Change tokenizer member to unique_ptr
-    std::unique_ptr<TiktokenTokenizer> tokenizer_;
-
     // Helper method to ensure tokenizer is available
     void check_tokenizer() const {
         if (!tokenizer_) {
@@ -328,10 +326,11 @@ public:
     void set_training(bool mode);
 
     /**
-     * @brief Constructs a transformer model with the given configuration.
-     * @param config Configuration parameters for the transformer
+     * @brief Constructs a transformer with the given configuration and tokenizer.
+     * @param config_ Configuration parameters for the transformer
+     * @param tokenizer The tokenizer to use for this transformer
      */
-    explicit Transformer(const TransformerConfig& config_);  // Just declaration, no implementation
+    Transformer(const TransformerConfig& config_, std::shared_ptr<TiktokenTokenizer> tokenizer);
 
     /**
      * @brief Performs the forward pass through the transformer.

@@ -10,6 +10,7 @@
 #include <random>
 #include <atomic>
 #include <chrono>
+#include <memory>
 
 // Token category structure
 struct TokenCategories {
@@ -245,7 +246,11 @@ public:
         prediction_counter = 0;
     }
 
-    static void generate_predictions(Transformer& transformer, const std::string& input_text, TiktokenTokenizer* tokenizer);
+    static void generate_predictions(
+        Transformer& transformer,
+        const std::string& input_text,
+        std::shared_ptr<TiktokenTokenizer> tokenizer
+    );
 
     // Debugging utilities
     static void analyze_gradients(const Matrix& gradients, const std::string& label);

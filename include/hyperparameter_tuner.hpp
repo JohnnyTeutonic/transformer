@@ -93,6 +93,7 @@ class HyperparameterTuner {
 public:
     HyperparameterTuner(const HyperparameterRanges& ranges,
                         const TransformerConfig& config,
+                        std::shared_ptr<TiktokenTokenizer> tokenizer,
                         unsigned int seed = std::random_device{}());
 
     std::vector<TuningResult> tune(
@@ -117,6 +118,7 @@ private:
     std::mt19937 rng_;
     std::vector<TuningResult> results_;
     TransformerConfig config_;
+    std::shared_ptr<TiktokenTokenizer> tokenizer_;
     
     bool validate_config(const HyperparameterConfig& config) const;
     void log_trial_progress(size_t current_trial, const TuningResult& result) const;

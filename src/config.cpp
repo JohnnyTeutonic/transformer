@@ -4,11 +4,10 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-TransformerConfig::TransformerConfig(size_t vocab_size_, size_t max_seq_length_, size_t hidden_size_,
+TransformerConfig::TransformerConfig(size_t max_seq_length_, size_t hidden_size_,
                                    size_t num_layers_, size_t num_heads_, size_t batch_size_,
                                    size_t num_epochs_)
-    : vocab_size(vocab_size_),
-      hidden_size(hidden_size_),
+    : hidden_size(hidden_size_),
       num_heads(num_heads_),
       num_layers(num_layers_),
       head_dim(hidden_size_ / num_heads_),
@@ -34,8 +33,7 @@ TransformerConfig::TransformerConfig(size_t vocab_size_, size_t max_seq_length_,
 }
 
 bool TransformerConfig::operator!=(const TransformerConfig& other) const {
-    return vocab_size != other.vocab_size || 
-           max_seq_length != other.max_seq_length ||
+    return max_seq_length != other.max_seq_length ||
            hidden_size != other.hidden_size ||
            num_layers != other.num_layers ||
            num_heads != other.num_heads ||
@@ -68,7 +66,6 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
         // Load model parameters
         if (j.contains("model")) {
             const auto& model = j["model"];
-            vocab_size = model.value("vocab_size", vocab_size);
             hidden_size = model.value("hidden_size", hidden_size);
             num_heads = model.value("num_heads", num_heads);
             num_layers = model.value("num_layers", num_layers);
@@ -78,7 +75,6 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
 
             // Print loaded configuration for debugging
             std::cout << "Loaded model configuration:" << std::endl;
-            std::cout << "- vocab_size: " << vocab_size << std::endl;
             std::cout << "- hidden_size: " << hidden_size << std::endl;
             std::cout << "- num_heads: " << num_heads << std::endl;
             std::cout << "- num_layers: " << num_layers << std::endl;
@@ -152,7 +148,6 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
         if (j.contains("tokenizer")) {
             const auto& tok = j["tokenizer"];
             tokenizer.use_subword = tok.value("use_subword", tokenizer.use_subword);
-            tokenizer.vocab_size = tok.value("vocab_size", tokenizer.vocab_size);
             tokenizer.model_path = tok.value("model_path", tokenizer.model_path);
             tokenizer.special_tokens = tok.value("special_tokens", tokenizer.special_tokens);
         }

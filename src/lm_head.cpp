@@ -292,8 +292,7 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     const float max_update = 0.05f * scale_factor;
     
     bool has_unstable_update = false;
-    // Remove OpenMP parallelization temporarily to debug
-    //#pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
+    #pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
     for (size_t i = 0; i < grad_proj.rows(); ++i) {
         for (size_t j = 0; j < grad_proj.cols(); ++j) {
             try {

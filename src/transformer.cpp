@@ -381,8 +381,12 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
 }
 
 // Transformer implementation
-Transformer::Transformer(const TransformerConfig& config_) 
-    : config(config_) {
+Transformer::Transformer(const TransformerConfig& config_, std::shared_ptr<TiktokenTokenizer> tokenizer) 
+    : config(config_), tokenizer_(tokenizer) {
+    if (!tokenizer_) {
+        throw std::runtime_error("Tokenizer cannot be null");
+    }
+
     // Initialize components
     dropout = std::make_unique<Dropout>(config.dropout_rate);
     final_ln = std::make_unique<LayerNorm>(config.hidden_size, config.layer_norm_epsilon);
@@ -394,13 +398,13 @@ Transformer::Transformer(const TransformerConfig& config_)
     }
 
     // Initialize token embedding
-    token_embedding = std::make_unique<TokenEmbedding>(config.vocab_size, config.hidden_size);
+    token_embedding = std::make_unique<TokenEmbedding>(tokenizer_->vocab_size(), config.hidden_size);
     
     // Initialize positional encoding
     pos_encoding = std::make_unique<PositionalEncoding>(config.max_seq_length, config.hidden_size);
     
     // Initialize language model head
-    lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, config.vocab_size);
+    lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, tokenizer_->vocab_size());
 
     // Initialize optimizer state if using momentum or Adam
     if (config.use_momentum || config.use_adam) {
@@ -741,7 +745,7 @@ void Transformer::initialize_weights() {
     // Initialize token embeddings with smaller scale
     if (token_embedding) {
         auto& embedding_weights = token_embedding->get_weights();
-        init_weights(embedding_weights, config.vocab_size, config.hidden_size);
+        init_weights(embedding_weights, tokenizer_->vocab_size(), config.hidden_size);
         embedding_weights *= 0.1f;  // Scale down embeddings
     }
     

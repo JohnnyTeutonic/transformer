@@ -215,10 +215,12 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
         checkpoint_meta["loss"] = loss;
         checkpoint_meta["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
         checkpoint_meta["model_config"] = {
-            {"vocab_size", config.vocab_size},
             {"hidden_size", config.hidden_size},
             {"num_heads", config.num_heads},
-            {"num_layers", config.num_layers}
+            {"num_layers", config.num_layers},
+            {"head_dim", config.head_dim},
+            {"intermediate_size", config.intermediate_size},
+            {"max_seq_length", config.max_seq_length},
         };
         checkpoint_meta["batch_size"] = config.batch_size;
 
@@ -300,10 +302,12 @@ bool ModelSaver::loadCheckpoint(Transformer& transformer, const std::string& che
         const auto& config = transformer.getConfig();
         const auto& saved_config = checkpoint_meta["model_config"];
 
-        if (saved_config["vocab_size"] != config.vocab_size ||
-            saved_config["hidden_size"] != config.hidden_size ||
+        if (saved_config["hidden_size"] != config.hidden_size ||
             saved_config["num_heads"] != config.num_heads ||
-            saved_config["num_layers"] != config.num_layers) {
+            saved_config["num_layers"] != config.num_layers ||
+            saved_config["head_dim"] != config.head_dim ||
+            saved_config["intermediate_size"] != config.intermediate_size ||
+            saved_config["max_seq_length"] != config.max_seq_length) {
             logger.log("Model configuration mismatch in checkpoint", true);
             return false;
         }
@@ -381,10 +385,12 @@ bool ModelSaver::writeMetadata(const std::string& directory, const std::string& 
                                const TransformerConfig& config) const {
     json meta;
     meta["model_name"] = model_name;
-    meta["vocab_size"] = config.vocab_size;
     meta["hidden_size"] = config.hidden_size;
     meta["num_heads"] = config.num_heads;
     meta["num_layers"] = config.num_layers;
+    meta["head_dim"] = config.head_dim;
+    meta["intermediate_size"] = config.intermediate_size;
+    meta["max_seq_length"] = config.max_seq_length;
     meta["use_flash_attention"] = config.use_flash_attention;
     meta["use_rope"] = config.use_rope;
     meta["use_sliding_window"] = config.use_sliding_window;
@@ -405,10 +411,12 @@ bool ModelSaver::readMetadata(const std::string& directory, const std::string& m
     json meta;
     meta_file >> meta;
 
-    config.vocab_size = meta["vocab_size"];
     config.hidden_size = meta["hidden_size"];
     config.num_heads = meta["num_heads"];
     config.num_layers = meta["num_layers"];
+    config.head_dim = meta["head_dim"];
+    config.intermediate_size = meta["intermediate_size"];
+    config.max_seq_length = meta["max_seq_length"];
     config.use_flash_attention = meta["use_flash_attention"];
     config.use_rope = meta["use_rope"];
     config.use_sliding_window = meta["use_sliding_window"];

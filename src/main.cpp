@@ -16,7 +16,6 @@
 #include "../include/debug.hpp"
 
 // Add necessary forward declarations and structures
-std::unique_ptr<TiktokenTokenizer> tokenizer;
 PerformanceMetrics metrics;
 
 // Configuration constants
@@ -29,25 +28,6 @@ size_t global_step = 0;
 TrainingStateManagerPtr training_manager;
 TrainingMonitorPtr training_monitor;
 
-// Initialize tokenizer function
-bool initialize_tokenizer(TransformerConfig& config) {
-    std::cout << "\nInitializing tokenizer..." << std::endl;
-    tokenizer = std::make_unique<TiktokenTokenizer>();
-
-    try {
-        // Build vocabulary from training data
-        tokenizer->build_vocabulary_from_file("../data/training_pairs.txt");
-        // Update config with actual vocabulary size
-        config.vocab_size = tokenizer->vocab_size();
-        std::cout << "Initialized tokenizer with vocabulary size: " << config.vocab_size << std::endl;
-        
-        return true;
-    } catch (const std::exception& e) {
-        std::cerr << "Error initializing tokenizer: " << e.what() << std::endl;
-        return false;
-    }
-}
-
 // Data structure for preprocessing
 struct Data {
     std::vector<std::vector<float>> samples;
@@ -55,7 +35,7 @@ struct Data {
 };
 
 // Add debug logging to the generate_predictions function
-void generate_predictions(Transformer& transformer, const std::string& input_text, TiktokenTokenizer* tokenizer) {
+void generate_predictions(Transformer& transformer, const std::string& input_text, std::shared_ptr<TiktokenTokenizer> tokenizer) {
     if (!tokenizer) {
         std::cerr << "Error: TiktokenTokenizer is null" << std::endl;
         return;
@@ -142,7 +122,12 @@ void reinitialize_batch_weights(Transformer& transformer, const TransformerConfi
     }
 }
 
-void test_model_predictions(Transformer& transformer, std::unique_ptr<TiktokenTokenizer>& tokenizer) {
+// Update the test_model_predictions function signature to accept shared_ptr
+void test_model_predictions(Transformer& transformer, std::shared_ptr<TiktokenTokenizer> tokenizer) {
+    if (!tokenizer) {
+        std::cerr << "Error: TiktokenTokenizer is null" << std::endl;
+        return;
+    }
     std::vector<std::string> test_queries = {
         "The cat begins to",          // Simple action start
         "The old house looks very",   // Descriptive context
@@ -191,47 +176,8 @@ int main(int argc, char* argv[]) {
         Utils::initialize_random();
         std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
 
-        // First, count vocabulary size from training and validation files
-        std::cout << "\nCounting unique tokens in training and validation files..." << std::endl;
-        size_t custom_vocab_size = transformer::VocabularyCounter::countUniqueTokens(
-            exe_path.string() + "/data/training_pairs.txt",
-            exe_path.string() + "/data/validation_pairs.txt"
-        );
-        std::cout << "Number of unique tokens found in data files: " << custom_vocab_size << std::endl;
-
-        // Load and update config with the counted vocabulary size
-        std::filesystem::path config_path = exe_path / "config" / "transformer_config.json";
-        
-        // Read the config file
-        std::ifstream config_file(config_path);
-        if (!config_file.is_open()) {
-            throw std::runtime_error("Could not open config file: " + config_path.string());
-        }
-        
-        nlohmann::json config_json;
-        config_file >> config_json;
-        config_file.close();
-        
-        // Update vocabulary size in config
-        size_t previous_vocab_size = 0;
-        if (config_json.contains("vocab_size") && !config_json["vocab_size"].is_null()) {
-            previous_vocab_size = config_json["vocab_size"].get<size_t>();
-        }
-        std::cout << "Previous vocabulary size in config: " << (previous_vocab_size == 0 ? "Not set" : std::to_string(previous_vocab_size)) << std::endl;
-        
-        config_json["vocab_size"] = custom_vocab_size;
-        std::cout << "Updated vocabulary size in config to: " << custom_vocab_size << std::endl;
-        
-        // Write updated config back to file
-        std::ofstream output_config_file(config_path);
-        if (!output_config_file.is_open()) {
-            throw std::runtime_error("Could not open config file for writing: " + config_path.string());
-        }
-        output_config_file << config_json.dump(4);
-        output_config_file.close();
-
         // Now load the updated config for transformer initialization
-        TransformerConfig config = Utils::load_config(config_path.string());
+        TransformerConfig config = Utils::load_config(exe_path.string() + "/config/transformer_config.json");
         
         // Initialize random seed using hardware entropy
         std::random_device rd;
@@ -270,14 +216,18 @@ int main(int argc, char* argv[]) {
         std::cout << "Loaded " << training_pairs.size() << " training pairs" << std::endl;
         
         // Initialize tokenizer with config
-        if (!initialize_tokenizer(config)) {
-            std::cerr << "Failed to initialize tokenizer" << std::endl;
+        std::shared_ptr<TiktokenTokenizer> tokenizer = std::make_shared<TiktokenTokenizer>();
+        try {
+            tokenizer->build_vocabulary_from_file("../data/training_pairs.txt");
+            std::cout << "Successfully initialized tokenizer" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to initialize tokenizer: " << e.what() << std::endl;
             return 1;
         }
 
         // Initialize model with updated config
-        std::cout << "\nInitializing transformer with custom vocabulary size: " << config.vocab_size << std::endl;
-        Transformer transformer(config);
+        std::cout << "\nInitializing transformer..." << std::endl;
+        Transformer transformer(config, tokenizer);  // Pass shared_ptr tokenizer
         std::cout << "\nTransformer initialized with language model head" << std::endl << std::flush;
         // Training parameters
         const size_t checkpoint_frequency =
@@ -361,7 +311,7 @@ int main(int argc, char* argv[]) {
         
         // Initialize hyperparameter tuner
         HyperparameterRanges ranges;  // Now defined
-        HyperparameterTuner tuner(ranges, config);  // Pass config to constructor
+        HyperparameterTuner tuner(ranges, config, tokenizer);  // Pass shared_ptr tokenizer
         
         // Run hyperparameter tuning
         std::cout << "Running hyperparameter tuning with " << training_pairs.size() 
@@ -383,7 +333,7 @@ int main(int argc, char* argv[]) {
         config = best_config.to_transformer_config();
         
         // Reinitialize transformer with best config
-        transformer = Transformer(config);
+        transformer = Transformer(config, tokenizer);  // Pass shared_ptr tokenizer
         std::cout << "Reinitialized transformer with best hyperparameters" << std::endl;
         
         // Update training parameters from best config
@@ -520,8 +470,8 @@ int main(int argc, char* argv[]) {
                           << ", Time: " << val_duration.count() << "s)" << std::endl;
                 
                 // Make a few quick test predictions
-                Utils::generate_predictions(transformer, "I go to the", tokenizer.get());
-                Utils::generate_predictions(transformer, "The weather is", tokenizer.get());
+                Utils::generate_predictions(transformer, "I go to the", tokenizer);
+                Utils::generate_predictions(transformer, "The weather is", tokenizer);
             }
 
             // Save regular checkpoint
