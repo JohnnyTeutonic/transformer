@@ -971,183 +971,49 @@ float Utils::evaluate_validation(
     const TiktokenTokenizer& tokenizer,
     const std::vector<std::pair<std::string, std::string>>& validation_data) {
     
-    std::cout << "\n=== Starting evaluate_validation ===" << std::endl << std::flush;
-
-    if (validation_data.empty()) {
-        std::cout << "Warning: Empty validation data\n" << std::flush;
-        return 0.0f;
-    }
-
-    std::cout << "Validation data size: " << validation_data.size() << std::endl << std::flush;
-
-    float total_loss = 0.0f;
-    size_t correct_predictions = 0;
-    size_t total_predictions = 0;
-    const size_t BATCH_SIZE = 32;
-
-    std::cout << "Set training mode to false" << std::endl << std::flush;
     transformer.set_training(false);
-
-    // Before the loop
-    std::cout << "About to enter batch processing loop with:"
-              << "\nbatch_start = 0"
-              << "\nbatch_end = " << validation_data.size()
-              << "\nvalidation_data.size() = " << validation_data.size() 
-              << std::endl << std::flush;
+    float total_loss = 0.0f;
+    size_t total_samples = 0;
+    const size_t BATCH_SIZE = 32;
 
     // Process data in batches
     for (size_t batch_start = 0; batch_start < validation_data.size(); batch_start += BATCH_SIZE) {
         size_t batch_end = std::min(batch_start + BATCH_SIZE, validation_data.size());
         size_t current_batch_size = batch_end - batch_start;
         
-        float batch_loss = 0.0f;
-        size_t batch_correct = 0;
+        std::vector<std::vector<int>> input_batch;
+        std::vector<std::vector<int>> target_batch;
 
-        std::cout << "\nProcessing batch " << (batch_start/BATCH_SIZE + 1) 
-                  << "/" << (validation_data.size() + BATCH_SIZE - 1)/BATCH_SIZE 
-                  << " (size: " << current_batch_size << ")" << std::endl;
-
-        // Process each example in the batch
+        // Prepare batch
         for (size_t i = batch_start; i < batch_end; i++) {
-            std::cout << "Processing example " << i << std::endl;  // Add this
-            try {
-                const auto& pair = validation_data[i];
-                std::cout << "Full example: '" << pair.first << " | " << pair.second << "'" << std::endl;
-                std::cout << "Got validation pair" << std::endl;  // Add this
-                std::string processed_input = pair.first;
-                std::cout << "Got input: '" << processed_input << "'" << std::endl;  // Add this
-                tokenizer.preprocess_text(processed_input);
-                std::vector<int> input_tokens = tokenizer.encode(processed_input);
-                std::cout << "Encoded input tokens, size: " << input_tokens.size() << std::endl;  // Add this
-                
-                // Get logits directly from transformer - don't project again through LM head
-                Matrix logits = transformer.forward(input_tokens, processed_input, tokenizer);
-                
-                // Debug dimensions
-                std::cout << "Dimensions:"
-                          << "\n- Hidden states: " << logits.rows() << "x" << logits.cols()
-                          << "\n- Logits: " << logits.rows() << "x" << logits.cols()
-                          << "\n- Vocab size: " << tokenizer.vocab_size() << std::endl;
-                
-                // Get predicted token
-                Vector last_logits = logits.row(logits.rows() - 1);
-                
-                // Debug logits
-                float min_logit = *std::min_element(last_logits.data(), last_logits.data() + last_logits.size());
-                float max_logit = *std::max_element(last_logits.data(), last_logits.data() + last_logits.size());
-                float mean_logit = 0.0f;
-                for (size_t j = 0; j < last_logits.size(); j++) {
-                    mean_logit += last_logits[j];
-                }
-                mean_logit /= last_logits.size();
-
-                std::cout << "Example " << i << " logits range: "
-                          << "min=" << min_logit 
-                          << ", max=" << max_logit
-                          << ", mean=" << mean_logit << std::endl;
-                
-                int predicted_token = 0;
-                float max_logit_value = -std::numeric_limits<float>::infinity();
-                for (size_t j = 0; j < last_logits.size(); j++) {
-                    if (last_logits[j] > max_logit_value) {
-                        max_logit_value = last_logits[j];
-                        predicted_token = j;
-                    }
-                }
-
-                // Get target
-                std::string processed_target = pair.second;
-                tokenizer.preprocess_text(processed_target);
-                std::vector<int> target_tokens = tokenizer.encode(processed_target);
-                std::cout << "encoded target tokens: ";
-                for (const auto& token : target_tokens) {
-                    std::cout << token << " ";
-                }
-                std::cout << std::endl;
-                if (target_tokens.empty()) {
-                    std::cout << "Warning: Empty target tokens for example " << i << std::endl;
-                    continue;
-                }
-
-                // Create target distribution
-                Matrix target_distribution(1, tokenizer.vocab_size(), 0.0f);
-                int target_token = target_tokens.back();
-                target_distribution(0, target_token) = 1.0f;
-
-                // Compute loss for this example
-                Matrix last_token_logits(1, logits.cols());
-                for (size_t j = 0; j < last_logits.size(); j++) {
-                    last_token_logits(0, j) = last_logits[j];
-                }
-
-                float example_loss = compute_batch_loss(last_token_logits, target_distribution, tokenizer);
-                
-                // Debug loss calculation
-                std::cout << "Example " << i << ":"
-                          << "\n  Input: '" << pair.first << "'"
-                          << "\n  Target: '" << pair.second << "'"
-                          << "\n  Predicted token: " << predicted_token
-                          << "\n  Target token: " << target_token
-                          << "\n  Loss: " << example_loss << std::endl;
-
-                if (!std::isfinite(example_loss)) {
-                    std::cout << "Warning: Non-finite loss detected!" << std::endl;
-                    continue;
-                }
-
-                batch_loss += example_loss;
-
-                // Check prediction
-                if (predicted_token == target_token) {
-                    batch_correct++;
-                }
-
-            } catch (const std::exception& e) {
-                std::cout << "Error processing example " << i << ": " << e.what() << std::endl;
-                continue;
-            }
+            const auto& [input_str, target_str] = validation_data[i];
+            std::vector<int> input_tokens = tokenizer.encode(input_str);
+            std::vector<int> target_tokens = tokenizer.encode(target_str);
+            
+            if (input_tokens.empty() || target_tokens.empty()) continue;
+            
+            input_batch.push_back(input_tokens);
+            target_batch.push_back(target_tokens);
         }
 
-        // Compute and display batch metrics
-        if (current_batch_size > 0) {  // Avoid division by zero
-            float avg_batch_loss = batch_loss / current_batch_size;
-            float batch_accuracy = static_cast<float>(batch_correct) / current_batch_size;
+        if (input_batch.empty()) continue;
 
-            std::cout << "Batch metrics:"
-                      << "\n- Total batch loss: " << batch_loss
-                      << "\n- Average batch loss: " << avg_batch_loss
-                      << "\n- Accuracy: " << (batch_accuracy * 100.0f) << "%"
-                      << "\n- Correct predictions: " << batch_correct << "/" << current_batch_size
-                      << std::endl;
-
-            // Update totals
-            total_loss += batch_loss;  // Add batch total, not average
-            correct_predictions += batch_correct;
-            total_predictions += current_batch_size;
-        }
-    }
-
-    // Print final evaluation metrics
-    if (total_predictions > 0) {  // Avoid division by zero
-        float avg_loss = total_loss / total_predictions;
-        float accuracy = static_cast<float>(correct_predictions) / total_predictions;
+        // Forward pass
+        Matrix logits = transformer.forward(input_batch[0], "", tokenizer);
         
-        std::cout << "\nFinal Validation Results:"
-                  << "\n- Total Loss: " << total_loss
-                  << "\n- Total Predictions: " << total_predictions
-                  << "\n- Average Loss: " << avg_loss
-                  << "\n- Overall Accuracy: " << (accuracy * 100.0f) << "%"
-                  << "\n- Total Correct Predictions: " << correct_predictions 
-                  << "/" << total_predictions
-                  << std::endl;
-
-        transformer.set_training(true);
-        return avg_loss;
+        // Create target distribution
+        Matrix target_distribution = create_batch_target_distribution(
+            target_batch, tokenizer, tokenizer.vocab_size(), input_batch[0].size());
+        
+        // Compute loss
+        float batch_loss = compute_batch_loss(logits, target_distribution, tokenizer);
+        
+        total_loss += batch_loss * input_batch.size();
+        total_samples += input_batch.size();
     }
 
-    std::cout << "Warning: No valid predictions made!" << std::endl;
     transformer.set_training(true);
-    return 0.0f;
+    return total_samples > 0 ? total_loss / total_samples : 0.0f;
 }
 
 std::vector<std::string>& Utils::get_vocabulary(const TiktokenTokenizer& tokenizer) {
@@ -1405,8 +1271,7 @@ void Utils::generate_predictions(
     
     // Get model prediction
     transformer.set_training(false);  // Set to evaluation mode
-    Matrix hidden_states = transformer.forward(input_tokens, processed_input, *tokenizer);
-    Matrix logits = transformer.get_lm_head()->forward(hidden_states);
+    Matrix logits = transformer.forward(input_tokens, processed_input, *tokenizer);  // Already includes LM head projection
     
     // Get probabilities for last token
     Vector last_logits = logits.row(logits.rows() - 1);

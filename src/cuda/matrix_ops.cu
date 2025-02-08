@@ -169,12 +169,12 @@ namespace cuda {
 
         cublasStatus_t status = cublasSgemm(cublas_handle,
                                           CUBLAS_OP_N, CUBLAS_OP_N,
-                                          B.cols(), A.rows(), A.cols(),
+                                          C.cols(), C.rows(), A.cols(),
                                           &alpha,
                                           d_B, B.cols(),
                                           d_A, A.cols(),
                                           &beta,
-                                          d_C, B.cols());
+                                          d_C, C.cols());
 
         if (status != CUBLAS_STATUS_SUCCESS) {
             memory_pool.free(d_A);

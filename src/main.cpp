@@ -165,9 +165,8 @@ void test_model_predictions(Transformer& transformer, std::unique_ptr<TiktokenTo
         
         // Get model prediction
         transformer.set_training(false);  // Set to evaluation mode
-        Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-        Matrix logits = transformer.get_lm_head()->forward(test_hidden);
-        
+        Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
+
         // Show the top predictions
         std::cout << "\nTop Predictions:\n";
         Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
@@ -425,325 +424,59 @@ int main(int argc, char* argv[]) {
                 size_t end_idx = std::min(start_idx + config.training.batch_size, training_pairs.size());
                 size_t current_batch_size = end_idx - start_idx;
 
-                // Find maximum sequence length in this batch
-                size_t max_seq_len = 0;
-                for (size_t j = start_idx; j < end_idx; ++j) {
-                    const auto& [input_str, target_str] = training_pairs[j];
-                    std::vector<int> input_tokens = tokenizer->encode(input_str);
-                    std::vector<int> target_tokens = tokenizer->encode(target_str);
-                    // Consider both input and target sequence lengths
-                    max_seq_len = std::max({max_seq_len, input_tokens.size(), target_tokens.size()});
-                }
-                std::cout << "\n=== Processing Batch " << batch + 1 << " ===\n";
-
                 // Create batch with validation
                 std::vector<std::vector<int>> input_batch;
-                std::vector<std::vector<int>> target_batch;  // Rename from target_tokens
+                std::vector<std::vector<int>> target_batch;
 
                 // Fill and validate batch with padding
                 bool batch_valid = true;
                 for (size_t j = start_idx; j < end_idx; ++j) {
                     const auto& [input_str, target_str] = training_pairs[j];
-
-                    // Preprocess text
                     std::string processed_input = input_str;
                     std::string processed_target = target_str;
                     tokenizer->preprocess_text(processed_input);
                     tokenizer->preprocess_text(processed_target);
-
-                    // Encode using appropriate tokenizer
                     std::vector<int> input_tokens = tokenizer->encode(processed_input);
                     std::vector<int> target_tokens = tokenizer->encode(processed_target);
-
-                    // Validate sequences
+                    
                     if (!Utils::validate_input_sequence(input_tokens, tokenizer->vocab_size()) ||
                         !Utils::validate_input_sequence(target_tokens, tokenizer->vocab_size())) {
-                        std::cerr << "Invalid sequence at position " << j << std::endl;
                         batch_valid = false;
                         break;
                     }
-
-                    // Pad sequences to max_seq_len
-                    while (input_tokens.size() < max_seq_len) {
-                        input_tokens.push_back(0);  // Use 0 for padding
-                    }
-                    while (target_tokens.size() < max_seq_len) {  // Add padding for target tokens
-                        target_tokens.push_back(0);  // Use 0 for padding
-                    }
-
                     input_batch.push_back(input_tokens);
-                    target_batch.push_back(target_tokens);  // Use target_batch instead of target_tokens
+                    target_batch.push_back(target_tokens);
                 }
 
-                if (!batch_valid)
-                    continue; // Skip invalid batches
+                if (!batch_valid) continue;
 
-                std::cout << "Input batch size: " << input_batch.size() << " sequences\n";
-                std::cout << "Target batch size: " << target_batch.size() << " sequences\n";
-
-                // First collect valid sequences
-                std::vector<std::vector<int>> valid_input_batch;
-                std::vector<std::vector<int>> valid_target_batch;
-
-                for (size_t i = 0; i < input_batch.size(); i++) {
-                    const auto& input_sequence = input_batch[i];
-                    const auto& target_sequence = target_batch[i];
-                    
-                    if (input_sequence.size() != max_seq_len) {
-                        std::cerr << "Error: Input sequence length mismatch. Expected " << max_seq_len 
-                                  << " but got " << input_sequence.size() << std::endl;
-                        continue;
-                    }
-                    
-                    if (target_sequence.size() != max_seq_len) {
-                        std::cerr << "Error: Target sequence length mismatch. Expected " << max_seq_len 
-                                  << " but got " << target_sequence.size() << std::endl;
-                        continue;
-                    }
-                    
-                    valid_input_batch.push_back(input_sequence);
-                    valid_target_batch.push_back(target_sequence);
-                }
-
-                if (valid_input_batch.empty()) {
-                    std::cerr << "Error: No valid sequences in batch\n";
-                    continue;
-                }
-
-                // Create target distribution for entire batch using only valid sequences
-                Matrix target_distribution = Utils::create_batch_target_distribution(
-                    valid_target_batch, *tokenizer, custom_vocab_size, max_seq_len);
-
-                // Process the batch as a single sequence
-                std::vector<int> flattened_batch;
-                flattened_batch.reserve(valid_input_batch.size() * max_seq_len);
-
-                // Flatten the batch into a single sequence
-                for (const auto& sequence : valid_input_batch) {
-                    flattened_batch.insert(flattened_batch.end(), sequence.begin(), sequence.end());
-                }
-                std::cout << "Flattened batch size: " << flattened_batch.size() << " tokens\n";
-
-                // Forward pass through the model
-                transformer.set_tokenizer(tokenizer.get());
-                Matrix hidden_states = transformer.forward(flattened_batch, "", *tokenizer);
-
-                // Project hidden states to vocabulary space using LM head
-                Matrix logits = transformer.get_lm_head()->forward(hidden_states);
-
-                // Compute batch loss
+                // Forward pass and compute loss
+                Matrix logits = transformer.forward(input_batch[0], "", *tokenizer);
                 float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
 
-                // Compute gradient norm
-                Matrix loss_gradients = Utils::compute_loss_gradient(logits, target_distribution);
-                float grad_norm = 0.0f;
-                for (size_t i = 0; i < loss_gradients.size(); i++) {
-                    grad_norm += loss_gradients.data()[i] * loss_gradients.data()[i];
-                }
-                grad_norm = std::sqrt(grad_norm);
-
-                // Calculate learning rate using tuned parameters
-                float current_lr;
-                if (global_step < warmup_steps) {
-                    // Linear warmup
-                    current_lr = initial_lr + (peak_lr - initial_lr) * (float)global_step / warmup_steps;
-                } else {
-                    // Cosine decay with tuned decay factor
-                    float steps_after_warmup = global_step - warmup_steps;
-                    float decay = std::pow(decay_factor, steps_after_warmup / 1000.0f);  // Decay every 1000 steps
-                    current_lr = peak_lr * decay;
-                }
-                
-                // Ensure learning rate doesn't go below initial_lr
-                current_lr = std::max(current_lr, initial_lr);
-
-                // Open loss log file in append mode
-                std::ofstream loss_log("../build/loss.log", std::ios::app);
-                if (loss_log.is_open()) {
-                    // Get current timestamp
-                    auto now = std::chrono::system_clock::now();
-                    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-                    std::string timestamp = std::ctime(&now_time);
-                    timestamp.pop_back(); // Remove trailing newline
-                    
-                    // Write detailed metrics to loss log
-                    loss_log << "[" << timestamp << "] "
-                            << "Epoch: " << (epoch + 1) << "/" << config.training.num_epochs << ", "
-                            << "Batch: " << (batch + 1) << "/" << total_batches << ", "
-                            << "Batch Loss: " << batch_loss << ", "
-                            << "Avg Epoch Loss: " << (epoch_loss / (batch + 1)) << ", "
-                            << "Gradient Norm: " << grad_norm << ", "
-                            << "Learning Rate: " << current_lr << ", "
-                            << "Global Step: " << global_step << std::endl;
-                    
-                    // If this is the first batch of the first epoch, write header
-                    if (epoch == 0 && batch == 0) {
-                        loss_log << "\nTraining Configuration:\n"
-                                << "- Batch Size: " << config.training.batch_size << "\n"
-                                << "- Initial Learning Rate: " << initial_lr << "\n"
-                                << "- Peak Learning Rate: " << peak_lr << "\n"
-                                << "- Warmup Steps: " << warmup_steps << "\n"
-                                << "- Decay Factor: " << decay_factor << "\n"
-                                << "- Gradient Clip Threshold: " << gradient_clip_threshold << "\n"
-                                << "- Early Stopping Patience: " << early_stopping_patience << "\n"
-                                << "- Early Stopping Threshold: " << early_stopping_threshold << "\n\n";
-                    }
-                    
-                    // Add validation metrics when available
-                    if ((batch + 1) % config.training.cross_validation.validation_frequency == 0) {
-                        loss_log << "[" << timestamp << "] "
-                                << "=== Validation Metrics ===\n"
-                                << "Current Validation Loss: " << batch_loss << "\n"
-                                << "Best Validation Loss: " << best_cv_loss << "\n"
-                                << "Epochs Without Improvement: " << epochs_without_improvement << "\n\n";
-                    }
-                    
-                    loss_log.close();
-                }
-
-                // Apply gradient clipping
-                if (grad_norm > gradient_clip_threshold) {
-                    float scale = gradient_clip_threshold / (grad_norm + 1e-6f);
-                    for (size_t i = 0; i < loss_gradients.size(); i++) {
-                        loss_gradients.data()[i] *= scale;
-                    }
-                    grad_norm = gradient_clip_threshold;
-                }
-
-                // Backward pass and parameter update
-                transformer.backward(loss_gradients, flattened_batch, current_lr);
+                // Update parameters
+                transformer.backward(loss_gradients, input_batch[0], current_lr);
                 transformer.update_parameters(current_lr);
 
-                // Print training statistics
-                std::cout << "\nTraining Statistics (Batch " << batch + 1 << "):" << std::endl;
-                std::cout << "Batch Loss: " << batch_loss << std::endl;
-                std::cout << "Gradient Norm: " << grad_norm << std::endl;
-                std::cout << "Learning Rate: " << current_lr << std::endl;
-                
-                // Print progress and metrics every 10 batches
-                if ((batch + 1) % 10 == 0 || batch + 1 == total_batches) {
-                    std::cout << "\rBatch " << batch + 1 << "/" << total_batches << " in epoch "
-                              << epoch + 1 << " (Loss: " << batch_loss
-                              << ", Avg Loss: " << epoch_loss / (batch + 1)
-                              << ", LR: " << current_lr << ")" << std::flush;
-
-                    // Print performance metrics
-                    metrics.print_metrics();
-                }
-
-                // Make predictions every 2 batches with clear separation
-                if ((batch + 1) % 2 == 0) {
-                    std::cout << "\n\n=== Making Predictions After Batch " << (batch + 1) 
-                              << " in Epoch " << (epoch + 1) << " ===\n" << std::endl;
-                    
-                    // Test verb completions
-                    std::cout << "\n--- Testing Verb Completions ---" << std::endl;
-                    generate_predictions(transformer, "I go to the", tokenizer.get());
-                    generate_predictions(transformer, "I want to", tokenizer.get());
-                    generate_predictions(transformer, "The code begins to", tokenizer.get());
-                    
-                    // Test adjective completions
-                    std::cout << "\n--- Testing Adjective Completions ---" << std::endl;
-                    generate_predictions(transformer, "The weather is", tokenizer.get());
-                    generate_predictions(transformer, "His voice sounds", tokenizer.get());
-                    generate_predictions(transformer, "The food tastes", tokenizer.get());
-                    
-                    // Test mixed contexts
-                    std::cout << "\n--- Testing Mixed Contexts ---" << std::endl;
-                    generate_predictions(transformer, "The students eagerly", tokenizer.get());
-                    generate_predictions(transformer, "The ocean waves", tokenizer.get());
-                    generate_predictions(transformer, "The chef skillfully", tokenizer.get());
-                    
-                    std::cout << "\n=== End of Predictions ===\n" << std::endl;
-                    std::cout.flush();  // Ensure output is displayed
-                }
-
-                // Update tracking variables
-                prev_loss = batch_loss;
-                epoch_loss += batch_loss;
-                global_step++;
-                
-                metrics.stop_timer("batch_processing");
-
-                // In the training loop, after processing each batch
-                for (const auto& tokens : input_batch) {
-                    // Add frequency decay for common tokens
-                    static const float FREQ_DECAY_RATE = 0.98f;
-                    static const float MIN_FREQ = 0.1f;
-                    
-                    // Get mean frequency for comparison
-                    const auto& frequencies = transformer.get_lm_head()->get_token_frequencies();
-                    float mean_freq = 0.0f;
-                    if (!frequencies.empty()) {
-                        mean_freq = std::accumulate(frequencies.begin(), frequencies.end(), 0.0f) / frequencies.size();
-                    }
-                    
-                    // Create a vector of tokens with adjusted frequencies
-                    std::vector<int> update_tokens;
-                    
-                    for (int token : tokens) {
-                        if (token < frequencies.size()) {
-                            float current_freq = frequencies[token];
-                            
-                            // Only include tokens that need frequency adjustment
-                            if (current_freq > 2.0f * mean_freq) {
-                                // Apply decay to very frequent tokens
-                                // We'll handle these separately to reduce their frequency
-                                continue;
-                            } else {
-                                // Add tokens that should get frequency boost
-                                update_tokens.push_back(token);
-                            }
-                        }
-                    }
-                    
-                    // Update frequencies for normal tokens
-                    if (!update_tokens.empty()) {
-                        transformer.get_lm_head()->update_token_frequencies(update_tokens);
-                    }
+                // Print progress every 10 batches
+                if ((batch + 1) % 10 == 0) {
+                    std::cout << "\rBatch " << batch + 1 << "/" << total_batches 
+                              << " (Loss: " << batch_loss << ")" << std::flush;
                 }
             }
 
             std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.training.num_epochs
                       << " (Loss: " << epoch_loss / total_batches << ")" << std::endl;
 
-            // Perform cross-validation every two epochs
+            // Run validation and make predictions only at end of epoch
             if ((epoch + 1) % 2 == 0) {
-                std::cout << "\n=== Performing Periodic Cross-Validation (Epoch " << epoch + 1 << ") ===" << std::endl;
-                float cv_loss = Utils::perform_cross_validation(
-                    transformer, 
-                    *tokenizer, 
-                    all_data
-                );
-                std::cout << "=== Periodic cross-validation loss: " << cv_loss << " ===" << std::endl;
+                std::cout << "\nRunning validation..." << std::endl;
+                float validation_loss = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
                 
-                // Early stopping based on cross-validation with tuned parameters
-                if (cv_loss < best_cv_loss) {
-                    best_cv_loss = cv_loss;
-                    epochs_without_improvement = 0;
-                    
-                    // Save best model
-                    std::cout << "New best model found! Saving checkpoint..." << std::endl;
-                    if (!model_saver.saveCheckpoint(transformer, save_directory, 
-                                                  model_name + "_best", epoch + 1, cv_loss)) {
-                        std::cerr << "Failed to save best model checkpoint" << std::endl;
-                    }
-                } else {
-                    epochs_without_improvement++;
-                    if (epochs_without_improvement >= early_stopping_patience) {
-                        std::cout << "Early stopping triggered after " << epoch + 1 
-                                 << " epochs (patience: " << early_stopping_patience << ")" << std::endl;
-                        break;
-                    }
-                }
-                
-                // Check for significant overfitting using tuned threshold
-                float train_val_ratio = cv_loss / (epoch_loss / total_batches);
-                if (train_val_ratio > early_stopping_threshold) {
-                    std::cout << "Significant overfitting detected (ratio: " << train_val_ratio 
-                             << " > threshold: " << early_stopping_threshold << "). Stopping training." << std::endl;
-                    break;
-                }
+                // Make a few test predictions
+                std::cout << "\nTest predictions:" << std::endl;
+                Utils::generate_predictions(transformer, "I go to the", tokenizer.get());
+                Utils::generate_predictions(transformer, "The weather is", tokenizer.get());
             }
 
             // Save regular checkpoint
@@ -785,11 +518,10 @@ int main(int argc, char* argv[]) {
                 std::vector<int> test_tokens = tokenizer->encode(processed_input);
                 
                 // Get model prediction
-                Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-                Matrix logits = transformer.get_lm_head()->forward(test_hidden);
+                transformer.set_training(false);  // Set to evaluation mode
+                Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
                 
-                // For single token prediction, we don't need beam search
-                // Just show the top predictions
+                // Show the top predictions
                 std::cout << "\nTop Predictions:\n";
                 Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
             }
@@ -828,9 +560,8 @@ int main(int argc, char* argv[]) {
         
         // Get model prediction
         transformer.set_training(false);  // Set to evaluation mode
-        Matrix test_hidden = transformer.forward(test_tokens, "", *tokenizer);
-        Matrix logits = transformer.get_lm_head()->forward(test_hidden);
-        
+        Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
+
         // Show the top predictions
         std::cout << "\nTop Predictions:\n";
         Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
