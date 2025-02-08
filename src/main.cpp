@@ -310,45 +310,48 @@ int main(int argc, char* argv[]) {
         const size_t PATIENCE = 3;
 
         // After loading data but before training loop
-        std::cout << "\nStarting hyperparameter tuning phase..." << std::endl;
+        debug::progress_state.reset();  // Reset progress state before starting
+
+        // Check if hyperparameter tuning is enabled
+        if (config.training.tuning.enabled) {
+            // Initialize hyperparameter tuner
+            HyperparameterRanges ranges;  // Now defined
+            HyperparameterTuner tuner(ranges, config, tokenizer);  // Pass shared_ptr tokenizer
+            
+            // Run tuning and get results
+            auto tuning_results = tuner.tune(training_pairs, *tokenizer);
+            
+            // Only process results if we got any (tuning wasn't disabled)
+            if (!tuning_results.empty()) {
+                // Get best configuration
+                auto best_config = tuner.get_best_config();
+                
+                // Save tuning results
+                std::string tuning_results_path = save_directory + "/tuning_results.json";
+                tuner.save_results(tuning_results_path);
+                
+                // Update transformer config with best hyperparameters
+                config = best_config.to_transformer_config();
+                
+                // Reinitialize transformer with best config
+                transformer = Transformer(config, tokenizer);  // Pass shared_ptr tokenizer
+                debug::log_message("Reinitialized transformer with best hyperparameters", "INFO");
+                
+                // Update training parameters from best config
+                const float initial_lr = best_config.initial_lr;
+                const float peak_lr = best_config.peak_lr;
+                const size_t warmup_steps = best_config.warmup_steps;
+                const float decay_factor = best_config.decay_factor;
+                const float gradient_clip_threshold = best_config.gradient_clip_threshold;
+                const size_t early_stopping_patience = best_config.early_stopping_patience;
+                const float early_stopping_threshold = best_config.early_stopping_threshold;
+            }
+        }
         
-        // Initialize hyperparameter tuner
-        HyperparameterRanges ranges;  // Now defined
-        HyperparameterTuner tuner(ranges, config, tokenizer);  // Pass shared_ptr tokenizer
+        // Reset progress state before training phase
+        debug::progress_state.reset();
         
-        // Run hyperparameter tuning
-        std::cout << "Running hyperparameter tuning with " << training_pairs.size() 
-                  << " training examples..." << std::endl;
-        auto tuning_results = tuner.tune(training_pairs, *tokenizer);
-        
-        // Get best configuration
-        auto best_config = tuner.get_best_config();
-        
-        // Save tuning results
-        std::string tuning_results_path = save_directory + "/tuning_results.json";
-        tuner.save_results(tuning_results_path);
-        
-        std::cout << "\nHyperparameter tuning complete!" << std::endl;
-        std::cout << "Best configuration achieved validation loss: " 
-                  << tuning_results[0].mean_validation_loss << std::endl;
-        
-        // Update transformer config with best hyperparameters
-        config = best_config.to_transformer_config();
-        
-        // Reinitialize transformer with best config
-        transformer = Transformer(config, tokenizer);  // Pass shared_ptr tokenizer
-        std::cout << "Reinitialized transformer with best hyperparameters" << std::endl;
-        
-        // Update training parameters from best config
-        const float initial_lr = best_config.initial_lr;
-        const float peak_lr = best_config.peak_lr;
-        const size_t warmup_steps = best_config.warmup_steps;
-        const float decay_factor = best_config.decay_factor;
-        const float gradient_clip_threshold = best_config.gradient_clip_threshold;
-        const size_t early_stopping_patience = best_config.early_stopping_patience;
-        const float early_stopping_threshold = best_config.early_stopping_threshold;
-        
-        std::cout << "\nStarting main training with best hyperparameters..." << std::endl;
+        std::cout << "\nStarting main training..." << std::endl;
 
         // After loading config but before training loop
         std::cout << "\nStarting training with:"
@@ -357,12 +360,22 @@ int main(int argc, char* argv[]) {
                   << "\n- Learning rate: " << config.training.learning_rate.initial_lr
                   << std::endl;
 
+        // Extract learning rate parameters from config
+        const float initial_lr = config.training.learning_rate.initial_lr;
+        const float peak_lr = config.training.learning_rate.peak_lr;
+        const size_t warmup_steps = config.training.learning_rate.warmup_steps;
+        const float decay_factor = config.training.learning_rate.decay_factor;
+        float current_lr = initial_lr;
+        size_t global_step = 0;  // Initialize global step counter
+
         // Calculate total batches
         size_t total_batches = (training_pairs.size() + config.training.batch_size - 1) / config.training.batch_size;
 
         // Training loop
         auto training_start = std::chrono::high_resolution_clock::now();
         size_t total_steps = config.training.num_epochs * total_batches;
+        
+        debug::progress_state.reset();  // Reset progress state at start of training
         
         for (size_t epoch = 0; epoch < config.training.num_epochs; epoch++) {
             auto epoch_start = std::chrono::high_resolution_clock::now();
@@ -376,6 +389,13 @@ int main(int argc, char* argv[]) {
                 size_t start_idx = batch * config.training.batch_size;
                 size_t end_idx = std::min(start_idx + config.training.batch_size, training_pairs.size());
                 size_t current_batch_size = end_idx - start_idx;
+
+                // Update progress state for training
+                debug::progress_state.update_training(
+                    epoch, config.training.num_epochs,
+                    batch, total_batches,
+                    epoch_loss / (batch + 1)  // Current average loss
+                );
 
                 // Create batch with validation
                 std::vector<std::vector<int>> input_batch;
@@ -415,7 +435,6 @@ int main(int argc, char* argv[]) {
                 Matrix loss_gradients = Utils::compute_loss_gradient(logits, target_distribution);
 
                 // Calculate learning rate
-                float current_lr;
                 if (global_step < warmup_steps) {
                     current_lr = initial_lr + (peak_lr - initial_lr) * (float)global_step / warmup_steps;
                 } else {
@@ -529,16 +548,25 @@ int main(int argc, char* argv[]) {
             }
 
             // Run validation every 3 epochs
-            if ((epoch + 1) % 3 == 0) { // Validate every 3 epochs
+            if ((epoch + 1) % 3 == 0) {
                 std::cout << "\nRunning validation after epoch " << (epoch + 1) << "...\n";
-                float validation_loss =
-                    Utils::evaluate_validation(transformer, *tokenizer, validation_data);
+                float validation_loss = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
+
+                // Update progress state for cross-validation
+                debug::progress_state.update_cross_validation(
+                    0, 1,  // Single fold for regular validation
+                    epoch, config.training.num_epochs,
+                    validation_loss
+                );
 
                 // Log validation results
                 std::cout << "Epoch " << (epoch + 1) << " Validation Loss: " << validation_loss
                           << std::endl;
             }
         }
+
+        // Reset progress state at end of training
+        debug::progress_state.reset();
 
         std::cout << "\nTraining completed!\n";
 

@@ -21,20 +21,173 @@
 
 namespace debug {
     bool verbose_logging = true;
+    bool scope_logging_enabled = false;  // Disabled by default
     std::ofstream debug_log;
     const std::string log_file = "../build/transformer.log";
     const std::string progress_file = "../build/progress.log";
     std::mutex log_mutex;
     std::ofstream progress_log;
     
-    // Track current progress state
-    struct ProgressState {
-        std::string current_fold;
-        std::string current_epoch;
-        std::string current_batch;
-        std::string current_validation;
-    } progress_state;
-    
+    // Define the global progress_state variable
+    ProgressState progress_state;
+
+    // Define static members of ScopeLogger
+    std::mutex ScopeLogger::log_mutex;
+    thread_local int ScopeLogger::indent_level = 0;
+    std::string ScopeLogger::log_path;
+
+    void enable_scope_logging(bool enable) {
+        scope_logging_enabled = enable;
+        if (enable) {
+            log_message("Scope logging enabled", "INFO");
+        } else {
+            log_message("Scope logging disabled", "INFO");
+        }
+    }
+
+    // Implement ScopeLogger::log_entry
+    void ScopeLogger::log_entry(const std::string& action) {
+        if (log_path.empty()) {
+            log_path = progress_file;  // Use the same file as progress logging
+        }
+        
+        std::ofstream log_file(log_path, std::ios::app);
+        if (log_file.is_open()) {
+            auto now = std::chrono::system_clock::now();
+            auto now_time_t = std::chrono::system_clock::to_time_t(now);
+            auto now_tm = *std::localtime(&now_time_t);
+            
+            std::string indent(indent_level * 2, ' ');
+            log_file << std::put_time(&now_tm, "%H:%M:%S") << " "
+                    << indent << action << " " << scope_name 
+                    << " [" << file_name << ":" << line_number << "]"
+                    << " (Thread: " << std::this_thread::get_id() << ")"
+                    << std::endl;
+        }
+    }
+
+    // Implement ProgressState methods
+    void ProgressState::update_tuning(size_t trial, size_t total, const std::string& config, float loss) {
+        // Only update tuning progress if we're actually tuning
+        if (current_stage != Stage::TUNING) {
+            return;  // Skip if we're not in tuning phase
+        }
+        
+        current_stage = Stage::TUNING;
+        tuning.current_trial = trial;
+        tuning.total_trials = total;
+        tuning.current_config = config;
+        if (loss < tuning.best_loss) {
+            tuning.best_loss = loss;
+        }
+        update_progress_file();
+    }
+
+    void ProgressState::update_training(size_t epoch, size_t total_epochs, size_t batch, size_t total_batches, float loss) {
+        current_stage = Stage::TRAINING;
+        training.current_epoch = epoch;
+        training.total_epochs = total_epochs;
+        training.current_batch = batch;
+        training.total_batches = total_batches;
+        training.current_loss = loss;
+        if (loss < training.best_loss) {
+            training.best_loss = loss;
+        }
+        update_progress_file();
+    }
+
+    void ProgressState::update_cross_validation(size_t fold, size_t total_folds, size_t epoch, size_t total_epochs, float loss) {
+        current_stage = Stage::CROSS_VALIDATION;
+        training.is_cross_validation = true;
+        training.current_fold = fold;
+        training.total_folds = total_folds;
+        training.current_epoch = epoch;
+        training.total_epochs = total_epochs;
+        training.current_loss = loss;
+        if (loss < training.best_loss) {
+            training.best_loss = loss;
+        }
+        update_progress_file();
+    }
+
+    void ProgressState::update_inference(size_t tokens, size_t total, float avg_time) {
+        current_stage = Stage::INFERENCE;
+        inference.tokens_generated = tokens;
+        inference.total_tokens = total;
+        inference.average_time_per_token = avg_time;
+        update_progress_file();
+    }
+
+    void ProgressState::reset() {
+        // Reset to IDLE state and clear all progress
+        current_stage = Stage::IDLE;
+        tuning = TuningProgress{};
+        training = TrainingProgress{};
+        inference = InferenceProgress{};
+        update_progress_file();
+    }
+
+    std::string ProgressState::get_stage_string() const {
+        switch (current_stage) {
+            case Stage::TUNING: return "Hyperparameter Tuning";
+            case Stage::TRAINING: return "Training";
+            case Stage::CROSS_VALIDATION: return "Cross Validation";
+            case Stage::INFERENCE: return "Inference";
+            default: return "Idle";
+        }
+    }
+
+    void ProgressState::update_progress_file() {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        if (!progress_log.is_open()) {
+            progress_log.open(progress_file, std::ios::trunc);
+        }
+        
+        progress_log.seekp(0);
+        progress_log << "Current Stage: " << get_stage_string() << "\n\n";
+        
+        switch (current_stage) {
+            case Stage::TUNING:
+                write_tuning_progress();
+                break;
+            case Stage::TRAINING:
+            case Stage::CROSS_VALIDATION:
+                write_training_progress();
+                break;
+            case Stage::INFERENCE:
+                write_inference_progress();
+                break;
+            default:
+                progress_log << "System idle\n";
+        }
+        progress_log.flush();
+    }
+
+    void ProgressState::write_tuning_progress() {
+        progress_log << "Hyperparameter Tuning Progress:\n"
+                    << "Trial: " << tuning.current_trial + 1 << "/" << tuning.total_trials << "\n"
+                    << "Current Configuration:\n" << tuning.current_config << "\n"
+                    << "Best Loss: " << tuning.best_loss << "\n\n";
+    }
+
+    void ProgressState::write_training_progress() {
+        if (training.is_cross_validation) {
+            progress_log << "Cross Validation Progress:\n"
+                        << "Fold: " << training.current_fold + 1 << "/" << training.total_folds << "\n";
+        }
+        progress_log << "Training Progress:\n"
+                    << "Epoch: " << training.current_epoch + 1 << "/" << training.total_epochs << "\n"
+                    << "Batch: " << training.current_batch + 1 << "/" << training.total_batches << "\n"
+                    << "Current Loss: " << training.current_loss << "\n"
+                    << "Best Loss: " << training.best_loss << "\n\n";
+    }
+
+    void ProgressState::write_inference_progress() {
+        progress_log << "Inference Progress:\n"
+                    << "Tokens Generated: " << inference.tokens_generated << "/" << inference.total_tokens << "\n"
+                    << "Average Time per Token: " << inference.average_time_per_token << "ms\n\n";
+    }
+
     void init_logging() {
         std::lock_guard<std::mutex> lock(log_mutex);
         debug_log.open(log_file, std::ios::app);
@@ -70,26 +223,46 @@ namespace debug {
         progress_log << "\n=== Training Session Progress ===\n\n";
         
         // Write current state with proper formatting
-        if (!progress_state.current_fold.empty()) {
-            progress_log << progress_state.current_fold << "\n";
-            
-            if (!progress_state.current_epoch.empty()) {
-                progress_log << "  " << progress_state.current_epoch << "\n";
+        progress_log << "Current Stage: " << progress_state.get_stage_string() << "\n\n";
+        
+        switch (progress_state.current_stage) {
+            case ProgressState::Stage::TUNING:
+                progress_log << "Hyperparameter Tuning Progress:\n"
+                            << "Trial: " << progress_state.tuning.current_trial + 1 
+                            << "/" << progress_state.tuning.total_trials << "\n"
+                            << "Current Configuration:\n" << progress_state.tuning.current_config << "\n"
+                            << "Best Loss: " << progress_state.tuning.best_loss << "\n\n";
+                break;
                 
-                if (!progress_state.current_batch.empty()) {
-                    progress_log << "    " << progress_state.current_batch << "\n";
+            case ProgressState::Stage::TRAINING:
+            case ProgressState::Stage::CROSS_VALIDATION:
+                if (progress_state.training.is_cross_validation) {
+                    progress_log << "Cross Validation Progress:\n"
+                                << "Fold: " << progress_state.training.current_fold + 1 
+                                << "/" << progress_state.training.total_folds << "\n";
                 }
+                progress_log << "Training Progress:\n"
+                            << "Epoch: " << progress_state.training.current_epoch + 1 
+                            << "/" << progress_state.training.total_epochs << "\n"
+                            << "Batch: " << progress_state.training.current_batch + 1 
+                            << "/" << progress_state.training.total_batches << "\n"
+                            << "Current Loss: " << progress_state.training.current_loss << "\n"
+                            << "Best Loss: " << progress_state.training.best_loss << "\n\n";
+                break;
                 
-                if (!progress_state.current_validation.empty()) {
-                    progress_log << "    " << progress_state.current_validation << "\n";
-                }
-            }
+            case ProgressState::Stage::INFERENCE:
+                progress_log << "Inference Progress:\n"
+                            << "Tokens Generated: " << progress_state.inference.tokens_generated 
+                            << "/" << progress_state.inference.total_tokens << "\n"
+                            << "Average Time per Token: " 
+                            << progress_state.inference.average_time_per_token << "ms\n\n";
+                break;
+                
+            default:
+                progress_log << "System idle\n";
         }
         
-        // Ensure immediate write to disk
         progress_log.flush();
-        progress_log.close();
-        progress_log.open(progress_file, std::ios::app);
     }
     
     void log_message(const std::string& message, const std::string& level) {
@@ -159,54 +332,64 @@ namespace debug {
     }
 
     void log_progress(const std::string& stage, size_t current, size_t total, 
-                     const std::string& additional_info = "") {
+                     const std::string& additional_info) {
         std::lock_guard<std::mutex> lock(log_mutex);
-        auto now = std::chrono::system_clock::now();
-        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-        std::string time_str = std::ctime(&now_time);
-        time_str = time_str.substr(0, time_str.length() - 1);  // Remove newline
-
-        float progress = static_cast<float>(current) / total;
-        int bar_width = 50;
-        int filled_width = static_cast<int>(bar_width * progress);
-
-        std::ostringstream progress_bar;
-        progress_bar << stage << ": [";
-        for (int i = 0; i < bar_width; ++i) {
-            if (i < filled_width) progress_bar << "=";
-            else if (i == filled_width) progress_bar << ">";
-            else progress_bar << " ";
-        }
-        progress_bar << "] " << std::fixed << std::setprecision(1) << (progress * 100.0f) << "%";
+        
+        std::string progress_line = stage + ": " + std::to_string(current) + "/" + 
+                                  std::to_string(total);
         if (!additional_info.empty()) {
-            progress_bar << " | " << additional_info;
+            progress_line += " - " + additional_info;
         }
-
-        // Update appropriate progress state
-        std::string progress_line = progress_bar.str();
-        bool should_update = false;
-
-        if (stage == "Cross-Validation") {
-            progress_state.current_fold = progress_line;
-            should_update = true;
-        } else if (stage == "Epoch") {
-            progress_state.current_epoch = progress_line;
-            should_update = true;
-        } else if (stage == "Batch") {
-            progress_state.current_batch = progress_line;
-            should_update = true;
-        } else if (stage == "Validation") {
-            progress_state.current_validation = progress_line;
-            progress_state.current_batch.clear();  // Clear batch progress during validation
-            should_update = true;
-        } else if (stage == "Fold Complete" || stage == "Cross-Validation Complete") {
-            progress_state = ProgressState();
-            should_update = true;
+        
+        // Update appropriate state based on stage
+        if (stage == "Fold") {
+            progress_state.update_cross_validation(current - 1, total, 
+                                                progress_state.training.current_epoch,
+                                                progress_state.training.total_epochs,
+                                                progress_state.training.current_loss);
         }
-
-        if (should_update) {
-            update_progress_file();
+        else if (stage == "Epoch") {
+            progress_state.update_training(current - 1, total,
+                                        progress_state.training.current_batch,
+                                        progress_state.training.total_batches,
+                                        progress_state.training.current_loss);
         }
+        else if (stage == "Batch") {
+            float current_loss = 0.0f;
+            if (!additional_info.empty()) {
+                try {
+                    size_t loss_pos = additional_info.find("Loss: ");
+                    if (loss_pos != std::string::npos) {
+                        current_loss = std::stof(additional_info.substr(loss_pos + 6));
+                    }
+                } catch (...) {
+                    // If parsing fails, keep default 0.0f
+                }
+            }
+            progress_state.update_training(progress_state.training.current_epoch,
+                                        progress_state.training.total_epochs,
+                                        current - 1, total, current_loss);
+        }
+        else if (stage == "Validation") {
+            float validation_loss = 0.0f;
+            if (!additional_info.empty()) {
+                try {
+                    size_t loss_pos = additional_info.find("Loss: ");
+                    if (loss_pos != std::string::npos) {
+                        validation_loss = std::stof(additional_info.substr(loss_pos + 6));
+                    }
+                } catch (...) {
+                    // If parsing fails, keep default 0.0f
+                }
+            }
+            progress_state.update_cross_validation(progress_state.training.current_fold,
+                                                progress_state.training.total_folds,
+                                                progress_state.training.current_epoch,
+                                                progress_state.training.total_epochs,
+                                                validation_loss);
+        }
+        
+        update_progress_file();
     }
 }
 

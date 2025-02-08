@@ -2,6 +2,7 @@
 #include "../include/transformer.hpp"
 #include "../include/utils.hpp"
 #include "../include/tiktoken_tokenizer.hpp"
+#include "../include/debug.hpp"
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -271,38 +272,41 @@ TuningResult HyperparameterTuner::evaluate_config(
 }
 
 void HyperparameterTuner::log_trial_progress(size_t current_trial, const TuningResult& result) const {
-    std::cout << "\n=== Trial " << current_trial + 1 << "/" << num_trials_ << " ===\n"
-              << "Mean validation loss: " << result.mean_validation_loss << "\n"
-              << "Validation loss std: " << result.validation_loss_std << "\n"
-              << "Early stops: " << result.early_stops << "/" << num_folds_ << std::endl;
+    std::stringstream ss;
+    ss << "=== Trial " << current_trial + 1 << "/" << num_trials_ << " ===\n"
+       << "Mean validation loss: " << result.mean_validation_loss << "\n"
+       << "Validation loss std: " << result.validation_loss_std << "\n"
+       << "Early stops: " << result.early_stops << "/" << num_folds_;
+    debug::log_message(ss.str(), "INFO");
     
     HyperparameterUtils::log_config(result.config);
 }
 
 void HyperparameterUtils::log_config(const HyperparameterConfig& config) {
-    std::cout << "\nConfiguration:"
-              << "\nArchitecture:"
-              << "\n- Layers: " << config.num_layers
-              << "\n- Heads: " << config.num_heads
-              << "\n- Hidden size: " << config.hidden_size
-              << "\n- Intermediate size: " << config.intermediate_size
-              << "\n- Head dimension: " << config.head_dim
-              << "\n\nLearning rate:"
-              << "\n- Initial: " << config.initial_lr
-              << "\n- Peak: " << config.peak_lr
-              << "\n- Warmup steps: " << config.warmup_steps
-              << "\n- Decay factor: " << config.decay_factor
-              << "\n\nTraining parameters:"
-              << "\n- Dropout rate: " << config.dropout_rate
-              << "\n- Weight decay: " << config.weight_decay
-              << "\n- Early stopping patience: " << config.early_stopping_patience
-              << "\n- Early stopping threshold: " << config.early_stopping_threshold
-              << "\n- Gradient clip threshold: " << config.gradient_clip_threshold
-              << "\n- Layer norm epsilon: " << config.layer_norm_epsilon
-              << "\n\nOptimization:"
-              << "\n- Memory pool size: " << config.memory_pool_size
-              << "\n- Gradient accumulation steps: " << config.gradient_accumulation_steps
-              << std::endl;
+    std::stringstream ss;
+    ss << "Configuration:"
+       << "\nArchitecture:"
+       << "\n- Layers: " << config.num_layers
+       << "\n- Heads: " << config.num_heads
+       << "\n- Hidden size: " << config.hidden_size
+       << "\n- Intermediate size: " << config.intermediate_size
+       << "\n- Head dimension: " << config.head_dim
+       << "\n\nLearning rate:"
+       << "\n- Initial: " << config.initial_lr
+       << "\n- Peak: " << config.peak_lr
+       << "\n- Warmup steps: " << config.warmup_steps
+       << "\n- Decay factor: " << config.decay_factor
+       << "\n\nTraining parameters:"
+       << "\n- Dropout rate: " << config.dropout_rate
+       << "\n- Weight decay: " << config.weight_decay
+       << "\n- Early stopping patience: " << config.early_stopping_patience
+       << "\n- Early stopping threshold: " << config.early_stopping_threshold
+       << "\n- Gradient clip threshold: " << config.gradient_clip_threshold
+       << "\n- Layer norm epsilon: " << config.layer_norm_epsilon
+       << "\n\nOptimization:"
+       << "\n- Memory pool size: " << config.memory_pool_size
+       << "\n- Gradient accumulation steps: " << config.gradient_accumulation_steps;
+    debug::log_message(ss.str(), "INFO");
 }
 
 void HyperparameterUtils::log_result(const TuningResult& result) {
@@ -322,32 +326,53 @@ std::vector<TuningResult> HyperparameterTuner::tune(
     const std::vector<std::pair<std::string, std::string>>& training_data,
     const TiktokenTokenizer& tokenizer) {
     
-    // Store transformer_config as member variable or pass it to tune
-    const TransformerConfig& transformer_config = config_;  // Add this as member variable
-    
-    if (!transformer_config.training.tuning.enabled) {
-        std::cout << "Hyperparameter tuning is disabled in config" << std::endl;
-        return {};
+    // First, check if tuning is enabled in config
+    if (!config_.training.tuning.enabled) {
+        debug::log_message("Hyperparameter tuning is disabled in config", "INFO");
+        return {};  // Return empty results if tuning is disabled
     }
 
-    const auto& tuning_config = transformer_config.training.tuning;
-    std::cout << "\nStarting hyperparameter tuning with " 
-              << tuning_config.num_trials << " trials..." << std::endl;
+    // Only if tuning is enabled, proceed with initialization and output
+    debug::log_message("Starting hyperparameter tuning phase", "INFO");
+    
+    const auto& tuning_config = config_.training.tuning;
+    debug::log_message("Running hyperparameter tuning with " + 
+                      std::to_string(training_data.size()) + " training examples", "INFO");
+    debug::log_message("Will run " + std::to_string(tuning_config.num_trials) + " trials", "INFO");
     
     results_.clear();  // Clear any previous results
+    debug::progress_state.reset();  // Reset progress state
     
     for (size_t trial = 0; trial < tuning_config.num_trials; ++trial) {
         // Sample a random configuration
         auto trial_config = sample_random_config();
         
+        // Convert config to JSON string for progress tracking
+        nlohmann::json config_json = {
+            {"num_layers", trial_config.num_layers},
+            {"num_heads", trial_config.num_heads},
+            {"hidden_size", trial_config.hidden_size},
+            {"head_dim", trial_config.head_dim},
+            {"initial_lr", trial_config.initial_lr},
+            {"peak_lr", trial_config.peak_lr},
+            {"warmup_steps", trial_config.warmup_steps}
+        };
+        
         // Skip invalid configurations
         if (!validate_config(trial_config)) {
-            std::cout << "Skipping invalid configuration in trial " << trial + 1 << std::endl;
+            debug::log_message("Skipping invalid configuration in trial " + 
+                             std::to_string(trial + 1), "WARN");
             continue;
         }
         
+        // Update progress state before evaluation
+        debug::progress_state.update_tuning(trial, tuning_config.num_trials, 
+                                          config_json.dump(4), 
+                                          results_.empty() ? std::numeric_limits<float>::max() : 
+                                          results_[0].mean_validation_loss);
+        
         // Evaluate the configuration
-        auto result = evaluate_config(trial_config, training_data, tokenizer, transformer_config);
+        auto result = evaluate_config(trial_config, training_data, tokenizer, config_);
         results_.push_back(result);
         
         // Log progress
@@ -356,6 +381,9 @@ std::vector<TuningResult> HyperparameterTuner::tune(
     
     // Sort results by performance
     std::sort(results_.begin(), results_.end());
+    
+    // Reset progress state after tuning
+    debug::progress_state.reset();
     
     return results_;
 }
