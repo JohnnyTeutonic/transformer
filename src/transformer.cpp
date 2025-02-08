@@ -1,4 +1,5 @@
 #include "../include/transformer.hpp"
+#include "../include/scope_logger.hpp"
 #ifdef USE_CUDA
 #include "../include/cuda/cublas_check.cuh"
 #include "../include/cuda/cuda_check.cuh"
@@ -383,6 +384,7 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
 // Transformer implementation
 Transformer::Transformer(const TransformerConfig& config_, std::shared_ptr<TiktokenTokenizer> tokenizer) 
     : config(config_), tokenizer_(tokenizer) {
+    SCOPE_LOG();
     if (!tokenizer_) {
         throw std::runtime_error("Tokenizer cannot be null");
     }
@@ -426,6 +428,7 @@ Matrix Transformer::forward(
     const std::vector<int>& input_tokens,
     const std::string& input_text,
     const TiktokenTokenizer& tokenizer) {
+    SCOPE_LOG();
     // Get token embeddings
     Matrix embeddings = token_embedding->forward(input_tokens);
     
@@ -461,6 +464,7 @@ Matrix Transformer::forward(
 }
 
 void Transformer::clear_kv_cache() {
+    SCOPE_LOG();
     for (auto& cache : m_kv_caches) {
         cache.clear();
     }
@@ -468,6 +472,7 @@ void Transformer::clear_kv_cache() {
 
 // Original backward method implementation
 void Transformer::backward(const Matrix& grad_output, const std::vector<int>& input_tokens, float learning_rate) {
+    SCOPE_LOG();
     if (!training) {
         std::cout << "Model is in evaluation mode. Skipping backward pass." << std::endl;
         return;
@@ -640,6 +645,7 @@ void Transformer::backward(const Matrix& logits, const Matrix& target_distributi
 }
 
 void Transformer::update_parameters(float learning_rate) {
+    SCOPE_LOG();
     std::cout << "=== Transformer::update_parameters START ===" << std::endl;
 
     // Update layer parameters
@@ -719,6 +725,7 @@ std::vector<Matrix>& Transformer::parameters() {
 }
 
 void Transformer::initialize_weights() {
+    SCOPE_LOG();
     // Xavier/Glorot initialization with proper scaling and bounds
     auto init_weights = [](Matrix& weights, size_t fan_in, size_t fan_out, bool is_attention = false) {
         float scale = std::sqrt(2.0f / (fan_in + fan_out));
@@ -806,6 +813,7 @@ Transformer::~Transformer() {
 }
 
 void Transformer::load(std::istream& is) {
+    SCOPE_LOG();
     try {
         // Load token embedding
         token_embedding->load(is);
@@ -830,6 +838,7 @@ void Transformer::load(std::istream& is) {
 }
 
 void Transformer::set_training(bool training_mode) {
+    SCOPE_LOG();
     training = training_mode;
     // Set training mode for all components that need it
     for (auto& layer : layers) {

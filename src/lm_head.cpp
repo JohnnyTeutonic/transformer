@@ -1,6 +1,7 @@
 #include "../include/lm_head.hpp"
 #include "../include/token_constants.hpp"
 #include "../include/cuda/matrix_ops.cuh"  // Add CUDA matrix operations header
+#include "../include/scope_logger.hpp"  // Add scope logger header
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -40,6 +41,8 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
       max_lr(0.01f),
       lr_decay(0.99f) {
     
+    SCOPE_LOG();
+    
     std::cout << "Initializing LM head with:"
               << "\n- Hidden size: " << hidden_size
               << "\n- Vocabulary size: " << vocab_size << std::endl;
@@ -59,7 +62,7 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
-    std::cout << "\nLM Head forward pass:" << std::endl;
+    SCOPE_LOG();
     
     if (hidden_states.cols() != hidden_size_) {
         throw std::runtime_error("Hidden dimension mismatch: " + std::to_string(hidden_states.cols()) +
@@ -88,7 +91,7 @@ Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
 }
 
 Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
-    std::cout << " within LM project to vocab begginning" << std::endl;
+    SCOPE_LOG();
     this->hidden_states = hidden_states;
     size_t total_size = hidden_states.rows();
     size_t hidden_dim = hidden_states.cols();
@@ -102,7 +105,7 @@ Matrix LanguageModelHead::project_to_vocab(const Matrix& hidden_states) {
 }
 
 Matrix LanguageModelHead::backward(const Matrix& grad_output, const Matrix& target_distribution) {
-    std::cout << "\n=== LanguageModelHead::backward START ===" << std::endl;    
+    SCOPE_LOG();
     // Verify input dimensions
     if (grad_output.cols() != vocab_size_) {
         throw std::runtime_error("Gradient output dimension mismatch in backward pass. Expected vocab_size: " + 
@@ -121,6 +124,7 @@ void LanguageModelHead::backward_linear(const Matrix& grad_output) {
 }
 
 void LanguageModelHead::update_learning_rate(float current_loss) {
+    SCOPE_LOG();
     // Add loss to history
     loss_history.push_back(current_loss);
     if (loss_history.size() > LOSS_HISTORY_SIZE) {
@@ -158,6 +162,7 @@ void LanguageModelHead::update_learning_rate(float current_loss) {
 }
 
 void LanguageModelHead::update_token_frequencies(const std::vector<int>& tokens) {
+    SCOPE_LOG();
     // Reset frequencies periodically to prevent over-accumulation
     if (training_steps % 1000 == 0) {  // Reset every 1000 steps
         #pragma omp parallel for
@@ -189,6 +194,7 @@ void LanguageModelHead::update_token_frequencies(const std::vector<int>& tokens)
 }
 
 void LanguageModelHead::update_active_tokens() {
+    SCOPE_LOG();
     const float decay = 0.99f;
     
     // Parallelize frequency decay
@@ -258,10 +264,13 @@ LanguageModelHead::~LanguageModelHead() {
 }
 
 void LanguageModelHead::set_training(bool training_mode) {
+    SCOPE_LOG();
     is_training_ = training_mode;
 }
 
 Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix& hidden_states) {
+    SCOPE_LOG();  // Add scope logging
+    
     // Verify input dimensions
     if (grad_output.cols() != vocab_size_) {
         throw std::runtime_error("Gradient output dimension mismatch in backward pass. Expected vocab_size: " + 
@@ -318,58 +327,45 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
                     continue;
                 }
 
-                // Rest of the update logic...
                 float clipped_grad = grad_proj(i, j);
                 if (std::abs(clipped_grad) > clip_threshold) {
                     clipped_grad *= clip_threshold / std::abs(clipped_grad);
                 }
                 
-                float new_m = beta1 * m_proj(i, j) + (1 - beta1) * clipped_grad;
-                if (!std::isfinite(new_m)) {
-                    has_unstable_update = true;
-                    continue;
-                }
-                m_proj(i, j) = new_m;
+                // Adam optimizer update
+                float new_m = beta1 * m_proj(i, j) + (1.0f - beta1) * clipped_grad;
+                float new_v = beta2 * v_proj(i, j) + (1.0f - beta2) * clipped_grad * clipped_grad;
                 
-                float grad_squared = clipped_grad * clipped_grad;
-                float new_v = beta2 * v_proj(i, j) + (1 - beta2) * grad_squared;
-                if (!std::isfinite(new_v)) {
-                    has_unstable_update = true;
-                    continue;
-                }
+                // Bias correction
+                float m_hat = new_m / (1.0f - std::pow(beta1, t));
+                float v_hat = new_v / (1.0f - std::pow(beta2, t));
+                
+                // Store updated momentum and velocity
+                m_proj(i, j) = new_m;
                 v_proj(i, j) = new_v;
                 
-                float m_hat = new_m / (1 - std::pow(beta1, t));
-                float v_hat = new_v / (1 - std::pow(beta2, t));
+                // Compute update with learning rate and bias correction
+                float update = current_lr * m_hat / (std::sqrt(v_hat) + eps);
                 
-                if (!std::isfinite(m_hat) || !std::isfinite(v_hat)) {
-                    has_unstable_update = true;
-                    continue;
+                // Clip update magnitude
+                if (std::abs(update) > max_update) {
+                    update *= max_update / std::abs(update);
                 }
                 
-                float denom = std::sqrt(v_hat) + eps;
-                if (denom < eps) denom = eps;
-                
-                float update = current_lr * m_hat / denom;
-                update *= scale_factor;
-                
-                if (!std::isfinite(update)) {
-                    has_unstable_update = true;
-                    continue;
-                }
-                
+                // Apply update to projection matrix
                 float new_value = projection(i, j) - update;
                 
+                // Clip parameter value
                 if (std::abs(new_value) > max_allowed_value) {
+                    new_value = std::copysign(max_allowed_value, new_value);
                     has_unstable_update = true;
-                    continue;
                 }
                 
-                if (std::isfinite(new_value)) {
-                    projection(i, j) = new_value;
-                }
+                projection(i, j) = new_value;
+                
             } catch (const std::exception& e) {
-                std::cout << "Exception at position (" << i << "," << j << "): " << e.what() << std::endl;
+                std::cout << "Error in parameter update: " << e.what() << std::endl;
+                has_unstable_update = true;
             }
         }
     }

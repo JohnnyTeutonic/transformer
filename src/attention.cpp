@@ -12,6 +12,7 @@
 #include "../include/transformer.hpp"
 #include "../include/config.hpp"
 #include "../include/half_precision.hpp"
+#include "../include/scope_logger.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -65,6 +66,7 @@ MultiHeadAttention::MultiHeadAttention(size_t hidden_size_, size_t num_heads_, s
       use_gqa(use_gqa_), num_kv_heads(num_kv_heads_), max_seq_length(max_seq_length_),
       use_fp16_(use_fp16) {
 
+    SCOPE_LOG();
     std::cout << "\n=== MultiHeadAttention::constructor START ===" << std::endl;
 
     // Initialize matrices with correct dimensions
@@ -166,6 +168,7 @@ Vector MultiHeadAttention::apply_rope(const Vector& x, size_t position) const {
 
 Matrix MultiHeadAttention::flash_attention(const Matrix& Q, const Matrix& K, const Matrix& V,
                                          const AttentionMask& mask) const {
+    SCOPE_LOG();
     std::cout << "=== MultiHeadAttention::flash_attention START ===\n";
     
     const size_t seq_len = Q.rows();
@@ -253,6 +256,7 @@ Matrix MultiHeadAttention::flash_attention(const Matrix& Q, const Matrix& K, con
 
 Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& attention_mask,
                                  const std::optional<KVCache>& kv_cache) {
+    SCOPE_LOG();
     size_t batch_size = input.rows();
     size_t seq_length = batch_size;  // Each row represents a token in the sequence
         
@@ -424,6 +428,7 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
 }
 
 Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matrix& K, const AttentionMask& mask) {
+    SCOPE_LOG();
     // For attention scores, we want (seq_len x seq_len)
     Matrix scores(Q.rows(), K.rows());  // Changed from K.cols() to K.rows()
     #ifdef USE_CUDA
@@ -474,6 +479,7 @@ Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matri
 }
 
 Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& input, const Matrix& target) {
+    SCOPE_LOG();
     try {
         std::cout << "\n=== MultiHeadAttention::backward START ===" << std::endl;
         
@@ -1001,6 +1007,7 @@ Tensor MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
 }
 
 void MultiHeadAttention::save(std::ostream& os) const {
+    SCOPE_LOG();
     std::cout << "\n=== MultiHeadAttention::save START ===" << std::endl;
 
     // Save dimensions and configuration
@@ -1038,6 +1045,7 @@ void MultiHeadAttention::save(std::ostream& os) const {
 }
 
 std::unique_ptr<MultiHeadAttention> MultiHeadAttention::load(std::istream& is, const TransformerConfig& config) {
+    SCOPE_LOG();
     std::cout << "\n=== MultiHeadAttention::load START ===" << std::endl;
 
     // Read configuration
@@ -1089,5 +1097,10 @@ std::unique_ptr<MultiHeadAttention> MultiHeadAttention::load(std::istream& is, c
 
     std::cout << "=== MultiHeadAttention::load END ===\n" << std::endl;
     return attention;
+}
+
+void MultiHeadAttention::update_parameters(float learning_rate) {
+    SCOPE_LOG();
+    // ... rest of update_parameters
 }
 

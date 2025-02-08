@@ -7,6 +7,7 @@
 #include "../include/cuda/matrix_ops.cuh"
 #include "../include/cuda/memory_manager.cuh"
 #endif
+#include "../include/scope_logger.hpp"
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -19,7 +20,7 @@
 
 FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dropout)
     : dropout_prob(dropout), intermediate_cache(1, intermediate_size) {
-    
+    SCOPE_LOG();
     // Initialize matrices with correct dimensions
     params_.ff1_weights = Matrix(hidden_size, intermediate_size);
     params_.ff2_weights = Matrix(intermediate_size, hidden_size);
@@ -89,6 +90,7 @@ FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dro
 }
 
 Matrix FeedForward::forward(const Matrix& input) {
+    SCOPE_LOG();
     try {
         #ifdef USE_CUDA
         // First layer - matrix multiplication using CUDA
@@ -197,6 +199,7 @@ std::unique_ptr<FeedForward> FeedForward::load(std::istream& is) {
 }
 
 Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
+    SCOPE_LOG();
     try {
         #ifdef USE_CUDA
         // Second layer backward
@@ -272,6 +275,7 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
 }
 
 void FeedForward::update_parameters(const Matrix& grad, float learning_rate) {
+    SCOPE_LOG();
     const float max_grad_norm = 5.0f;  // Match global clipping threshold
     
     // Compute gradient norms

@@ -280,6 +280,9 @@ class MultiHeadAttention {
 
     void set_training(bool mode) { training = mode; }
 
+    // Add the missing update_parameters declaration
+    void update_parameters(float learning_rate);
+
   private:
     Parameters params_;
     Gradients grads_;

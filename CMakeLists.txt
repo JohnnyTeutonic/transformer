@@ -104,6 +104,7 @@ set(CORE_SOURCES
     src/lm_head.cpp
     src/hyperparameter_tuner.cpp
     src/count_vocabulary.cpp
+    src/scope_logger.cpp
     # Add training components
     src/training/loss_tracker.cpp
     src/training/gradient_manager.cpp
@@ -192,18 +193,8 @@ endif()
 # Create single executable
 add_executable(transformer src/main.cpp)
 
-# Create test tokenizer executable
-add_executable(test_tokenizer src/test_tokenizer.cpp)
-
 # Link everything to the executable
 target_link_libraries(transformer
-    PRIVATE
-    transformer_lib
-    nlohmann_json::nlohmann_json
-)
-
-# Link test tokenizer
-target_link_libraries(test_tokenizer
     PRIVATE
     transformer_lib
     nlohmann_json::nlohmann_json

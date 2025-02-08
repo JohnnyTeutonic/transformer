@@ -1,4 +1,5 @@
 #include "../include/main.hpp"
+#include "../include/scope_logger.hpp"  // Add scope logger header
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <random>
@@ -161,6 +162,10 @@ void test_model_predictions(Transformer& transformer, std::shared_ptr<TiktokenTo
 // Add debug logging to main function
 int main(int argc, char* argv[]) {
     try {
+        // Initialize scope logger first
+        ScopeLogger::init("../build");
+        SCOPE_LOG();  // Log main function scope
+
         debug::init_logging();
         debug::log_message("Starting transformer application", "INFO");
         
@@ -286,8 +291,6 @@ int main(int argc, char* argv[]) {
         all_data.insert(all_data.end(), training_pairs.begin(), training_pairs.end());
         all_data.insert(all_data.end(), validation_data.begin(), validation_data.end());
         
-        // Remove premature baseline cross-validation
-        // We'll do validation during training instead
         
         // Update any hardcoded token references
         int pad_id = 0;    // UNK_ID
@@ -300,7 +303,7 @@ int main(int argc, char* argv[]) {
         std::cout << "eos_id: " << eos_id << std::endl;
         int mask_id = 0;   // We don't use these in our simple tokenizer
         std::cout << "mask_id: " << mask_id << std::endl;
-        std::cout << "epochs: " << config.num_epochs << std::endl;
+        std::cout << "epochs: " << config.training.num_epochs << std::endl;
 
         float best_cv_loss = std::numeric_limits<float>::max();
         size_t epochs_without_improvement = 0;
