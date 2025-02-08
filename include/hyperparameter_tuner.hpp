@@ -9,12 +9,12 @@
 
 // Structure to hold hyperparameter ranges
 struct HyperparameterRanges {
-    // Architecture ranges
-    std::vector<size_t> num_layers_range{2, 4, 6, 8};
-    std::vector<size_t> num_heads_range{4, 8, 12, 16};
-    std::vector<size_t> hidden_size_range{256, 512, 768, 1024};
-    std::vector<size_t> intermediate_size_range{512, 1024, 2048, 4096};
-    std::vector<size_t> head_dim_range{32, 64, 96, 128};
+    // Architecture ranges - ensure valid combinations
+    std::vector<size_t> num_heads_range{8, 16};  // Only powers of 2
+    std::vector<size_t> head_dim_range{64, 128};  // Only powers of 2
+    // hidden_size will be computed as num_heads * head_dim
+    std::vector<size_t> num_layers_range{4, 8, 12};
+    std::vector<size_t> intermediate_size_range{2048, 4096};  // 2x or 4x hidden_size
     
     // Learning rate parameters
     std::vector<float> initial_lr_range{1e-5f, 5e-5f, 1e-4f, 5e-4f};

@@ -20,15 +20,15 @@ constexpr size_t MIN_ACTIVE_TOKENS = 1000;  // Reasonable default value
 
 LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
     : hidden_size_(hidden_size), vocab_size_(vocab_size), 
-      projection(hidden_size, vocab_size),  // Changed: [hidden_size x vocab_size]
+      projection(hidden_size, vocab_size),  // [hidden_size x vocab_size]
       bias(vocab_size, 0.0f),
       token_frequencies(vocab_size, 0.0f),
       pruning_threshold(1e-6f),
       active_tokens(vocab_size, 1),
       training_steps(0),
       is_training_(false),
-      m_proj(hidden_size, vocab_size, 0.0f),  // Changed: match new projection dimensions
-      v_proj(hidden_size, vocab_size, 0.0f),  // Changed: match new projection dimensions
+      m_proj(hidden_size, vocab_size, 0.0f),  // [hidden_size x vocab_size]
+      v_proj(hidden_size, vocab_size, 0.0f),  // [hidden_size x vocab_size]
       m_bias(vocab_size, 0.0f),
       v_bias(vocab_size, 0.0f),
       t(0),
@@ -39,6 +39,10 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
       min_lr(0.0001f),
       max_lr(0.01f),
       lr_decay(0.99f) {
+    
+    std::cout << "Initializing LM head with:"
+              << "\n- Hidden size: " << hidden_size
+              << "\n- Vocabulary size: " << vocab_size << std::endl;
     
     // Initialize projection matrix with Xavier/Glorot initialization
     float scale = std::sqrt(2.0f / (hidden_size + vocab_size));
@@ -52,7 +56,6 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
             projection(i, j) = dist(gen);
         }
     }
-    
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {

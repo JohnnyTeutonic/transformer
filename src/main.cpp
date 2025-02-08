@@ -336,15 +336,9 @@ int main(int argc, char* argv[]) {
         all_data.insert(all_data.end(), training_pairs.begin(), training_pairs.end());
         all_data.insert(all_data.end(), validation_data.begin(), validation_data.end());
         
-        // Perform initial cross-validation to establish baseline
-        std::cout << "\n=== Performing Initial Baseline Cross-Validation ===" << std::endl;
-        float initial_cv_loss = Utils::perform_cross_validation(
-            transformer, 
-            *tokenizer, 
-            all_data
-        );
-        std::cout << "=== Initial baseline cross-validation loss: " << initial_cv_loss << " ===" << std::endl;
-
+        // Remove premature baseline cross-validation
+        // We'll do validation during training instead
+        
         // Update any hardcoded token references
         int pad_id = 0;    // UNK_ID
         std::cout << "pad_id: " << pad_id << std::endl;
@@ -358,7 +352,7 @@ int main(int argc, char* argv[]) {
         std::cout << "mask_id: " << mask_id << std::endl;
         std::cout << "epochs: " << config.num_epochs << std::endl;
 
-        float best_cv_loss = initial_cv_loss;
+        float best_cv_loss = std::numeric_limits<float>::max();
         size_t epochs_without_improvement = 0;
         const size_t PATIENCE = 3;
 
@@ -414,12 +408,18 @@ int main(int argc, char* argv[]) {
         size_t total_batches = (training_pairs.size() + config.training.batch_size - 1) / config.training.batch_size;
 
         // Training loop
+        auto training_start = std::chrono::high_resolution_clock::now();
+        size_t total_steps = config.training.num_epochs * total_batches;
+        
         for (size_t epoch = 0; epoch < config.training.num_epochs; epoch++) {
+            auto epoch_start = std::chrono::high_resolution_clock::now();
             std::cout << "\nEpoch " << epoch + 1 << "/" << config.training.num_epochs << std::endl;
             float epoch_loss = 0.0f;
             
             // Process each batch
             for (size_t batch = 0; batch < total_batches; batch++) {
+                auto batch_start = std::chrono::high_resolution_clock::now();
+                
                 size_t start_idx = batch * config.training.batch_size;
                 size_t end_idx = std::min(start_idx + config.training.batch_size, training_pairs.size());
                 size_t current_batch_size = end_idx - start_idx;
@@ -450,31 +450,76 @@ int main(int argc, char* argv[]) {
 
                 if (!batch_valid) continue;
 
-                // Forward pass and compute loss
+                // Forward pass
                 Matrix logits = transformer.forward(input_batch[0], "", *tokenizer);
+
+                // Create target distribution
+                Matrix target_distribution = Utils::create_batch_target_distribution(
+                    target_batch, *tokenizer, tokenizer->vocab_size(), input_batch[0].size());
+
+                // Compute loss and gradients
                 float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
+                Matrix loss_gradients = Utils::compute_loss_gradient(logits, target_distribution);
+
+                // Calculate learning rate
+                float current_lr;
+                if (global_step < warmup_steps) {
+                    current_lr = initial_lr + (peak_lr - initial_lr) * (float)global_step / warmup_steps;
+                } else {
+                    float steps_after_warmup = global_step - warmup_steps;
+                    float decay = std::pow(decay_factor, steps_after_warmup / 1000.0f);
+                    current_lr = peak_lr * decay;
+                }
+                current_lr = std::max(current_lr, initial_lr);
 
                 // Update parameters
                 transformer.backward(loss_gradients, input_batch[0], current_lr);
                 transformer.update_parameters(current_lr);
 
+                // Update tracking variables
+                epoch_loss += batch_loss;
+                global_step++;
+
+                // Calculate timing and progress
+                auto batch_end = std::chrono::high_resolution_clock::now();
+                auto batch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(batch_end - batch_start);
+                auto total_duration = std::chrono::duration_cast<std::chrono::minutes>(batch_end - training_start);
+                float progress = (float)(epoch * total_batches + batch + 1) / total_steps;
+                
                 // Print progress every 10 batches
                 if ((batch + 1) % 10 == 0) {
-                    std::cout << "\rBatch " << batch + 1 << "/" << total_batches 
-                              << " (Loss: " << batch_loss << ")" << std::flush;
+                    std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << (progress * 100) << "% "
+                              << "Batch " << batch + 1 << "/" << total_batches 
+                              << " (Loss: " << batch_loss 
+                              << ", LR: " << current_lr 
+                              << ", Time: " << total_duration.count() << "m"
+                              << ", Batch time: " << batch_duration.count() << "ms)" 
+                              << std::flush;
                 }
             }
 
+            // Calculate epoch timing
+            auto epoch_end = std::chrono::high_resolution_clock::now();
+            auto epoch_duration = std::chrono::duration_cast<std::chrono::seconds>(epoch_end - epoch_start);
+            
             std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.training.num_epochs
-                      << " (Loss: " << epoch_loss / total_batches << ")" << std::endl;
+                      << " (Loss: " << epoch_loss / total_batches 
+                      << ", Time: " << epoch_duration.count() << "s)" << std::endl;
 
-            // Run validation and make predictions only at end of epoch
+            // Run quick validation check at end of epoch
             if ((epoch + 1) % 2 == 0) {
                 std::cout << "\nRunning validation..." << std::endl;
+                auto val_start = std::chrono::high_resolution_clock::now();
+                
                 float validation_loss = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
                 
-                // Make a few test predictions
-                std::cout << "\nTest predictions:" << std::endl;
+                auto val_end = std::chrono::high_resolution_clock::now();
+                auto val_duration = std::chrono::duration_cast<std::chrono::seconds>(val_end - val_start);
+                
+                std::cout << "Validation complete (Loss: " << validation_loss 
+                          << ", Time: " << val_duration.count() << "s)" << std::endl;
+                
+                // Make a few quick test predictions
                 Utils::generate_predictions(transformer, "I go to the", tokenizer.get());
                 Utils::generate_predictions(transformer, "The weather is", tokenizer.get());
             }

@@ -128,20 +128,20 @@ T HyperparameterUtils::sample_from_range(const std::vector<T>& range, std::mt199
 HyperparameterConfig HyperparameterTuner::sample_random_config() {
     HyperparameterConfig config;
     
-    // Sample architecture parameters
-    config.num_layers = HyperparameterUtils::sample_from_range(ranges_.num_layers_range, rng_);
+    // Sample architecture parameters in the correct order
     config.num_heads = HyperparameterUtils::sample_from_range(ranges_.num_heads_range, rng_);
-    config.hidden_size = HyperparameterUtils::sample_from_range(ranges_.hidden_size_range, rng_);
-    config.intermediate_size = HyperparameterUtils::sample_from_range(ranges_.intermediate_size_range, rng_);
     config.head_dim = HyperparameterUtils::sample_from_range(ranges_.head_dim_range, rng_);
+    config.hidden_size = config.num_heads * config.head_dim;  // Compute hidden_size
     
-    // Sample learning rate parameters
+    config.num_layers = HyperparameterUtils::sample_from_range(ranges_.num_layers_range, rng_);
+    config.intermediate_size = config.hidden_size * (rng_() % 2 ? 2 : 4);  // 2x or 4x hidden_size
+    
+    // Sample other parameters
     config.initial_lr = HyperparameterUtils::sample_from_range(ranges_.initial_lr_range, rng_);
     config.peak_lr = HyperparameterUtils::sample_from_range(ranges_.peak_lr_range, rng_);
     config.warmup_steps = HyperparameterUtils::sample_from_range(ranges_.warmup_steps_range, rng_);
     config.decay_factor = HyperparameterUtils::sample_from_range(ranges_.decay_factor_range, rng_);
     
-    // Sample training parameters
     config.dropout_rate = HyperparameterUtils::sample_from_range(ranges_.dropout_rate_range, rng_);
     config.weight_decay = HyperparameterUtils::sample_from_range(ranges_.weight_decay_range, rng_);
     config.early_stopping_patience = HyperparameterUtils::sample_from_range(ranges_.early_stopping_patience_range, rng_);
@@ -149,7 +149,6 @@ HyperparameterConfig HyperparameterTuner::sample_random_config() {
     config.gradient_clip_threshold = HyperparameterUtils::sample_from_range(ranges_.gradient_clip_threshold_range, rng_);
     config.layer_norm_epsilon = HyperparameterUtils::sample_from_range(ranges_.layer_norm_epsilon_range, rng_);
     
-    // Sample memory and optimization parameters
     config.memory_pool_size = HyperparameterUtils::sample_from_range(ranges_.memory_pool_size_range, rng_);
     config.gradient_accumulation_steps = HyperparameterUtils::sample_from_range(ranges_.gradient_accumulation_steps_range, rng_);
     
