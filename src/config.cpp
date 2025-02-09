@@ -63,6 +63,8 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
         nlohmann::json j;
         file >> j;
 
+        std::cout << "\nLoading configuration from: " << config_path << std::endl;
+
         // Load model parameters
         if (j.contains("model")) {
             const auto& model = j["model"];
@@ -85,27 +87,58 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
 
         // Load training parameters
         if (j.contains("training")) {
-            const auto& training = j["training"];
-            batch_size = training.value("batch_size", batch_size);
-            num_epochs = training.value("num_epochs", num_epochs);
-            dropout_rate = training.value("dropout_rate", dropout_rate);
-            weight_decay = training.value("weight_decay", weight_decay);
-        }
+            const auto& training_json = j["training"];
+            
+            // Debug output before loading
+            std::cout << "\nBefore loading training config:" << std::endl;
+            std::cout << "- batch_size: " << training.batch_size << std::endl;
+            std::cout << "- num_epochs: " << training.num_epochs << std::endl;
+            std::cout << "- tuning.enabled: " << std::boolalpha << training.tuning.enabled << std::endl;
+            
+            training.batch_size = training_json.value("batch_size", training.batch_size);
+            training.num_epochs = training_json.value("num_epochs", training.num_epochs);
+            training.dropout_rate = training_json.value("dropout_rate", training.dropout_rate);
+            training.weight_decay = training_json.value("weight_decay", training.weight_decay);
 
-        // Load learning rate parameters
-        if (j.contains("learning_rate")) {
-            const auto& lr = j["learning_rate"];
-            initial_lr = lr.value("initial_lr", initial_lr);
-            peak_lr = lr.value("peak_lr", peak_lr);
-            warmup_steps = lr.value("warmup_steps", warmup_steps);
-            decay_factor = lr.value("decay_factor", decay_factor);
-        }
+            // Load tuning configuration
+            if (training_json.contains("tuning")) {
+                const auto& tuning_json = training_json["tuning"];
+                std::cout << "\nFound tuning configuration in JSON:" << std::endl;
+                std::cout << "JSON tuning.enabled = " << std::boolalpha 
+                          << tuning_json.value("enabled", true) << std::endl;
+                
+                training.tuning.enabled = tuning_json.value("enabled", training.tuning.enabled);
+                training.tuning.num_trials = tuning_json.value("num_trials", training.tuning.num_trials);
+                training.tuning.evaluation_steps = tuning_json.value("evaluation_steps", training.tuning.evaluation_steps);
+                
+                std::cout << "\nAfter loading tuning config:" << std::endl;
+                std::cout << "- enabled: " << std::boolalpha << training.tuning.enabled << std::endl;
+                std::cout << "- num_trials: " << training.tuning.num_trials << std::endl;
+                std::cout << "- evaluation_steps: " << training.tuning.evaluation_steps << std::endl;
+            } else {
+                std::cout << "No tuning configuration found in JSON, using defaults" << std::endl;
+            }
 
-        // Load early stopping parameters
-        if (j.contains("early_stopping")) {
-            const auto& es = j["early_stopping"];
-            early_stopping_patience = es.value("patience", early_stopping_patience);
-            early_stopping_threshold = es.value("threshold", early_stopping_threshold);
+            // Load cross validation configuration
+            if (training_json.contains("cross_validation")) {
+                const auto& cv = training_json["cross_validation"];
+                training.cross_validation.num_folds = cv.value("num_folds", training.cross_validation.num_folds);
+                training.cross_validation.validation_frequency = cv.value("validation_frequency", training.cross_validation.validation_frequency);
+                training.cross_validation.early_stopping_threshold = cv.value("early_stopping_threshold", training.cross_validation.early_stopping_threshold);
+                training.cross_validation.early_stopping_patience = cv.value("early_stopping_patience", training.cross_validation.early_stopping_patience);
+                training.cross_validation.num_epochs = cv.value("num_epochs", training.cross_validation.num_epochs);
+            }
+
+            // Load learning rate configuration
+            if (training_json.contains("learning_rate")) {
+                const auto& lr = training_json["learning_rate"];
+                training.learning_rate.initial_lr = lr.value("initial_lr", training.learning_rate.initial_lr);
+                training.learning_rate.peak_lr = lr.value("peak_lr", training.learning_rate.peak_lr);
+                training.learning_rate.warmup_steps = lr.value("warmup_steps", training.learning_rate.warmup_steps);
+                training.learning_rate.decay_factor = lr.value("decay_factor", training.learning_rate.decay_factor);
+                training.learning_rate.decay_steps = lr.value("decay_steps", training.learning_rate.decay_steps);
+                training.learning_rate.min_lr = lr.value("min_lr", training.learning_rate.min_lr);
+            }
         }
 
         // Load attention parameters

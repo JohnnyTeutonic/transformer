@@ -179,8 +179,19 @@ int main(int argc, char* argv[]) {
         std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
 
         // Now load the updated config for transformer initialization
-        TransformerConfig config = Utils::load_config(exe_path.string() + "/config/transformer_config.json");
+        TransformerConfig config;
+        std::string config_path = exe_path.string() + "/config/transformer_config.json";
+        std::cout << "Loading configuration from: " << config_path << std::endl;
+        config.load_from_json(config_path);
         
+        // Print loaded configuration for verification
+        std::cout << "\nLoaded configuration:" << std::endl;
+        std::cout << "- Training:" << std::endl;
+        std::cout << "  - Batch size: " << config.training.batch_size << std::endl;
+        std::cout << "  - Num epochs: " << config.training.num_epochs << std::endl;
+        std::cout << "  - Tuning enabled: " << std::boolalpha << config.training.tuning.enabled << std::endl;
+        std::cout << "  - Tuning trials: " << config.training.tuning.num_trials << std::endl;
+
         // Initialize random seed using hardware entropy
         std::random_device rd;
         std::mt19937 gen(rd());
@@ -297,6 +308,7 @@ int main(int argc, char* argv[]) {
 
         // Only enter tuning stage if tuning is enabled
         if (config.training.tuning.enabled) {
+            std::cout << "Entering tuning stage" << std::endl;
             debug::progress_state.current_stage = debug::ProgressState::Stage::TUNING;
             
             // Initialize hyperparameter tuner
