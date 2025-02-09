@@ -4,6 +4,7 @@
 #include <fstream>
 #include <mutex>
 #include "matrix.hpp"
+#include "scope_logger.hpp"  // Include the scope logger header
 
 namespace debug {
     extern bool verbose_logging;
@@ -13,43 +14,6 @@ namespace debug {
     extern const std::string progress_file;
     extern std::mutex log_mutex;
     extern std::ofstream progress_log;
-
-    class ScopeLogger {
-    private:
-        static std::mutex log_mutex;
-        static thread_local int indent_level;
-        static std::string log_path;
-        std::string scope_name;
-        std::string file_name;
-        int line_number;
-        bool is_enabled;
-
-    public:
-        // Default constructor for disabled case
-        ScopeLogger() : scope_name(""), file_name(""), line_number(0), is_enabled(false) {}
-
-        // Constructor for enabled case
-        ScopeLogger(const std::string& scope, const std::string& file, int line) 
-            : scope_name(scope), file_name(file), line_number(line), is_enabled(true) {
-            if (scope_logging_enabled) {
-                std::lock_guard<std::mutex> lock(log_mutex);
-                log_entry("Entering");
-                indent_level++;
-            }
-        }
-
-        // Destructor
-        ~ScopeLogger() {
-            if (scope_logging_enabled && is_enabled) {
-                std::lock_guard<std::mutex> lock(log_mutex);
-                indent_level--;
-                log_entry("Exiting");
-            }
-        }
-
-    private:
-        void log_entry(const std::string& action);
-    };
 
     // Track current progress state
     struct ProgressState {
@@ -95,9 +59,9 @@ namespace debug {
         void update_inference(size_t tokens, size_t total, float avg_time);
         void reset();
         std::string get_stage_string() const;
+        void update_progress_file();
 
     private:
-        void update_progress_file();
         void write_tuning_progress();
         void write_training_progress();
         void write_inference_progress();
@@ -109,7 +73,6 @@ namespace debug {
     // Function declarations
     void init_logging();
     void enable_scope_logging(bool enable);
-    void update_progress_file();
     void log_message(const std::string& message, const std::string& level = "INFO");
     void log_vector(const std::vector<int>& vec, const std::string& name);
     void log_matrix(const Matrix& mat, const std::string& label);
