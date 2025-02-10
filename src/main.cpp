@@ -354,6 +354,9 @@ int main(int argc, char* argv[]) {
         float current_lr = initial_lr;
         size_t global_step = 0;  // Initialize global step counter
 
+        // Initialize training monitor
+        auto training_monitor = std::make_unique<TrainingMonitor>();
+
         // Training loop
         auto training_start = std::chrono::high_resolution_clock::now();
         size_t total_steps = config.training.num_epochs * total_iterations;
@@ -373,13 +376,6 @@ int main(int argc, char* argv[]) {
                 size_t start_idx = iter * config.training.samples_per_iteration;
                 size_t end_idx = std::min(start_idx + config.training.samples_per_iteration, training_pairs.size());
                 size_t samples_this_iteration = end_idx - start_idx;
-
-                // Update progress state
-                debug::progress_state.update_training(
-                    epoch, config.training.num_epochs,
-                    iter, total_iterations,
-                    epoch_loss / (iter + 1)
-                );
 
                 float iteration_loss = 0.0f;
 
@@ -421,6 +417,28 @@ int main(int argc, char* argv[]) {
                 // Average loss over samples in this iteration
                 iteration_loss /= samples_this_iteration;
                 epoch_loss += iteration_loss;
+
+                // Update training monitor with metrics
+                RunningStatistics grad_stats;
+                grad_stats.mean = iteration_loss;  // Use loss as a proxy for gradient statistics
+                grad_stats.variance = 0.0f;        // Initialize to 0 for now
+
+                TrainingMetrics metrics(
+                    iteration_loss,           // Current loss
+                    Matrix(1, 1, iteration_loss),  // Minimal valid matrix with the loss value
+                    epoch,                    // Current epoch
+                    iter,                     // Current step
+                    0.0f,                    // Let the monitor compute the trend
+                    grad_stats               // Basic statistics
+                );
+                training_monitor->log_metrics(metrics);
+
+                // Update progress state
+                debug::progress_state.update_training(
+                    epoch, config.training.num_epochs,
+                    iter, total_iterations,
+                    epoch_loss / (iter + 1)
+                );
 
                 // Calculate timing and progress
                 auto iteration_end = std::chrono::high_resolution_clock::now();

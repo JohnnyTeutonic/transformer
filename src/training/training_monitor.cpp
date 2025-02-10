@@ -3,6 +3,15 @@
 void TrainingMonitor::log_metrics(const TrainingMetrics& metrics) {
     update_running_statistics(metrics);
     detect_anomalies(metrics);
+    
+    // Update loss tracker and visualizer
+    loss_tracker.add_loss(metrics.loss);
+    visualizer->add_loss(
+        metrics.loss,               // Raw loss
+        loss_tracker.get_recent_average(),  // Smoothed loss
+        loss_tracker.get_trend()    // Trend
+    );
+    
     log_to_tensorboard(metrics);
 }
 
