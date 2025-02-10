@@ -153,6 +153,24 @@ public:
     const Parameters& parameters() const { return params_; }
     const Gradients& param_gradients() const { return grads_; }
 
+    void update_parameters(float learning_rate) {
+        // Update gamma (scale parameter)
+        float* gamma_data = params_.gamma.data();
+        float* gamma_grad_data = grads_.gamma_grad.data();
+        for (size_t i = 0; i < hidden_size_; ++i) {
+            gamma_data[i] -= learning_rate * gamma_grad_data[i];
+            gamma_grad_data[i] = 0.0f;  // Reset gradient
+        }
+
+        // Update beta (shift parameter)
+        float* beta_data = params_.beta.data();
+        float* beta_grad_data = grads_.beta_grad.data();
+        for (size_t i = 0; i < hidden_size_; ++i) {
+            beta_data[i] -= learning_rate * beta_grad_data[i];
+            beta_grad_data[i] = 0.0f;  // Reset gradient
+        }
+    }
+
 private:
     size_t hidden_size_;
     float eps_;

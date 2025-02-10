@@ -2,6 +2,8 @@
 
 #include "components.hpp"
 #include "config.hpp"  // Add this include for TransformerConfig
+#include "training/dynamic_loss_scaler.hpp"  // Include the proper loss scaler header
+
 #ifdef USE_CUDA
 #include <cuda_fp16.h>
 using half_type = __half;  ///< CUDA 16-bit floating point type

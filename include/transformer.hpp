@@ -199,6 +199,21 @@ class TransformerLayer {
         }
         return *this;
     }
+
+    void update_parameters(float learning_rate) {
+        if (self_attention) {
+            self_attention->update_parameters(learning_rate);
+        }
+        if (feed_forward) {
+            feed_forward->update_parameters(learning_rate);
+        }
+        if (attention_ln) {
+            attention_ln->update_parameters(learning_rate);
+        }
+        if (ffn_ln) {
+            ffn_ln->update_parameters(learning_rate);
+        }
+    }
 };
 
 /**

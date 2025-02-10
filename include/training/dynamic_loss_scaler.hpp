@@ -12,6 +12,13 @@
  * the scaling factor based on the presence of inf/nan values.
  */
 class DynamicLossScaler {
+private:
+    float scale = 1.0f;
+    int stable_steps = 0;
+    const int inc_step = 2000;
+    const float inc_factor = 2.0f;
+    const float dec_factor = 0.5f;
+
 public:
     DynamicLossScaler(float initial_scale = 65536.0f,
                       float scale_factor = 2.0f,

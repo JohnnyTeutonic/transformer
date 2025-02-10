@@ -127,7 +127,10 @@ struct TransformerConfig {
     float epsilon = 1e-8f;
 
     struct TrainingConfig {
-        size_t batch_size = 16;
+        // Number of samples to process in each training iteration
+        // Note: This is not true batch processing, but rather controls
+        // how many samples we process sequentially before updating parameters
+        size_t samples_per_iteration = 16;  // renamed from batch_size
         size_t num_epochs = 3;
         float dropout_rate = 0.1f;
         float weight_decay = 0.01f;
@@ -164,12 +167,12 @@ struct TransformerConfig {
      * @param hidden_size Dimension of hidden states (default: 768)
      * @param num_layers Number of transformer layers (default: 12)
      * @param num_heads Number of attention heads (default: 12)
-     * @param batch_size Training batch size (default: 32)
+     * @param samples_per_iteration Number of samples to process per iteration (default: 32)
      * @param num_epochs Number of training epochs (default: 10)
      */
     TransformerConfig(size_t max_seq_length = 512,
                      size_t hidden_size = 768, size_t num_layers = 12, size_t num_heads = 12,
-                     size_t batch_size = 32, size_t num_epochs = 10);
+                     size_t samples_per_iteration = 32, size_t num_epochs = 10);
 
     /**
      * @brief Compares two configurations for inequality.

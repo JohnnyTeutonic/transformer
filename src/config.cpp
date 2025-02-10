@@ -5,27 +5,18 @@
 #include <nlohmann/json.hpp>
 
 TransformerConfig::TransformerConfig(size_t max_seq_length_, size_t hidden_size_,
-                                   size_t num_layers_, size_t num_heads_, size_t batch_size_,
+                                   size_t num_layers_, size_t num_heads_, size_t samples_per_iteration_,
                                    size_t num_epochs_)
     : hidden_size(hidden_size_),
       num_heads(num_heads_),
       num_layers(num_layers_),
       head_dim(hidden_size_ / num_heads_),
       intermediate_size(4 * hidden_size_),
-      batch_size(batch_size_),
-      num_epochs(num_epochs_),
-      max_seq_length(max_seq_length_),
-      dropout_rate(0.1f),
-      weight_decay(0.01f),
-      memory_pool_size(1024),
-      use_gradient_checkpointing(false),
-      use_fp16(false),
-      use_flash_attention(false),
-      use_rope(true),
-      use_sliding_window(false),
-      window_size(512),
-      use_gqa(false),
-      num_kv_heads(num_heads_ / 2) {
+      max_seq_length(max_seq_length_) {
+    
+    // Initialize training config
+    training.samples_per_iteration = samples_per_iteration_;
+    training.num_epochs = num_epochs_;
     
     if (hidden_size % num_heads != 0) {
         throw std::invalid_argument("Hidden size must be divisible by number of heads");
@@ -39,8 +30,8 @@ bool TransformerConfig::operator!=(const TransformerConfig& other) const {
            num_heads != other.num_heads ||
            head_dim != other.head_dim ||
            intermediate_size != other.intermediate_size ||
-           batch_size != other.batch_size ||
-           num_epochs != other.num_epochs ||
+           training.samples_per_iteration != other.training.samples_per_iteration ||
+           training.num_epochs != other.training.num_epochs ||
            dropout_rate != other.dropout_rate ||
            weight_decay != other.weight_decay ||
            use_gradient_checkpointing != other.use_gradient_checkpointing ||
@@ -91,11 +82,11 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
             
             // Debug output before loading
             std::cout << "\nBefore loading training config:" << std::endl;
-            std::cout << "- batch_size: " << training.batch_size << std::endl;
+            std::cout << "- samples_per_iteration: " << training.samples_per_iteration << std::endl;
             std::cout << "- num_epochs: " << training.num_epochs << std::endl;
             std::cout << "- tuning.enabled: " << std::boolalpha << training.tuning.enabled << std::endl;
             
-            training.batch_size = training_json.value("batch_size", training.batch_size);
+            training.samples_per_iteration = training_json.value("samples_per_iteration", training.samples_per_iteration);
             training.num_epochs = training_json.value("num_epochs", training.num_epochs);
             training.dropout_rate = training_json.value("dropout_rate", training.dropout_rate);
             training.weight_decay = training_json.value("weight_decay", training.weight_decay);

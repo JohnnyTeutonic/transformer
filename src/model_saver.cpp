@@ -222,7 +222,7 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
             {"intermediate_size", config.intermediate_size},
             {"max_seq_length", config.max_seq_length},
         };
-        checkpoint_meta["batch_size"] = config.batch_size;
+        checkpoint_meta["samples_per_iteration"] = config.training.samples_per_iteration;
 
         std::string meta_str = checkpoint_meta.dump();
         size_t meta_size = meta_str.size();

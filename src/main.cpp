@@ -187,7 +187,7 @@ int main(int argc, char* argv[]) {
         // Print loaded configuration for verification
         std::cout << "\nLoaded configuration:" << std::endl;
         std::cout << "- Training:" << std::endl;
-        std::cout << "  - Batch size: " << config.training.batch_size << std::endl;
+        std::cout << "  - Samples per iteration: " << config.training.samples_per_iteration << std::endl;
         std::cout << "  - Num epochs: " << config.training.num_epochs << std::endl;
         std::cout << "  - Tuning enabled: " << std::boolalpha << config.training.tuning.enabled << std::endl;
         std::cout << "  - Tuning trials: " << config.training.tuning.num_trials << std::endl;
@@ -277,7 +277,7 @@ int main(int argc, char* argv[]) {
                             size_t end_pos = epoch_str.find_first_not_of("0123456789");
                             epoch_str = epoch_str.substr(0, end_pos);
                             global_step =
-                                std::stoul(epoch_str) * (training_pairs.size() / config.batch_size);
+                                std::stoul(epoch_str) * (training_pairs.size() / config.training.samples_per_iteration);
                         }
 
                         std::cout << "Successfully loaded checkpoint. Resuming from global step: "
@@ -334,9 +334,14 @@ int main(int argc, char* argv[]) {
         debug::progress_state.current_stage = debug::ProgressState::Stage::TRAINING;
         std::cout << "\nStarting main training..." << std::endl;
 
-        // After loading config but before training loop
+        // Calculate total iterations needed
+        size_t total_iterations = (training_pairs.size() + config.training.samples_per_iteration - 1) 
+                                / config.training.samples_per_iteration;
+
         std::cout << "\nStarting training with:"
-                  << "\n- Batch size: " << config.training.batch_size
+                  << "\n- Samples per iteration: " << config.training.samples_per_iteration
+                  << "\n- Total samples: " << training_pairs.size()
+                  << "\n- Total iterations: " << total_iterations
                   << "\n- Number of epochs: " << config.training.num_epochs
                   << "\n- Learning rate: " << config.training.learning_rate.initial_lr
                   << std::endl;
@@ -349,12 +354,9 @@ int main(int argc, char* argv[]) {
         float current_lr = initial_lr;
         size_t global_step = 0;  // Initialize global step counter
 
-        // Calculate total batches
-        size_t total_batches = (training_pairs.size() + config.training.batch_size - 1) / config.training.batch_size;
-
         // Training loop
         auto training_start = std::chrono::high_resolution_clock::now();
-        size_t total_steps = config.training.num_epochs * total_batches;
+        size_t total_steps = config.training.num_epochs * total_iterations;
         
         debug::progress_state.reset();  // Reset progress state at start of training
         
@@ -363,90 +365,75 @@ int main(int argc, char* argv[]) {
             std::cout << "\nEpoch " << epoch + 1 << "/" << config.training.num_epochs << std::endl;
             float epoch_loss = 0.0f;
             
-            // Process each batch
-            for (size_t batch = 0; batch < total_batches; batch++) {
-                auto batch_start = std::chrono::high_resolution_clock::now();
+            // Process samples in groups
+            for (size_t iter = 0; iter < total_iterations; iter++) {
+                auto iteration_start = std::chrono::high_resolution_clock::now();
                 
-                size_t start_idx = batch * config.training.batch_size;
-                size_t end_idx = std::min(start_idx + config.training.batch_size, training_pairs.size());
-                size_t current_batch_size = end_idx - start_idx;
+                // Calculate range of samples for this iteration
+                size_t start_idx = iter * config.training.samples_per_iteration;
+                size_t end_idx = std::min(start_idx + config.training.samples_per_iteration, training_pairs.size());
+                size_t samples_this_iteration = end_idx - start_idx;
 
-                // Update progress state for training
+                // Update progress state
                 debug::progress_state.update_training(
                     epoch, config.training.num_epochs,
-                    batch, total_batches,
-                    epoch_loss / (batch + 1)  // Current average loss
+                    iter, total_iterations,
+                    epoch_loss / (iter + 1)
                 );
 
-                // Create batch with validation
-                std::vector<std::vector<int>> input_batch;
-                std::vector<std::vector<int>> target_batch;
+                float iteration_loss = 0.0f;
 
-                // Fill and validate batch with padding
-                bool batch_valid = true;
-                for (size_t j = start_idx; j < end_idx; ++j) {
-                    const auto& [input_str, target_str] = training_pairs[j];
+                // Process each sample in this iteration sequentially
+                for (size_t sample_idx = start_idx; sample_idx < end_idx; ++sample_idx) {
+                    const auto& [input_str, target_str] = training_pairs[sample_idx];
+                    
+                    // Process single sample
                     std::string processed_input = input_str;
                     std::string processed_target = target_str;
                     tokenizer->preprocess_text(processed_input);
                     tokenizer->preprocess_text(processed_target);
+                    
                     std::vector<int> input_tokens = tokenizer->encode(processed_input);
                     std::vector<int> target_tokens = tokenizer->encode(processed_target);
                     
                     if (!Utils::validate_input_sequence(input_tokens, tokenizer->vocab_size()) ||
                         !Utils::validate_input_sequence(target_tokens, tokenizer->vocab_size())) {
-                        batch_valid = false;
-                        break;
+                        std::cout << "Skipping invalid sample " << sample_idx << std::endl;
+                        continue;
                     }
-                    input_batch.push_back(input_tokens);
-                    target_batch.push_back(target_tokens);
+
+                    // Forward pass for single sample
+                    Matrix logits = transformer.forward(input_tokens, "", *tokenizer);
+
+                    // Create target distribution for single sample
+                    Matrix target_distribution = Utils::create_batch_target_distribution(
+                        {target_tokens}, *tokenizer, tokenizer->vocab_size(), 1
+                    );
+
+                    // Compute loss for this sample
+                    float sample_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
+                    iteration_loss += sample_loss;
+
+                    // Backward pass for single sample
+                    transformer.backward(logits, target_distribution, current_lr);
                 }
 
-                if (!batch_valid) continue;
-
-                // Forward pass
-                Matrix logits = transformer.forward(input_batch[0], "", *tokenizer);
-
-                // Create target distribution
-                Matrix target_distribution = Utils::create_batch_target_distribution(
-                    target_batch, *tokenizer, tokenizer->vocab_size(), input_batch[0].size());
-
-                // Compute loss and gradients
-                float batch_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
-                Matrix loss_gradients = Utils::compute_loss_gradient(logits, target_distribution);
-
-                // Calculate learning rate
-                if (global_step < warmup_steps) {
-                    current_lr = initial_lr + (peak_lr - initial_lr) * (float)global_step / warmup_steps;
-                } else {
-                    float steps_after_warmup = global_step - warmup_steps;
-                    float decay = std::pow(decay_factor, steps_after_warmup / 1000.0f);
-                    current_lr = peak_lr * decay;
-                }
-                current_lr = std::max(current_lr, initial_lr);
-
-                // Update parameters
-                transformer.backward(loss_gradients, input_batch[0], current_lr);
-                transformer.update_parameters(current_lr);
-
-                // Update tracking variables
-                epoch_loss += batch_loss;
-                global_step++;
+                // Average loss over samples in this iteration
+                iteration_loss /= samples_this_iteration;
+                epoch_loss += iteration_loss;
 
                 // Calculate timing and progress
-                auto batch_end = std::chrono::high_resolution_clock::now();
-                auto batch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(batch_end - batch_start);
-                auto total_duration = std::chrono::duration_cast<std::chrono::minutes>(batch_end - training_start);
-                float progress = (float)(epoch * total_batches + batch + 1) / total_steps;
+                auto iteration_end = std::chrono::high_resolution_clock::now();
+                auto iteration_duration = std::chrono::duration_cast<std::chrono::milliseconds>(iteration_end - iteration_start);
                 
-                // Print progress every 10 batches
-                if ((batch + 1) % 10 == 0) {
+                // Print progress every few iterations
+                if ((iter + 1) % 5 == 0) {
+                    float progress = (float)(epoch * total_iterations + iter + 1) / (config.training.num_epochs * total_iterations);
                     std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << (progress * 100) << "% "
-                              << "Batch " << batch + 1 << "/" << total_batches 
-                              << " (Loss: " << batch_loss 
-                              << ", LR: " << current_lr 
-                              << ", Time: " << total_duration.count() << "m"
-                              << ", Batch time: " << batch_duration.count() << "ms)" 
+                              << "Iteration " << iter + 1 << "/" << total_iterations 
+                              << " (Loss: " << iteration_loss 
+                              << ", Samples: " << samples_this_iteration
+                              << ", Time: " << iteration_duration.count() << "ms)" 
                               << std::flush;
                 }
             }
@@ -456,7 +443,7 @@ int main(int argc, char* argv[]) {
             auto epoch_duration = std::chrono::duration_cast<std::chrono::seconds>(epoch_end - epoch_start);
             
             std::cout << "\nCompleted epoch " << epoch + 1 << "/" << config.training.num_epochs
-                      << " (Loss: " << epoch_loss / total_batches 
+                      << " (Loss: " << epoch_loss / total_iterations 
                       << ", Time: " << epoch_duration.count() << "s)" << std::endl;
 
             // Run quick validation check at end of epoch

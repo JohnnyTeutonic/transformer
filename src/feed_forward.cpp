@@ -202,6 +202,14 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
     SCOPE_LOG();
     try {
         #ifdef USE_CUDA
+        // Verify dimensions
+        if (grad_output.cols() != params_.ff2_weights.cols()) {
+            throw std::runtime_error(
+                "Gradient output columns (" + std::to_string(grad_output.cols()) + 
+                ") must match ff2 weights columns (" + std::to_string(params_.ff2_weights.cols()) + ")"
+            );
+        }
+
         // Second layer backward
         Matrix d_intermediate(grad_output.rows(), params_.ff2_weights.rows(), 0.0f);
         cuda::matmul(grad_output, params_.ff2_weights.transpose(), d_intermediate);
@@ -223,8 +231,23 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
         cuda::matmul(input.transpose(), d_intermediate, ff1_grad);
         grads_.ff1_grad = ff1_grad;
         
+        // Verify bias gradient dimensions
+        if (grads_.ff1_bias_grad.size() != d_intermediate.cols()) {
+            std::cout << "Resizing ff1 bias gradients from " << grads_.ff1_bias_grad.size() 
+                      << " to " << d_intermediate.cols() << std::endl;
+            grads_.ff1_bias_grad = FloatVector(d_intermediate.cols());
+        }
+        if (grads_.ff2_bias_grad.size() != grad_output.cols()) {
+            std::cout << "Resizing ff2 bias gradients from " << grads_.ff2_bias_grad.size() 
+                      << " to " << grad_output.cols() << std::endl;
+            grads_.ff2_bias_grad = FloatVector(grad_output.cols());
+        }
+        
         // Update bias gradients
+        std::cout << "Computing ff1 bias gradients..." << std::endl;
         cuda::compute_bias_gradients(grads_.ff1_bias_grad, d_intermediate);
+        
+        std::cout << "Computing ff2 bias gradients..." << std::endl;
         cuda::compute_bias_gradients(grads_.ff2_bias_grad, grad_output);
         
         return d_input;
@@ -274,71 +297,29 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
     }
 }
 
-void FeedForward::update_parameters(const Matrix& grad, float learning_rate) {
+void FeedForward::update_parameters(float learning_rate) {
     SCOPE_LOG();
-    const float max_grad_norm = 5.0f;  // Match global clipping threshold
-    
-    // Compute gradient norms
-    float grad_norm_ff1 = 0.0f;
-    #pragma omp parallel for reduction(+:grad_norm_ff1)
-    for (size_t i = 0; i < grads_.ff1_grad.size(); ++i) {
-        grad_norm_ff1 += grads_.ff1_grad.data()[i] * grads_.ff1_grad.data()[i];
-    }
-    grad_norm_ff1 = std::sqrt(grad_norm_ff1);
-    
-    float grad_norm_ff2 = 0.0f;
-    #pragma omp parallel for reduction(+:grad_norm_ff2)
-    for (size_t i = 0; i < grads_.ff2_grad.size(); ++i) {
-        grad_norm_ff2 += grads_.ff2_grad.data()[i] * grads_.ff2_grad.data()[i];
-    }
-    grad_norm_ff2 = std::sqrt(grad_norm_ff2);
-    
-    // Compute scaling factors
-    float scale_ff1 = std::min(max_grad_norm / (grad_norm_ff1 + 1e-6f), 1.0f);
-    float scale_ff2 = std::min(max_grad_norm / (grad_norm_ff2 + 1e-6f), 1.0f);
-    
-    // Debug output
-    std::cout << "FF Gradient norms - FF1: " << grad_norm_ff1 << ", FF2: " << grad_norm_ff2 << std::endl;
-    std::cout << "FF Scaling factors - FF1: " << scale_ff1 << ", FF2: " << scale_ff2 << std::endl;
-    std::cout << "Learning rate: " << learning_rate << std::endl;
-    
-    // Update first layer weights with clipping
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff1_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff1_weights.cols(); ++j) {
-            float clipped_grad = grads_.ff1_grad(i, j) * scale_ff1;
-            params_.ff1_weights(i, j) -= clipped_grad * learning_rate;
-        }
+    // Update first layer weights and biases
+    for (size_t i = 0; i < params_.ff1_weights.size(); ++i) {
+        params_.ff1_weights.data()[i] -= learning_rate * grads_.ff1_grad.data()[i];
+        grads_.ff1_grad.data()[i] = 0.0f;  // Reset gradient
     }
     
-    // Update first layer bias with clipping
-    #pragma omp parallel for
     for (size_t i = 0; i < params_.ff1_bias.size(); ++i) {
-        float clipped_grad = grads_.ff1_bias_grad[i] * scale_ff1;
-        params_.ff1_bias[i] -= clipped_grad * learning_rate;
+        params_.ff1_bias[i] -= learning_rate * grads_.ff1_bias_grad[i];
+        grads_.ff1_bias_grad[i] = 0.0f;  // Reset gradient
+    }
+
+    // Update second layer weights and biases
+    for (size_t i = 0; i < params_.ff2_weights.size(); ++i) {
+        params_.ff2_weights.data()[i] -= learning_rate * grads_.ff2_grad.data()[i];
+        grads_.ff2_grad.data()[i] = 0.0f;  // Reset gradient
     }
     
-    // Update second layer weights with clipping
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff2_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff2_weights.cols(); ++j) {
-            float clipped_grad = grads_.ff2_grad(i, j) * scale_ff2;
-            params_.ff2_weights(i, j) -= clipped_grad * learning_rate;
-        }
-    }
-    
-    // Update second layer bias with clipping
-    #pragma omp parallel for
     for (size_t i = 0; i < params_.ff2_bias.size(); ++i) {
-        float clipped_grad = grads_.ff2_bias_grad[i] * scale_ff2;
-        params_.ff2_bias[i] -= clipped_grad * learning_rate;
+        params_.ff2_bias[i] -= learning_rate * grads_.ff2_bias_grad[i];
+        grads_.ff2_bias_grad[i] = 0.0f;  // Reset gradient
     }
-    
-    // Zero out gradients after update
-    grads_.ff1_grad.fill(0.0f);
-    grads_.ff2_grad.fill(0.0f);
-    std::fill(grads_.ff1_bias_grad.begin(), grads_.ff1_bias_grad.end(), 0.0f);
-    std::fill(grads_.ff2_bias_grad.begin(), grads_.ff2_bias_grad.end(), 0.0f);
 }
 
 void FeedForward::initialize_weights() {

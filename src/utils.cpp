@@ -300,11 +300,18 @@ Matrix Utils::create_batch_target_distribution(
     size_t sequence_length) {
     
     // Create target distribution with correct dimensions
-    size_t batch_size = target_tokens.size();
-    Matrix target_distribution(batch_size, vocab_size, 0.0f);  // [batch_size x vocab_size]
+    size_t actual_batch_size = target_tokens.size();
+    
+    // Debug output
+    std::cout << "Creating target distribution:"
+              << "\n- Actual batch size: " << actual_batch_size
+              << "\n- Vocab size: " << vocab_size
+              << "\n- Sequence length: " << sequence_length << std::endl;
+    
+    Matrix target_distribution(actual_batch_size, vocab_size, 0.0f);  // [batch_size x vocab_size]
     
     // Fill target distribution
-    for (size_t i = 0; i < batch_size; i++) {
+    for (size_t i = 0; i < actual_batch_size; i++) {
         const auto& sequence = target_tokens[i];
         if (!sequence.empty()) {
             // Get the last token as target
@@ -315,6 +322,7 @@ Matrix Utils::create_batch_target_distribution(
         }
     }
     
+    std::cout << "Created target distribution with shape: " << target_distribution.shape() << std::endl;
     return target_distribution;
 }
 
@@ -346,10 +354,27 @@ float Utils::compute_batch_loss(
     }
 
     float total_loss = 0.0f;
-    const size_t batch_size = logits.rows();
+    const size_t logits_batch_size = logits.rows();
+    const size_t target_batch_size = target_distribution.rows();
+    const size_t batch_size = std::min(logits_batch_size, target_batch_size);  // Use smaller of the two
     const size_t vocab_size = logits.cols();
     const float epsilon = 1e-7f;
     const float max_loss_per_token = 100.0f;
+
+    // Validate dimensions
+    if (logits.cols() != target_distribution.cols()) {
+        throw std::runtime_error("Logits and target distribution must have same number of columns. " 
+                               "Got " + std::to_string(logits.cols()) + " and " 
+                               + std::to_string(target_distribution.cols()));
+    }
+    if (logits_batch_size != target_batch_size) {
+        std::cout << "Warning: Batch size mismatch between logits (" << logits_batch_size 
+                  << ") and target distribution (" << target_batch_size 
+                  << "). Using smaller size: " << batch_size << std::endl;
+    }
+
+    std::cout << "Batch size: " << batch_size << std::endl;
+    std::cout << "Vocab size: " << vocab_size << std::endl;
 
     // Pre-compute max logits for numerical stability
     std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
@@ -358,12 +383,11 @@ float Utils::compute_batch_loss(
             max_logits[i] = std::max(max_logits[i], logits(i, j));
         }
     }
-
+    std::cout << "Max logits: " << max_logits.size() << std::endl;
     // Compute loss with improved numerical stability
     for (size_t i = 0; i < batch_size; ++i) {
         float sequence_loss = 0.0f;
         float sum_exp = 0.0f;
-
         // First pass: compute denominator for softmax
         for (size_t j = 0; j < vocab_size; ++j) {
             float shifted_logit = logits(i, j) - max_logits[i];
@@ -372,6 +396,9 @@ float Utils::compute_batch_loss(
         sum_exp = std::max(sum_exp, epsilon);
 
         // Second pass: compute cross-entropy loss
+        std::cout << "Computing loss for target distribution " << i << std::endl;
+        std::cout << "vocab size: " << vocab_size << std::endl;
+        std::cout << "target distribution: " << target_distribution.shape() << std::endl;
         for (size_t j = 0; j < vocab_size; ++j) {
             if (target_distribution(i, j) > 0.0f) {
                 float shifted_logit = logits(i, j) - max_logits[i];
@@ -431,13 +458,13 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
         config.intermediate_size = model["intermediate_size"];
     }
 
-    // Parse training settings with cross validation
+    // Load training parameters
     if (j.contains("training")) {
-        auto& training = j["training"];
-        config.training.batch_size = training.value("batch_size", 32);
-        config.training.num_epochs = training.value("num_epochs", 3);
-        config.training.dropout_rate = training.value("dropout_rate", 0.1f);
-        config.training.weight_decay = training.value("weight_decay", 0.01f);
+        const auto& training = j["training"];
+        config.training.samples_per_iteration = training.value("samples_per_iteration", 32);
+        config.training.num_epochs = training.value("num_epochs", config.training.num_epochs);
+        config.training.dropout_rate = training.value("dropout_rate", config.training.dropout_rate);
+        config.training.weight_decay = training.value("weight_decay", config.training.weight_decay);
         
         if (training.contains("cross_validation")) {
             auto& cv = training["cross_validation"];

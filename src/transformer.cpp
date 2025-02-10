@@ -190,8 +190,10 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
               << "Nonzero attn: " << nonzero_attn << "/" 
               << (attention_output.rows() * attention_output.cols()) << "\n\n";
     
-    if (training) {
-        attention_output = attention_dropout->forward(attention_output, true);
+    // Apply attention dropout if in training mode
+    if (training && attention_dropout) {
+        attention_dropout->set_training(true);
+        attention_output = attention_dropout->forward(attention_output);
     }
     Matrix residual = attention_output + normalized;
     
@@ -275,8 +277,10 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
               << "Nonzero ff: " << nonzero_ff << "/" 
               << (ff_output.rows() * ff_output.cols()) << "\n\n";
     
-    if (training) {
-        ff_output = ffn_dropout->forward(ff_output, true);
+    // Apply feed forward dropout if in training mode
+    if (training && ffn_dropout) {
+        ffn_dropout->set_training(true);
+        ff_output = ffn_dropout->forward(ff_output);
     }
     residual = ff_output + norm1;
     
@@ -424,43 +428,59 @@ struct BatchSequence {
     std::vector<size_t> lengths;  // Original sequence lengths
 };
 
-Matrix Transformer::forward(
-    const std::vector<int>& input_tokens,
-    const std::string& input_text,
-    const TiktokenTokenizer& tokenizer) {
+Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer) {
     SCOPE_LOG();
-    // Get token embeddings
-    Matrix embeddings = token_embedding->forward(input_tokens);
-    
-    // Create position IDs tensor
-    Matrix position_ids(embeddings.rows(), 1);
-    for (size_t i = 0; i < position_ids.rows(); i++) {
-        position_ids(i, 0) = i;
-    }
-    
-    // Get positional embeddings and add them to token embeddings
-    Matrix pos_emb = pos_encoding->forward(position_ids);
-    embeddings = embeddings + pos_emb;  // Element-wise addition
-    
-    // Pass through transformer layers
-    Matrix hidden_states = embeddings;
-    for (auto& layer : layers) {
-        hidden_states = layer->forward(hidden_states, AttentionMask());
-    }
-    
-    // Apply final layer norm if present
-    if (final_ln) {
+    try {
+        // Store input for backward pass
+        last_input_tokens_ = input_tokens;
+        last_input_query_ = original_query;
+
+        // Get embeddings for input tokens
+        Matrix hidden_states = token_embedding->forward(input_tokens);
+        
+        // Cache initial embeddings
+        GradientCheckpoint::cache_activation("initial_embeddings", hidden_states);
+
+        // Add positional encoding
+        hidden_states = pos_encoding->forward(hidden_states);
+        
+        // Apply dropout during training
+        if (training && dropout) {
+            dropout->set_training(true);
+            hidden_states = dropout->forward(hidden_states);
+        }
+
+        // Process through transformer layers
+        for (size_t i = 0; i < layers.size(); ++i) {
+            // Cache input to this layer
+            std::string layer_key = "layer_" + std::to_string(i) + "_input";
+            GradientCheckpoint::cache_activation(layer_key, hidden_states);
+            
+            // Process through layer
+            hidden_states = layers[i]->forward(hidden_states, AttentionMask());
+            
+            // Cache output from this layer
+            std::string output_key = "layer_" + std::to_string(i) + "_output";
+            GradientCheckpoint::cache_activation(output_key, hidden_states);
+        }
+
+        // Apply final layer norm
         hidden_states = final_ln->forward(hidden_states);
+        
+        // Cache final hidden states
+        GradientCheckpoint::cache_activation("final_hidden_states", hidden_states);
+
+        // Project to vocabulary space using language model head
+        Matrix logits = lm_head->forward(hidden_states, training);
+        
+        // Cache logits
+        GradientCheckpoint::cache_activation("final_logits", logits);
+
+        return logits;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::forward: " << e.what() << std::endl;
+        throw;
     }
-    
-    // Cache final hidden states for backward pass
-    GradientCheckpoint::cache_activation("final_hidden_states", hidden_states);
-    
-    // Project to vocabulary space using LM head
-    Matrix logits = lm_head->forward(hidden_states);
-    
-    // Return logits (in vocab space)
-    return logits;
 }
 
 void Transformer::clear_kv_cache() {
@@ -473,22 +493,16 @@ void Transformer::clear_kv_cache() {
 // Original backward method implementation
 void Transformer::backward(const Matrix& grad_output, const std::vector<int>& input_tokens, float learning_rate) {
     SCOPE_LOG();
-    if (!training) {
-        std::cout << "Model is in evaluation mode. Skipping backward pass." << std::endl;
-        return;
-    }
-
     try {
         std::cout << "\nStarting backward pass..." << std::endl;
         std::cout << "Initial gradient dimensions: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
         
-        // First, pass gradient through language model head to transform from vocab space to hidden space
+        // First, pass gradient through language model head
         Matrix hidden_states = GradientCheckpoint::get_activation("final_hidden_states");
         if (hidden_states.empty()) {
             throw std::runtime_error("No cached hidden states found for backward pass");
         }
         
-        std::cout << "Transforming gradient through LM head..." << std::endl;
         Matrix current_grad = lm_head->backward_pass(grad_output, hidden_states);
         
         const float global_max_grad_norm = config.gradient_clip_threshold;
@@ -512,6 +526,10 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
             std::string layer_key = "layer_" + std::to_string(i) + "_input";
             Matrix layer_input = GradientCheckpoint::get_activation(layer_key);
             
+            if (layer_input.empty()) {
+                throw std::runtime_error("No cached activation found for layer " + std::to_string(i));
+            }
+            
             try {
                 Matrix layer_grad = layers[i]->backward(current_grad, layer_input);
                 if (!layer_grad.empty()) {
@@ -528,25 +546,9 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
             }
         }
         
-        // Split gradients for token and position embeddings
-        Matrix d_token_emb = current_grad;
-        Matrix d_pos_emb = current_grad;  // Both embeddings receive the same gradient
-        
-        // Create position IDs tensor (same as in forward pass)
-        Matrix position_ids(input_tokens.size(), 1);
-        for (size_t i = 0; i < position_ids.rows(); i++) {
-            position_ids(i, 0) = i;
-        }
-        
-        // Backward through token embeddings
-        token_embedding->backward(d_token_emb, input_tokens);
-        
-        // Backward through positional embeddings
-        pos_encoding->backward(d_pos_emb, position_ids);
-        
         // Handle FP16 loss scaling
         if (config.use_fp16) {
-            bool should_skip = !loss_scaler.update_scale(has_inf_nan);
+            bool should_skip = !loss_scaler.update_scale(!has_inf_nan);
             if (should_skip) {
                 std::cout << "Skipping step due to inf/nan in gradients" << std::endl;
                 return;
@@ -556,18 +558,6 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
             float inv_scale = 1.0f / loss_scaler.get_scale();
             for (auto& grad : layer_gradients) {
                 grad *= inv_scale;
-            }
-            
-            // Unscale parameter gradients
-            for (auto& layer : layers) {
-                if (auto* attention = layer->getAttention()) {
-                    auto& grads = attention->param_gradients();
-                    unscale_gradients(grads, inv_scale);
-                }
-                if (auto* ffn = layer->getFeedForward()) {
-                    auto& grads = ffn->param_gradients();
-                    unscale_gradients(grads, inv_scale);
-                }
             }
         }
         
@@ -583,7 +573,7 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
+        std::cerr << "Error in backward pass: " << e.what() << std::endl;
         throw;
     }
 }
@@ -1377,7 +1367,7 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
     
     // Handle FP16 loss scaling
     if (config.use_fp16) {
-        bool should_skip = !loss_scaler.update_scale(has_inf_nan);
+        bool should_skip = !loss_scaler.update_scale(!has_inf_nan);
         if (should_skip) {
             std::cout << "Skipping step due to inf/nan in gradients" << std::endl;
             return;
@@ -1387,18 +1377,6 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
         float inv_scale = 1.0f / loss_scaler.get_scale();
         for (auto& grad : layer_gradients) {
             grad *= inv_scale;
-        }
-        
-        // Unscale parameter gradients
-        for (auto& layer : layers) {
-            if (auto* attention = layer->getAttention()) {
-                auto& grads = attention->param_gradients();
-                unscale_gradients(grads, inv_scale);
-            }
-            if (auto* ffn = layer->getFeedForward()) {
-                auto& grads = ffn->param_gradients();
-                unscale_gradients(grads, inv_scale);
-            }
         }
     }
     
