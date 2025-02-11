@@ -1153,6 +1153,7 @@ void Utils::trim(std::string& s) {
 std::vector<std::pair<std::vector<std::pair<std::string, std::string>>, 
                      std::vector<std::pair<std::string, std::string>>>> 
 Utils::create_cross_validation_folds(const std::vector<std::pair<std::string, std::string>>& data, size_t num_folds) {
+    // num_folds should be passed from config.training.cross_validation.num_folds
     std::vector<std::pair<std::vector<std::pair<std::string, std::string>>,
                          std::vector<std::pair<std::string, std::string>>>> folds;
     
@@ -1194,7 +1195,7 @@ float Utils::perform_cross_validation(
     const TiktokenTokenizer& tokenizer,
     const std::vector<std::pair<std::string, std::string>>& data) {
     
-    const size_t num_folds = 2;  // Use just 2 folds for quick validation
+    const size_t num_folds = transformer.getConfig().training.cross_validation.num_folds;  // Get from config instead of hardcoding
     const size_t fold_size = data.size() / num_folds;
     float total_loss = 0.0f;
 
@@ -1207,28 +1208,98 @@ float Utils::perform_cross_validation(
     std::mt19937 g(rd());
     std::shuffle(indices.begin(), indices.end(), g);
 
+    // Pre-compute tokenization for all data to avoid redundant work
+    struct ProcessedData {
+        std::vector<int> input_tokens;
+        std::vector<int> target_tokens;
+    };
+    std::vector<ProcessedData> processed_data;
+    processed_data.reserve(data.size());
+
+    #pragma omp parallel for
+    for (size_t i = 0; i < data.size(); i++) {
+        const auto& [input_str, target_str] = data[i];
+        std::string processed_input = input_str;
+        std::string processed_target = target_str;
+        tokenizer.preprocess_text(processed_input);
+        tokenizer.preprocess_text(processed_target);
+        
+        ProcessedData proc_data;
+        proc_data.input_tokens = tokenizer.encode(processed_input);
+        proc_data.target_tokens = tokenizer.encode(processed_target);
+        processed_data.push_back(proc_data);
+    }
+
     // For each fold
     for (size_t fold = 0; fold < num_folds; fold++) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        // Split data into train and validation
-        std::vector<std::pair<std::string, std::string>> val_data;
+        // Split data into train and validation using pre-computed tokens
+        std::vector<ProcessedData> val_data;
         size_t start_idx = fold * fold_size;
         size_t end_idx = (fold == num_folds - 1) ? indices.size() : (fold + 1) * fold_size;
         
         for (size_t i = start_idx; i < end_idx; i++) {
-            val_data.push_back(data[indices[i]]);
+            val_data.push_back(processed_data[indices[i]]);
         }
 
-        // Evaluate on validation fold
-        float fold_loss = evaluate_validation(transformer, tokenizer, val_data);
-        total_loss += fold_loss;
+        // Evaluate on validation fold using pre-computed tokens
+        float fold_loss = 0.0f;
+        size_t total_samples = 0;
+        const size_t BATCH_SIZE = 32;
+
+        transformer.set_training(false);
+
+        // Process validation data in batches
+        for (size_t batch_start = 0; batch_start < val_data.size(); batch_start += BATCH_SIZE) {
+            size_t batch_end = std::min(batch_start + BATCH_SIZE, val_data.size());
+            size_t current_batch_size = batch_end - batch_start;
+
+            // Prepare batch matrices
+            std::vector<Matrix> batch_logits;
+            batch_logits.reserve(current_batch_size);
+
+            // Forward pass for batch
+            for (size_t i = batch_start; i < batch_end; i++) {
+                const auto& tokens = val_data[i].input_tokens;
+                if (!tokens.empty()) {
+                    Matrix logits = transformer.forward(tokens, "", tokenizer);
+                    batch_logits.push_back(std::move(logits));
+                }
+            }
+
+            if (batch_logits.empty()) continue;
+
+            // Create target distributions for batch
+            std::vector<std::vector<int>> target_tokens;
+            for (size_t i = batch_start; i < batch_end; i++) {
+                target_tokens.push_back(val_data[i].target_tokens);
+            }
+
+            Matrix target_distribution = create_batch_target_distribution(
+                target_tokens, tokenizer, tokenizer.vocab_size(), current_batch_size);
+
+            // Compute batch loss
+            for (size_t i = 0; i < batch_logits.size(); i++) {
+                float sample_loss = compute_batch_loss(batch_logits[i], target_distribution, tokenizer);
+                if (std::isfinite(sample_loss)) {
+                    fold_loss += sample_loss;
+                    total_samples++;
+                }
+            }
+        }
+
+        transformer.set_training(true);
+        
+        // Compute average loss for fold
+        float avg_fold_loss = total_samples > 0 ? fold_loss / total_samples : 0.0f;
+        total_loss += avg_fold_loss;
 
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
         
         std::cout << "Fold " << fold + 1 << "/" << num_folds 
-                  << " (Loss: " << fold_loss 
+                  << " (Loss: " << avg_fold_loss 
                   << ", Time: " << duration.count() << "s)" << std::endl;
     }
     

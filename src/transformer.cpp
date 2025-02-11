@@ -19,6 +19,9 @@
 extern cublasHandle_t cublas_handle;
 #endif
 
+// Global variable to store the last computed gradient norm
+float last_grad_norm = 0.0f;
+
 // LearningRateScheduler implementation
 class LearningRateScheduler {
 public:
@@ -520,6 +523,7 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         layer_gradients.reserve(layers.size());
         
         bool has_inf_nan = false;
+        float total_grad_norm = 0.0f;  // Track total gradient norm
         
         // Backward through layers with proper sequence handling
         for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
@@ -537,6 +541,14 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
                         has_inf_nan = true;
                         break;
                     }
+                    
+                    // Compute gradient norm for this layer
+                    float layer_grad_norm = 0.0f;
+                    for (size_t j = 0; j < layer_grad.size(); ++j) {
+                        layer_grad_norm += layer_grad.data()[j] * layer_grad.data()[j];
+                    }
+                    total_grad_norm += std::sqrt(layer_grad_norm);
+                    
                     layer_gradients.push_back(layer_grad);
                     current_grad = layer_grad;
                 }
@@ -545,6 +557,10 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
                 throw;
             }
         }
+        
+        // Store the total gradient norm in a static variable that can be accessed by the training monitor
+        static float last_grad_norm = 0.0f;
+        last_grad_norm = total_grad_norm / layers.size();  // Average across layers
         
         // Handle FP16 loss scaling
         if (config.use_fp16) {
@@ -1300,15 +1316,87 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
     // Retrieve sequence boundaries
     const auto& seq_boundaries = last_seq_boundaries;
     
-    // Apply loss scaling if using FP16
+    // Apply adaptive loss scaling if using FP16
     if (config.use_fp16) {
-        float scale = loss_scaler.get_scale();
+        // Track gradient statistics for adaptive scaling
+        static float running_max_grad = 0.0f;
+        static float running_min_grad = std::numeric_limits<float>::max();
+        static float scale_growth_factor = 2.0f;
+        static float scale_reduction_factor = 0.5f;
+        static size_t stable_steps = 0;
+        static const size_t STABILITY_THRESHOLD = 1000;
+        static const float MAX_SCALE = 32768.0f;
+        static const float MIN_SCALE = 1.0f;
+        
+        // Compute current gradient statistics
+        float current_max_grad = 0.0f;
+        float current_min_grad = std::numeric_limits<float>::max();
+        bool has_inf_nan = false;
+        
+        #pragma omp parallel for reduction(max:current_max_grad) reduction(min:current_min_grad) reduction(||:has_inf_nan)
+        for (size_t i = 0; i < loss_grad.rows(); i++) {
+            for (size_t j = 0; j < loss_grad.cols(); j++) {
+                float val = std::abs(loss_grad(i, j));
+                if (std::isfinite(val)) {
+                    current_max_grad = std::max(current_max_grad, val);
+                    current_min_grad = std::min(current_min_grad, val);
+                } else {
+                    has_inf_nan = true;
+                }
+            }
+        }
+        
+        // Update running statistics with exponential moving average
+        const float alpha = 0.95f;
+        running_max_grad = alpha * running_max_grad + (1.0f - alpha) * current_max_grad;
+        running_min_grad = alpha * running_min_grad + (1.0f - alpha) * current_min_grad;
+        
+        // Get current scale
+        float current_scale = loss_scaler.get_scale();
+        
+        // Adjust scale based on gradient statistics and stability
+        if (has_inf_nan) {
+            // Reduce scale on inf/nan
+            current_scale *= scale_reduction_factor;
+            stable_steps = 0;
+        } else {
+            stable_steps++;
+            
+            // Check if gradients are too small
+            if (running_max_grad < 1e-4f && current_scale < MAX_SCALE) {
+                current_scale *= scale_growth_factor;
+                stable_steps = 0;
+            }
+            // Check if gradients are too large
+            else if (running_max_grad > 1.0f && current_scale > MIN_SCALE) {
+                current_scale *= scale_reduction_factor;
+                stable_steps = 0;
+            }
+            // Increase scale if we've been stable for a while
+            else if (stable_steps >= STABILITY_THRESHOLD && current_scale < MAX_SCALE) {
+                current_scale *= scale_growth_factor;
+                stable_steps = 0;
+            }
+        }
+        
+        // Clamp scale to valid range
+        current_scale = std::clamp(current_scale, MIN_SCALE, MAX_SCALE);
+        
+        // Update loss scaler
+        loss_scaler.set_scale(current_scale);
+        
+        // Apply scale to gradients
         #pragma omp parallel for collapse(2)
         for (size_t i = 0; i < loss_grad.rows(); i++) {
             for (size_t j = 0; j < loss_grad.cols(); j++) {
-                loss_grad(i, j) *= scale;
+                loss_grad(i, j) *= current_scale;
             }
         }
+        
+        std::cout << "FP16 scaling - Scale: " << current_scale 
+                  << ", Max grad: " << running_max_grad 
+                  << ", Min grad: " << running_min_grad 
+                  << ", Stable steps: " << stable_steps << std::endl;
     }
     
     // Initialize gradient accumulation buffers
@@ -1319,80 +1407,37 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
     
     // Backward through layers with proper sequence handling
     for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
-        // Get cached layer input
         std::string layer_key = "layer_" + std::to_string(i) + "_input";
         Matrix layer_input = GradientCheckpoint::get_activation(layer_key);
         
-        // Process each sequence in the batch separately
-        Matrix layer_grad(layer_input.rows(), layer_input.cols(), 0.0f);
+        if (layer_input.empty()) {
+            throw std::runtime_error("No cached activation found for layer " + std::to_string(i));
+        }
         
-        for (const auto& [start, end] : seq_boundaries) {
-            // Extract sequence portion of gradients and input
-            Matrix seq_grad = loss_grad.block(start, 0, end - start, loss_grad.cols());
-            Matrix seq_input = layer_input.block(start, 0, end - start, layer_input.cols());
-            
-            // Backward through layer for this sequence
-            Matrix seq_layer_grad = layers[i]->backward(seq_grad, seq_input, target_distribution);
-            
-            // Accumulate gradients
-            for (size_t r = 0; r < seq_layer_grad.rows(); r++) {
-                for (size_t c = 0; c < seq_layer_grad.cols(); c++) {
-                    layer_grad(start + r, c) += seq_layer_grad(r, c);
+        try {
+            Matrix layer_grad = layers[i]->backward(loss_grad, layer_input);
+            if (!layer_grad.empty()) {
+                if (config.use_fp16 && loss_scaler.has_inf_or_nan(layer_grad)) {
+                    has_inf_nan = true;
+                    break;
                 }
+                
+                layer_gradients.push_back(layer_grad);
+                loss_grad = layer_grad;  // Propagate gradients to next layer
             }
+        } catch (const std::exception& e) {
+            std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
+            throw;
         }
-        
-        // Check for inf/nan if using FP16
-        if (config.use_fp16) {
-            has_inf_nan |= loss_scaler.has_inf_or_nan(layer_grad);
-            
-            // Check layer gradients
-            auto& layer = layers[i];
-            if (auto* attention = layer->getAttention()) {
-                auto& grads = attention->param_gradients();
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.query_grad);
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.key_grad);
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.value_grad);
-            }
-            if (auto* ffn = layer->getFeedForward()) {
-                auto& grads = ffn->param_gradients();
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.ff1_grad);
-                has_inf_nan |= loss_scaler.has_inf_or_nan(grads.ff2_grad);
-            }
-        }
-        
-        layer_gradients.push_back(layer_grad);
-        loss_grad = layer_grad;  // Propagate gradients to next layer
     }
     
-    // Handle FP16 loss scaling
-    if (config.use_fp16) {
-        bool should_skip = !loss_scaler.update_scale(!has_inf_nan);
-        if (should_skip) {
-            std::cout << "Skipping step due to inf/nan in gradients" << std::endl;
-            return;
-        }
-        
-        // Unscale gradients
+    // Handle FP16 unscaling at the end
+    if (config.use_fp16 && !has_inf_nan) {
         float inv_scale = 1.0f / loss_scaler.get_scale();
         for (auto& grad : layer_gradients) {
             grad *= inv_scale;
         }
     }
-    
-    // Update parameters with proper sequence handling
-    for (size_t i = 0; i < layers.size(); i++) {
-        auto& layer = layers[i];
-        if (auto* attention = layer->getAttention()) {
-            update_attention_parameters(attention, learning_rate, config);
-        }
-        if (auto* ffn = layer->getFeedForward()) {
-            update_ffn_parameters(ffn, learning_rate, config);
-        }
-    }
-    
-    // Store sequence boundaries for next backward pass
-    last_seq_boundaries = seq_boundaries;
 }
 
 // Helper function to unscale gradients

@@ -13,11 +13,12 @@
  */
 class DynamicLossScaler {
 private:
-    float scale = 1.0f;
-    int stable_steps = 0;
-    const int inc_step = 2000;
-    const float inc_factor = 2.0f;
-    const float dec_factor = 0.5f;
+    float current_scale_;
+    float scale_factor_;
+    float scale_window_;
+    float min_scale_;
+    float max_scale_;
+    int stable_steps_;
 
 public:
     DynamicLossScaler(float initial_scale = 65536.0f,
@@ -36,6 +37,15 @@ public:
      * @brief Get the current loss scale.
      */
     float get_scale() const { return current_scale_; }
+
+    /**
+     * @brief Set the current loss scale.
+     * @param scale The new scale value to set
+     */
+    void set_scale(float scale) {
+        current_scale_ = std::clamp(scale, min_scale_, max_scale_);
+        std::cout << "Loss scale set to: " << current_scale_ << std::endl;
+    }
 
     // Specialization for Matrix
     bool has_inf_or_nan(const Matrix& tensor) const {
@@ -86,12 +96,4 @@ public:
             return true;  // Continue with this step
         }
     }
-
-private:
-    float current_scale_;
-    float scale_factor_;
-    float scale_window_;
-    float min_scale_;
-    float max_scale_;
-    int stable_steps_;
 }; 

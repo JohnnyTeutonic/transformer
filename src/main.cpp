@@ -423,9 +423,14 @@ int main(int argc, char* argv[]) {
                 grad_stats.mean = iteration_loss;  // Use loss as a proxy for gradient statistics
                 grad_stats.variance = 0.0f;        // Initialize to 0 for now
 
+                // Access the gradient norm from the transformer
+                extern float last_grad_norm;  // Declare the external variable
+                Matrix gradient_matrix(1, 1);
+                gradient_matrix(0, 0) = last_grad_norm;  // Use the actual gradient norm
+
                 TrainingMetrics metrics(
                     iteration_loss,           // Current loss
-                    Matrix(1, 1, iteration_loss),  // Minimal valid matrix with the loss value
+                    gradient_matrix,          // Use actual gradient norm matrix
                     epoch,                    // Current epoch
                     iter,                     // Current step
                     0.0f,                    // Let the monitor compute the trend

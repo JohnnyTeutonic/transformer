@@ -142,13 +142,13 @@ public:
 
         const size_t batch_size = output.rows();
         const size_t vocab_size = output.cols();
+        const float epsilon = 1e-5f;  // Increased from 1e-10f for better stability
         float total_loss = 0.0f;
 
         #pragma omp parallel for reduction(+:total_loss)
         for (size_t i = 0; i < batch_size; ++i) {
             for (size_t j = 0; j < vocab_size; ++j) {
                 if (target_distribution(i, j) > 0.0f) {
-                    const float epsilon = 1e-10f;
                     float pred = std::clamp(output(i, j), epsilon, 1.0f - epsilon);
                     total_loss -= target_distribution(i, j) * std::log(pred);
                 }
@@ -165,34 +165,43 @@ public:
 
         const size_t batch_size = output.rows();
         const size_t vocab_size = output.cols();
+        const float epsilon = 1e-5f;  // Increased epsilon for stability
         Matrix gradient(batch_size, vocab_size);
 
-        // For each example in the batch
+        // Pre-compute max values for numerical stability
+        std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
         #pragma omp parallel for
         for (size_t i = 0; i < batch_size; ++i) {
-            // First compute softmax probabilities
-            float max_logit = -std::numeric_limits<float>::infinity();
             for (size_t j = 0; j < vocab_size; ++j) {
-                max_logit = std::max(max_logit, output(i, j));
+                max_logits[i] = std::max(max_logits[i], output(i, j));
             }
+        }
 
-            std::vector<float> probs(vocab_size);
+        // Pre-compute denominator terms
+        std::vector<float> denominators(batch_size, 0.0f);
+        #pragma omp parallel for
+        for (size_t i = 0; i < batch_size; ++i) {
             float sum_exp = 0.0f;
             for (size_t j = 0; j < vocab_size; ++j) {
-                probs[j] = std::exp(output(i, j) - max_logit);
-                sum_exp += probs[j];
+                float shifted_logit = output(i, j) - max_logits[i];
+                sum_exp += std::exp(shifted_logit);
             }
+            denominators[i] = std::max(sum_exp, epsilon);
+        }
 
-            // Normalize to get probabilities
-            const float eps = 1e-10f;
-            sum_exp = std::max(sum_exp, eps);
+        // Compute final gradients
+        #pragma omp parallel for collapse(2)
+        for (size_t i = 0; i < batch_size; ++i) {
             for (size_t j = 0; j < vocab_size; ++j) {
-                probs[j] /= sum_exp;
-            }
-
-            // Compute gradients: softmax derivative * cross-entropy derivative
-            for (size_t j = 0; j < vocab_size; ++j) {
-                gradient(i, j) = probs[j] - target_distribution(i, j);
+                float shifted_logit = output(i, j) - max_logits[i];
+                float softmax_output = std::exp(shifted_logit) / denominators[i];
+                
+                // Stabilized gradient computation
+                gradient(i, j) = std::clamp(
+                    softmax_output - target_distribution(i, j),
+                    -1.0f,  // Prevent extreme gradients
+                    1.0f
+                );
             }
         }
 
