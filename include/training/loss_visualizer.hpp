@@ -56,6 +56,11 @@ public:
                 log_file << "Smoothed Loss - Min: " << smoothed_stats.min 
                         << ", Max: " << smoothed_stats.max 
                         << ", Final: " << smoothed_history.back() << "\n";
+                if (!grad_norm_history.empty()) {
+                    log_file << "Gradient Norm - Min: " << grad_stats.min
+                            << ", Max: " << grad_stats.max
+                            << ", Final: " << grad_norm_history.back() << "\n";
+                }
                 log_file << "Total Samples: " << raw_history.size() << "\n";
             }
             log_file << "Training Completed at " << get_timestamp() << "\n";
@@ -64,19 +69,25 @@ public:
         }
     }
 
-    void add_loss(float raw_loss, float smoothed_loss, float trend) {
+    void add_loss(float raw_loss, float smoothed_loss, float trend, float grad_norm = 0.0f) {
         std::lock_guard<std::mutex> lock(mutex);
         
         // Add to history
         raw_history.push_back(raw_loss);
         smoothed_history.push_back(smoothed_loss);
         trend_history.push_back(trend);
+        if (grad_norm > 0.0f) {
+            grad_norm_history.push_back(grad_norm);
+        }
 
         // Maintain maximum size
         if (raw_history.size() > MAX_HISTORY) {
             raw_history.pop_front();
             smoothed_history.pop_front();
             trend_history.pop_front();
+            if (!grad_norm_history.empty()) {
+                grad_norm_history.pop_front();
+            }
         }
 
         // Update statistics
@@ -94,6 +105,7 @@ private:
     std::deque<float> raw_history;
     std::deque<float> smoothed_history;
     std::deque<float> trend_history;
+    std::deque<float> grad_norm_history;  // Store gradient norms
 
     // Statistics
     struct Stats {
@@ -109,11 +121,15 @@ private:
     Stats raw_stats;
     Stats smoothed_stats;
     Stats trend_stats;
+    Stats grad_stats;  // Statistics for gradients
 
     void update_statistics() {
         raw_stats = calculate_stats(raw_history);
         smoothed_stats = calculate_stats(smoothed_history);
         trend_stats = calculate_stats(trend_history);
+        if (!grad_norm_history.empty()) {
+            grad_stats = calculate_stats(grad_norm_history);
+        }
     }
 
     Stats calculate_stats(const std::deque<float>& data) {
@@ -228,6 +244,18 @@ private:
                 << " | StdDev: " << smoothed_stats.std_dev << "\n";
         log_file << "Short MA: " << smoothed_stats.short_ma 
                 << " | Medium MA: " << smoothed_stats.medium_ma << "\n\n";
+
+        // Gradient Section (if available)
+        if (!grad_norm_history.empty()) {
+            log_file << "Gradient Norm " << grad_stats.trend_indicator << ":\n";
+            log_file << create_trend_line(grad_norm_history, grad_stats.min, grad_stats.max) << "\n";
+            log_file << "Min: " << grad_stats.min 
+                    << " | Max: " << grad_stats.max 
+                    << " | Mean: " << grad_stats.mean 
+                    << " | StdDev: " << grad_stats.std_dev << "\n";
+            log_file << "Short MA: " << grad_stats.short_ma 
+                    << " | Medium MA: " << grad_stats.medium_ma << "\n\n";
+        }
 
         // Loss Trend Section
         log_file << "Loss Trend " << trend_stats.trend_indicator << " (recent/overall):\n";

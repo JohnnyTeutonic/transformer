@@ -15,7 +15,8 @@ void LossTracker::add_loss(float loss) {
         visualizer->add_loss(
             loss,                // Raw loss value
             recent_average,      // Smoothed loss (using recent window)
-            get_trend()         // Trend (recent/overall ratio)
+            get_trend(),         // Trend (recent/overall ratio)
+            0.0f               // No gradient norm available here
         );
     }
 }

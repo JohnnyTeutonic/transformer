@@ -4,12 +4,25 @@ void TrainingMonitor::log_metrics(const TrainingMetrics& metrics) {
     update_running_statistics(metrics);
     detect_anomalies(metrics);
     
+    // Calculate gradient norm
+    float grad_norm = 0.0f;
+    if (metrics.gradients.size() > 0) {
+        grad_norm = 0.0f;
+        for (size_t i = 0; i < metrics.gradients.rows(); ++i) {
+            for (size_t j = 0; j < metrics.gradients.cols(); ++j) {
+                grad_norm += metrics.gradients.at(i, j) * metrics.gradients.at(i, j);
+            }
+        }
+        grad_norm = std::sqrt(grad_norm);
+    }
+    
     // Update loss tracker and visualizer
     loss_tracker.add_loss(metrics.loss);
     visualizer->add_loss(
         metrics.loss,               // Raw loss
         loss_tracker.get_recent_average(),  // Smoothed loss
-        loss_tracker.get_trend()    // Trend
+        loss_tracker.get_trend(),   // Trend
+        grad_norm                   // Gradient norm
     );
     
     log_to_tensorboard(metrics);
