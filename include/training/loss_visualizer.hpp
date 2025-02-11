@@ -8,29 +8,35 @@
 #include <cmath>
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 
 class LossVisualizer {
 public:
     static constexpr size_t MAX_HISTORY = 1000;  // Maximum number of data points to keep
     static constexpr size_t TREND_LINE_WIDTH = 50;  // Width of the ASCII trend line
+    static constexpr size_t SHORT_WINDOW = 10;   // Short-term moving average window
+    static constexpr size_t MEDIUM_WINDOW = 50;  // Medium-term moving average window
 
     LossVisualizer(const std::string& log_path = "./loss.log") 
         : log_file_path(log_path) {
         try {
-            // Simple file open with no directory creation
-            log_file.open(log_file_path, std::ios::out | std::ios::app);
+            // Open file in truncate mode (std::ios::trunc) to clear previous contents
+            log_file.open(log_file_path, std::ios::out | std::ios::trunc);
             if (!log_file.is_open()) {
                 std::cerr << "Warning: Could not open " << log_file_path << ", trying current directory..." << std::endl;
                 // Fallback to current directory
                 log_file_path = "loss.log";
-                log_file.open(log_file_path, std::ios::out | std::ios::app);
+                log_file.open(log_file_path, std::ios::out | std::ios::trunc);
                 if (!log_file.is_open()) {
                     throw std::runtime_error("Failed to open log file in current directory");
                 }
             }
             
-            // Write initial header
-            log_file << "\n=== Training Started at " << get_timestamp() << " ===\n\n";
+            // Write initial header with program start time
+            log_file << "=== Training Log Started at " << get_timestamp() << " ===\n";
+            log_file << "Window Sizes: Short=" << SHORT_WINDOW << ", Medium=" << MEDIUM_WINDOW << "\n";
+            log_file << "Max History: " << MAX_HISTORY << " samples\n";
+            log_file << "----------------------------------------\n\n";
             log_file.flush();
         } catch (const std::exception& e) {
             std::cerr << "Error initializing loss visualizer: " << e.what() << std::endl;
@@ -40,7 +46,20 @@ public:
 
     ~LossVisualizer() {
         if (log_file.is_open()) {
-            log_file << "\n=== Training Completed at " << get_timestamp() << " ===\n";
+            // Write final summary
+            log_file << "\n=== Training Summary ===\n";
+            if (!raw_history.empty()) {
+                log_file << "Final Statistics:\n";
+                log_file << "Raw Loss - Min: " << raw_stats.min 
+                        << ", Max: " << raw_stats.max 
+                        << ", Final: " << raw_history.back() << "\n";
+                log_file << "Smoothed Loss - Min: " << smoothed_stats.min 
+                        << ", Max: " << smoothed_stats.max 
+                        << ", Final: " << smoothed_history.back() << "\n";
+                log_file << "Total Samples: " << raw_history.size() << "\n";
+            }
+            log_file << "Training Completed at " << get_timestamp() << "\n";
+            log_file << "----------------------------------------\n";
             log_file.close();
         }
     }
@@ -82,6 +101,9 @@ private:
         float max = std::numeric_limits<float>::lowest();
         float mean = 0.0f;
         float std_dev = 0.0f;
+        float short_ma = 0.0f;  // Short-term moving average
+        float medium_ma = 0.0f; // Medium-term moving average
+        char trend_indicator = '-';  // '+' for up, '-' for stable, 'v' for down
     };
 
     Stats raw_stats;
@@ -114,6 +136,41 @@ private:
             sum_sq_diff += diff * diff;
         }
         stats.std_dev = std::sqrt(sum_sq_diff / data.size());
+
+        // Moving averages
+        size_t short_window = std::min(SHORT_WINDOW, data.size());
+        size_t medium_window = std::min(MEDIUM_WINDOW, data.size());
+        
+        if (short_window > 0) {
+            float short_sum = 0.0f;
+            for (size_t i = data.size() - short_window; i < data.size(); ++i) {
+                short_sum += data[i];
+            }
+            stats.short_ma = short_sum / short_window;
+        }
+
+        if (medium_window > 0) {
+            float medium_sum = 0.0f;
+            for (size_t i = data.size() - medium_window; i < data.size(); ++i) {
+                medium_sum += data[i];
+            }
+            stats.medium_ma = medium_sum / medium_window;
+        }
+
+        // Trend indicator using ASCII characters
+        if (data.size() >= 2) {
+            float recent_avg = stats.short_ma;
+            float older_avg = stats.medium_ma;
+            float threshold = 0.001f;  // Threshold for considering a change significant
+            
+            if (std::abs(recent_avg - older_avg) < threshold) {
+                stats.trend_indicator = '-';  // Stable
+            } else if (recent_avg < older_avg) {
+                stats.trend_indicator = 'v';  // Down
+            } else {
+                stats.trend_indicator = '+';  // Up
+            }
+        }
 
         return stats;
     }
@@ -152,23 +209,35 @@ private:
         auto time = std::chrono::system_clock::to_time_t(now);
         log_file << "\n=== Update at " << std::ctime(&time);
 
-        // Raw Loss Section
-        log_file << "Raw Loss:\n";
+        // Raw Loss Section with trend indicator and moving averages
+        log_file << "Raw Loss " << raw_stats.trend_indicator << ":\n";
         log_file << create_trend_line(raw_history, raw_stats.min, raw_stats.max) << "\n";
-        log_file << "Min: " << raw_stats.min << " | Max: " << raw_stats.max 
-                << " | Mean: " << raw_stats.mean << " | StdDev: " << raw_stats.std_dev << "\n\n";
+        log_file << "Min: " << std::fixed << std::setprecision(6) << raw_stats.min 
+                << " | Max: " << raw_stats.max 
+                << " | Mean: " << raw_stats.mean 
+                << " | StdDev: " << raw_stats.std_dev << "\n";
+        log_file << "Short MA: " << raw_stats.short_ma 
+                << " | Medium MA: " << raw_stats.medium_ma << "\n\n";
 
         // Smoothed Loss Section
-        log_file << "Smoothed Loss:\n";
+        log_file << "Smoothed Loss " << smoothed_stats.trend_indicator << ":\n";
         log_file << create_trend_line(smoothed_history, smoothed_stats.min, smoothed_stats.max) << "\n";
-        log_file << "Min: " << smoothed_stats.min << " | Max: " << smoothed_stats.max 
-                << " | Mean: " << smoothed_stats.mean << " | StdDev: " << smoothed_stats.std_dev << "\n\n";
+        log_file << "Min: " << smoothed_stats.min 
+                << " | Max: " << smoothed_stats.max 
+                << " | Mean: " << smoothed_stats.mean 
+                << " | StdDev: " << smoothed_stats.std_dev << "\n";
+        log_file << "Short MA: " << smoothed_stats.short_ma 
+                << " | Medium MA: " << smoothed_stats.medium_ma << "\n\n";
 
         // Loss Trend Section
-        log_file << "Loss Trend (recent/overall):\n";
+        log_file << "Loss Trend " << trend_stats.trend_indicator << " (recent/overall):\n";
         log_file << create_trend_line(trend_history, trend_stats.min, trend_stats.max) << "\n";
-        log_file << "Min: " << trend_stats.min << " | Max: " << trend_stats.max 
-                << " | Mean: " << trend_stats.mean << " | StdDev: " << trend_stats.std_dev << "\n\n";
+        log_file << "Min: " << trend_stats.min 
+                << " | Max: " << trend_stats.max 
+                << " | Mean: " << trend_stats.mean 
+                << " | StdDev: " << trend_stats.std_dev << "\n";
+        log_file << "Short MA: " << trend_stats.short_ma 
+                << " | Medium MA: " << trend_stats.medium_ma << "\n\n";
 
         // Sample counts
         log_file << "History size: " << raw_history.size() << "/" << MAX_HISTORY << " samples\n";
