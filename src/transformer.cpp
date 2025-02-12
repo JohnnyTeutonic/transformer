@@ -438,14 +438,33 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         last_input_tokens_ = input_tokens;
         last_input_query_ = original_query;
 
-        // Get embeddings for input tokens
+        // Validate input dimensions
+        if (input_tokens.empty()) {
+            throw std::runtime_error("Empty input tokens");
+        }
+
+        // Get embeddings for input tokens with dimension validation
         Matrix hidden_states = token_embedding->forward(input_tokens);
+        if (hidden_states.empty()) {
+            throw std::runtime_error("Empty embeddings from token_embedding");
+        }
+        
+        std::cout << "Hidden states dimensions after embedding: " 
+                  << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
         
         // Cache initial embeddings
         GradientCheckpoint::cache_activation("initial_embeddings", hidden_states);
 
-        // Add positional encoding
-        hidden_states = pos_encoding->forward(hidden_states);
+        // Add positional encoding with dimension check
+        if (pos_encoding) {
+            if (hidden_states.cols() != config.hidden_size) {
+                throw std::runtime_error("Hidden states dimension (" + 
+                    std::to_string(hidden_states.cols()) + 
+                    ") does not match config hidden_size (" + 
+                    std::to_string(config.hidden_size) + ")");
+            }
+            hidden_states = pos_encoding->forward(hidden_states);
+        }
         
         // Apply dropout during training
         if (training && dropout) {
@@ -453,91 +472,64 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
             hidden_states = dropout->forward(hidden_states);
         }
 
-        // Process through transformer layers
+        // Process through transformer layers with dimension tracking
         for (size_t i = 0; i < layers.size(); ++i) {
+            std::cout << "Processing layer " << i << std::endl;
+            std::cout << "Input dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+            
             // Cache input to this layer
             std::string layer_key = "layer_" + std::to_string(i) + "_input";
             GradientCheckpoint::cache_activation(layer_key, hidden_states);
             
-            // Process through layer
-            hidden_states = layers[i]->forward(hidden_states, AttentionMask());
+            // Create attention mask for this layer
+            AttentionMask attention_mask = AttentionMask::create_causal_mask(hidden_states.rows());
+            
+            // Process through layer with dimension validation
+            Matrix layer_output = layers[i]->forward(hidden_states, attention_mask);
+            if (layer_output.empty()) {
+                throw std::runtime_error("Empty output from layer " + std::to_string(i));
+            }
+            
+            if (layer_output.cols() != config.hidden_size) {
+                throw std::runtime_error("Layer " + std::to_string(i) + 
+                    " output dimension (" + std::to_string(layer_output.cols()) + 
+                    ") does not match hidden_size (" + std::to_string(config.hidden_size) + ")");
+            }
+            
+            hidden_states = layer_output;
             
             // Cache output from this layer
             std::string output_key = "layer_" + std::to_string(i) + "_output";
             GradientCheckpoint::cache_activation(output_key, hidden_states);
+            
+            std::cout << "Output dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
         }
 
-        // Apply final layer norm
-        hidden_states = final_ln->forward(hidden_states);
+        // Apply final layer norm with dimension check
+        if (final_ln) {
+            if (hidden_states.cols() != config.hidden_size) {
+                throw std::runtime_error("Hidden states dimension before final layer norm (" + 
+                    std::to_string(hidden_states.cols()) + 
+                    ") does not match hidden_size (" + 
+                    std::to_string(config.hidden_size) + ")");
+            }
+            hidden_states = final_ln->forward(hidden_states);
+        }
         
         // Cache final hidden states
         GradientCheckpoint::cache_activation("final_hidden_states", hidden_states);
 
         // Project to vocabulary space using language model head
+        if (!lm_head) {
+            throw std::runtime_error("Language model head is null");
+        }
+        
         Matrix logits = lm_head->forward(hidden_states, training);
-        
-        // Debug logits statistics
-        float min_logit = std::numeric_limits<float>::infinity();
-        float max_logit = -std::numeric_limits<float>::infinity();
-        float sum_logits = 0.0f;
-        size_t nonzero_logits = 0;
-        
-        for (size_t i = 0; i < logits.rows(); i++) {
-            for (size_t j = 0; j < logits.cols(); j++) {
-                float val = logits(i, j);
-                min_logit = std::min(min_logit, val);
-                max_logit = std::max(max_logit, val);
-                sum_logits += val;
-                if (std::abs(val) > 1e-6) nonzero_logits++;
-            }
+        if (logits.empty()) {
+            throw std::runtime_error("Empty logits from language model head");
         }
         
-        std::cout << "\nLogits statistics before caching:\n"
-                  << "Min logit: " << min_logit << "\n"
-                  << "Max logit: " << max_logit << "\n"
-                  << "Mean logit: " << sum_logits / (logits.rows() * logits.cols()) << "\n"
-                  << "Nonzero logits: " << nonzero_logits << "/" 
-                  << (logits.rows() * logits.cols()) << "\n"
-                  << "Logit range: " << (max_logit - min_logit) << std::endl;
-
-        // Apply scaling to increase logit separation
-        const float scale_factor = 1.5f;  // Increase contrast between logits
-        for (size_t i = 0; i < logits.rows(); i++) {
-            // Find max logit in this row for numerical stability
-            float row_max = -std::numeric_limits<float>::infinity();
-            for (size_t j = 0; j < logits.cols(); j++) {
-                row_max = std::max(row_max, logits(i, j));
-            }
-            
-            // Scale logits relative to max
-            for (size_t j = 0; j < logits.cols(); j++) {
-                logits(i, j) = (logits(i, j) - row_max) * scale_factor;
-            }
-        }
-        
-        // Debug scaled logits
-        min_logit = std::numeric_limits<float>::infinity();
-        max_logit = -std::numeric_limits<float>::infinity();
-        sum_logits = 0.0f;
-        nonzero_logits = 0;
-        
-        for (size_t i = 0; i < logits.rows(); i++) {
-            for (size_t j = 0; j < logits.cols(); j++) {
-                float val = logits(i, j);
-                min_logit = std::min(min_logit, val);
-                max_logit = std::max(max_logit, val);
-                sum_logits += val;
-                if (std::abs(val) > 1e-6) nonzero_logits++;
-            }
-        }
-        
-        std::cout << "\nLogits statistics after scaling:\n"
-                  << "Min logit: " << min_logit << "\n"
-                  << "Max logit: " << max_logit << "\n"
-                  << "Mean logit: " << sum_logits / (logits.rows() * logits.cols()) << "\n"
-                  << "Nonzero logits: " << nonzero_logits << "/" 
-                  << (logits.rows() * logits.cols()) << "\n"
-                  << "Logit range: " << (max_logit - min_logit) << std::endl;
+        std::cout << "Final logits dimensions: " << logits.rows() << "x" << logits.cols() << std::endl;
         
         // Cache logits
         GradientCheckpoint::cache_activation("final_logits", logits);

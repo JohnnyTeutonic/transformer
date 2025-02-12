@@ -669,8 +669,8 @@ std::vector<ContextualTrainingExample> Utils::create_training_data() {
             std::string output = normalized_line.substr(delimiter_pos + 1);
             
             // Trim whitespace
-            input = std::regex_replace(input, std::regex("^\\s+|\\s+$"), "");
-            output = std::regex_replace(output, std::regex("^\\s+|\\s+$"), "");
+            trim(input);
+            trim(output);
             
             // Create unique key to detect duplicates
             std::string pair_key = input + "|" + output;
@@ -684,41 +684,19 @@ std::vector<ContextualTrainingExample> Utils::create_training_data() {
             PhraseType type = detect_phrase_type(input, output, delimiter);
             
             raw_examples.emplace_back(input, output, type);
-
-            // Add augmented examples with slight variations
-            // Only augment if the input is long enough
-            if (input.length() > 10) {
-                // Add version with different word order if possible
-                size_t space_pos = input.find(' ');
-                if (space_pos != std::string::npos && space_pos < input.length() - 1) {
-                    std::string first_part = input.substr(0, space_pos);
-                    std::string second_part = input.substr(space_pos + 1);
-                    if (second_part.find("to") == std::string::npos && 
-                        second_part.find("is") == std::string::npos) {  // Don't reorder if it would break grammar
-                        std::string reordered = second_part + " " + first_part;
-                        raw_examples.emplace_back(reordered, output, type);
-                        seen_pairs.insert(reordered + "|" + output);
-                    }
-                }
-            }
         }
     }
 
-    // Second pass: create contextual examples with larger context window
+    // Second pass: create contextual examples
     std::vector<ContextualTrainingExample> contextual_examples;
-    const size_t CONTEXT_SIZE = 5;  // Increased from 3 to 5
+    const size_t CONTEXT_SIZE = 3;  // Keep context window smaller for stability
     
     // Create sliding windows of examples
     for (size_t i = 0; i < raw_examples.size(); i++) {
         // Collect context from previous examples
         std::vector<std::string> context;
-        
-        // Add more varied context by sometimes skipping examples
         for (size_t j = 1; j <= CONTEXT_SIZE && i >= j; j++) {
-            // Randomly skip some context (80% chance to include each context item)
-            if (random_float() < 0.8f) {
-                context.insert(context.begin(), raw_examples[i - j].input + " " + raw_examples[i - j].output);
-            }
+            context.insert(context.begin(), raw_examples[i - j].input);
         }
         
         // Create contextual example
@@ -729,31 +707,12 @@ std::vector<ContextualTrainingExample> Utils::create_training_data() {
             raw_examples[i].type,
             CONTEXT_SIZE
         );
-
-        // Add version with partial context (randomly drop some context items)
-        if (!context.empty() && random_float() < 0.3f) {  // 30% chance
-            std::vector<std::string> partial_context;
-            for (const auto& ctx : context) {
-                if (random_float() < 0.7f) {  // 70% chance to keep each context item
-                    partial_context.push_back(ctx);
-                }
-            }
-            if (!partial_context.empty()) {
-                contextual_examples.emplace_back(
-                    partial_context,
-                    raw_examples[i].input,
-                    raw_examples[i].output,
-                    raw_examples[i].type,
-                    CONTEXT_SIZE
-                );
-            }
-        }
     }
 
     // Print statistics
-    std::cout << "\nContextual Training Data Statistics:" << std::endl;
+    std::cout << "\nTraining Data Statistics:" << std::endl;
     std::cout << "Original examples: " << raw_examples.size() << std::endl;
-    std::cout << "Total examples after augmentation: " << contextual_examples.size() << std::endl;
+    std::cout << "Contextual examples: " << contextual_examples.size() << std::endl;
     std::cout << "Context window size: " << CONTEXT_SIZE << std::endl;
     
     // Shuffle the examples

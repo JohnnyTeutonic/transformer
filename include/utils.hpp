@@ -72,12 +72,12 @@ struct ContextualTrainingExample {
     }
 
     // Add conversion operators
-    operator TrainingExample() const {
-        return TrainingExample(input, output, type);
-    }
-
     operator std::pair<std::string, std::string>() const {
         return {input, output};
+    }
+
+    operator TrainingExample() const {
+        return TrainingExample(input, output, type);
     }
 };
 
