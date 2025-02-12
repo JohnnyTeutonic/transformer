@@ -264,10 +264,7 @@ private:
     std::optional<std::vector<Matrix>> parameter_grads;
 
     // Randomization helpers
-    float get_dynamic_temperature(std::mt19937& gen) const {
-        std::uniform_real_distribution<float> temp_dist(0.7f, 1.3f);
-        return temp_dist(gen);
-    }
+    float get_dynamic_temperature(PhraseType phrase_type, std::mt19937& gen);
 
     void add_random_noise(Matrix& logits, std::mt19937& gen) const {
         std::normal_distribution<float> noise_dist(0.0f, 0.1f);
@@ -325,6 +322,8 @@ private:
             throw std::runtime_error("Tokenizer not set. Call set_tokenizer before using this method.");
         }
     }
+
+    std::string current_input_context;  // Track current input context
 
 public:
     Transformer() = default;
@@ -554,6 +553,10 @@ public:
         
         return output_tokens;
     }
+
+    // Add context tracking
+    std::string get_current_context() const { return current_input_context; }
+    void set_current_context(const std::string& context) { current_input_context = context; }
 
 private:
     /**

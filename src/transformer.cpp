@@ -476,6 +476,69 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         // Project to vocabulary space using language model head
         Matrix logits = lm_head->forward(hidden_states, training);
         
+        // Debug logits statistics
+        float min_logit = std::numeric_limits<float>::infinity();
+        float max_logit = -std::numeric_limits<float>::infinity();
+        float sum_logits = 0.0f;
+        size_t nonzero_logits = 0;
+        
+        for (size_t i = 0; i < logits.rows(); i++) {
+            for (size_t j = 0; j < logits.cols(); j++) {
+                float val = logits(i, j);
+                min_logit = std::min(min_logit, val);
+                max_logit = std::max(max_logit, val);
+                sum_logits += val;
+                if (std::abs(val) > 1e-6) nonzero_logits++;
+            }
+        }
+        
+        std::cout << "\nLogits statistics before caching:\n"
+                  << "Min logit: " << min_logit << "\n"
+                  << "Max logit: " << max_logit << "\n"
+                  << "Mean logit: " << sum_logits / (logits.rows() * logits.cols()) << "\n"
+                  << "Nonzero logits: " << nonzero_logits << "/" 
+                  << (logits.rows() * logits.cols()) << "\n"
+                  << "Logit range: " << (max_logit - min_logit) << std::endl;
+
+        // Apply scaling to increase logit separation
+        const float scale_factor = 1.5f;  // Increase contrast between logits
+        for (size_t i = 0; i < logits.rows(); i++) {
+            // Find max logit in this row for numerical stability
+            float row_max = -std::numeric_limits<float>::infinity();
+            for (size_t j = 0; j < logits.cols(); j++) {
+                row_max = std::max(row_max, logits(i, j));
+            }
+            
+            // Scale logits relative to max
+            for (size_t j = 0; j < logits.cols(); j++) {
+                logits(i, j) = (logits(i, j) - row_max) * scale_factor;
+            }
+        }
+        
+        // Debug scaled logits
+        min_logit = std::numeric_limits<float>::infinity();
+        max_logit = -std::numeric_limits<float>::infinity();
+        sum_logits = 0.0f;
+        nonzero_logits = 0;
+        
+        for (size_t i = 0; i < logits.rows(); i++) {
+            for (size_t j = 0; j < logits.cols(); j++) {
+                float val = logits(i, j);
+                min_logit = std::min(min_logit, val);
+                max_logit = std::max(max_logit, val);
+                sum_logits += val;
+                if (std::abs(val) > 1e-6) nonzero_logits++;
+            }
+        }
+        
+        std::cout << "\nLogits statistics after scaling:\n"
+                  << "Min logit: " << min_logit << "\n"
+                  << "Max logit: " << max_logit << "\n"
+                  << "Mean logit: " << sum_logits / (logits.rows() * logits.cols()) << "\n"
+                  << "Nonzero logits: " << nonzero_logits << "/" 
+                  << (logits.rows() * logits.cols()) << "\n"
+                  << "Logit range: " << (max_logit - min_logit) << std::endl;
+        
         // Cache logits
         GradientCheckpoint::cache_activation("final_logits", logits);
 
@@ -991,58 +1054,80 @@ std::string Transformer::extract_prediction(
     const Matrix& hidden_states,
     PhraseType phrase_type,
     const TiktokenTokenizer& tokenizer) {
-    // Create a local generator if none provided
-    std::mt19937 local_gen = Utils::get_new_generator();
+    
+    // Create a local generator with time-based seed for more randomness
+    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::mt19937 local_gen(static_cast<unsigned int>(time_seed));
     
     // Get the final token predictions
     Matrix final_hidden_states = Matrix(hidden_states.row(hidden_states.rows() - 1));
     
-    // Apply dynamic temperature scaling based on a random factor
-    std::uniform_real_distribution<float> temp_dist(0.7f, 1.3f);
-    const float temperature = temp_dist(local_gen);  // Random temperature for each prediction
-    
-    // Add random noise to hidden states for more variety
-    std::normal_distribution<float> noise_dist(0.0f, 0.1f);
-    for (size_t i = 0; i < final_hidden_states.cols(); i++) {
-        final_hidden_states(0, i) += noise_dist(local_gen);
+    // Dynamic temperature based on input length and phrase type
+    float base_temp = 0.8f;
+    if (phrase_type == PhraseType::VERB) {
+        base_temp = 0.9f;  // Slightly higher for verbs
+    } else if (phrase_type == PhraseType::ADJECTIVE) {
+        base_temp = 0.7f;  // Slightly lower for adjectives
     }
     
-    float max_hidden_state = -std::numeric_limits<float>::infinity();
+    // Add small random variation to temperature
+    std::uniform_real_distribution<float> temp_var(0.9f, 1.1f);
+    const float temperature = base_temp * temp_var(local_gen);
+    
+    // Apply softmax with temperature
+    std::vector<float> probabilities(final_hidden_states.cols());
+    float max_val = -std::numeric_limits<float>::infinity();
     
     // Find max for numerical stability
     for (size_t i = 0; i < final_hidden_states.cols(); i++) {
-        max_hidden_state = std::max(max_hidden_state, final_hidden_states(0, i));
+        max_val = std::max(max_val, final_hidden_states(0, i));
     }
     
-    // Compute softmax probabilities with temperature
-    std::vector<float> probabilities(final_hidden_states.cols());
+    // Compute softmax with temperature
     float sum_exp = 0.0f;
-    
     for (size_t i = 0; i < final_hidden_states.cols(); i++) {
-        float scaled_hidden_state = (final_hidden_states(0, i) - max_hidden_state) / temperature;
-        probabilities[i] = std::exp(scaled_hidden_state);
+        float scaled_logit = (final_hidden_states(0, i) - max_val) / temperature;
+        probabilities[i] = std::exp(scaled_logit);
         sum_exp += probabilities[i];
     }
     
-    // Normalize probabilities
+    // Normalize and apply context-based adjustments
+    for (size_t i = 0; i < probabilities.size(); i++) {
+        probabilities[i] /= sum_exp;
+        
+        // Decode token for context checking
+        std::string token = tokenizer.decode({static_cast<int>(i)});
+        
+        // Apply phrase type specific boosts
+        switch (phrase_type) {
+            case PhraseType::VERB:
+                if (is_likely_verb(token)) {
+                    probabilities[i] *= 1.5f;
+                }
+                break;
+            case PhraseType::ADJECTIVE:
+                if (is_likely_adjective(token)) {
+                    probabilities[i] *= 1.5f;
+                }
+                break;
+            default:
+                break;
+        }
+        
+        // Penalize very common tokens slightly
+        if (token.length() <= 2) {
+            probabilities[i] *= 0.8f;
+        }
+    }
+    
+    // Renormalize after adjustments
+    sum_exp = std::accumulate(probabilities.begin(), probabilities.end(), 0.0f);
     for (float& prob : probabilities) {
         prob /= sum_exp;
     }
     
-    // Apply type-specific boosts with random variation
-    switch (phrase_type) {
-        case PhraseType::VERB:
-            boost_verb_probabilities(probabilities, tokenizer, &local_gen);
-            break;
-        case PhraseType::ADJECTIVE:
-            boost_adjective_probabilities(probabilities, tokenizer, &local_gen);
-            break;
-        default:
-            break;
-    }
-    
-    // Apply nucleus sampling
-    float p = 0.9f;  // Keep top 90% of probability mass
+    // Apply nucleus (top-p) sampling
+    const float p = 0.9f;  // Keep top 90% of probability mass
     float cumsum = 0.0f;
     std::vector<size_t> valid_indices;
     
@@ -1054,9 +1139,14 @@ std::string Transformer::extract_prediction(
     
     // Keep tokens until we reach the probability threshold
     for (size_t idx : indices) {
-        cumsum += probabilities[idx];
-        valid_indices.push_back(idx);
         if (cumsum >= p) break;
+        valid_indices.push_back(idx);
+        cumsum += probabilities[idx];
+    }
+    
+    // Ensure we have at least a few options
+    if (valid_indices.size() < 3) {
+        valid_indices.push_back(indices[valid_indices.size()]);
     }
     
     // Sample from the valid indices
@@ -1065,7 +1155,7 @@ std::string Transformer::extract_prediction(
     
     int predicted_token = valid_indices[dist(local_gen)];
     
-    // Decode the predicted token
+    // Decode and return the predicted token
     return tokenizer.decode({predicted_token});
 }
 
@@ -1190,9 +1280,9 @@ bool Transformer::is_likely_adjective(const std::string& token) const {
 }
 
 void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learning_rate, const TransformerConfig& config) {
-    const float clip_threshold = 1.0f;  // Reduced from 10.0f to be more conservative
+    const float clip_threshold = config.gradient_clip_threshold;
     const float weight_decay = config.weight_decay;
-    const float max_relative_change = 0.1f;  // Maximum 10% change per update
+    const float max_relative_change = 0.1f;  // Reduced back to 10% for stability
     
     // Calculate gradient norm
     float grad_norm = 0.0f;
@@ -1204,44 +1294,43 @@ void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learnin
     }
     grad_norm = std::sqrt(grad_norm);
     
-    // Apply more aggressive clipping with smooth transition
+    // Apply gradient clipping with smooth transition
     float scaling_factor = 1.0f;
     if (grad_norm > clip_threshold) {
         scaling_factor = clip_threshold / (grad_norm + 1e-8f);
-        // Apply smooth transition for large gradients
-        scaling_factor = std::pow(scaling_factor, 1.5f);  // More aggressive scaling for larger gradients
+        // Use linear scaling for more stability
+        scaling_factor = std::max(0.1f, scaling_factor);
     }
     
-    // Scale learning rate based on gradient norm
+    // Use a more stable learning rate adaptation
     float adaptive_lr = learning_rate;
-    if (grad_norm > 0.1f) {  // If gradients are large
-        adaptive_lr *= std::exp(-grad_norm);  // Exponentially reduce learning rate
+    if (grad_norm > clip_threshold) {
+        adaptive_lr *= scaling_factor;
     }
-    adaptive_lr = std::max(adaptive_lr, learning_rate * 0.01f);  // Don't let it get too small
     
-    // Update parameters with clipped gradients and weight decay
+    // Update parameters with clipped gradients and proper weight decay
     #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < param.rows(); ++i) {
         for (size_t j = 0; j < param.cols(); ++j) {
-            float decay = weight_decay * param(i, j);
-            float update = grad(i, j) * scaling_factor + decay;
+            // Apply weight decay separately from gradient
+            float decay_update = -weight_decay * param(i, j);
+            float grad_update = -grad(i, j) * scaling_factor;
             
-            // Limit maximum parameter change
-            float param_scale = std::abs(param(i, j)) + 1e-8f;
-            float max_update = max_relative_change * param_scale;
-            update = std::clamp(update, -max_update, max_update);
+            // Compute total update
+            float total_update = adaptive_lr * (grad_update + decay_update);
             
-            // Apply update with adaptive learning rate
-            param(i, j) -= adaptive_lr * update;
+            // Limit relative change
+            float max_update = max_relative_change * std::abs(param(i, j) + 1e-8f);
+            total_update = std::clamp(total_update, -max_update, max_update);
             
-            // Add value clipping to prevent extreme values
-            param(i, j) = std::clamp(param(i, j), -100.0f, 100.0f);
+            // Apply update
+            param(i, j) += total_update;
         }
     }
 }
 
 void update_parameter_with_clip(Vector& param, const Vector& grad, float learning_rate, const TransformerConfig& config) {
-    const float clip_threshold = 10.0f;  // Increased from 5.0f
+    const float clip_threshold = config.gradient_clip_threshold;
     const float weight_decay = config.weight_decay;
     
     float grad_norm = 0.0f;
@@ -1261,12 +1350,11 @@ void update_parameter_with_clip(Vector& param, const Vector& grad, float learnin
     #pragma omp parallel for
     for (size_t i = 0; i < param.size(); ++i) {
         float decay = weight_decay * param[i];
-        float update = grad[i] * scaling_factor + decay;
-        // Use relative clipping based on parameter magnitude
-        float param_scale = std::abs(param[i]) + 1e-8f;
-        float max_update = 0.2f * param_scale;  // Allow up to 20% change
-        update = std::clamp(update, -max_update, max_update);
-        param[i] -= learning_rate * update;
+        float grad_update = -grad[i] * scaling_factor;
+        float total_update = learning_rate * (grad_update + decay);
+        float max_update = 0.1f * std::abs(param[i] + 1e-8f);
+        total_update = std::clamp(total_update, -max_update, max_update);
+        param[i] += total_update;
     }
 }
 
@@ -1537,4 +1625,35 @@ void Transformer::backward(const Matrix& grad, const Matrix& activation, size_t 
     // Compute gradients through the layer
     Matrix layer_grads = layers[layer_idx]->backward(grad, activation);
     parameter_grads->push_back(layer_grads);
+}
+
+float Transformer::get_dynamic_temperature(PhraseType phrase_type, std::mt19937& gen) {
+    // Get base temperature from config
+    const float base_temp = config.token_prediction.temperature;
+    
+    // Adjust temperature based on phrase type while maintaining base temperature ratio
+    float type_multiplier = 1.0f;
+    switch (phrase_type) {
+        case PhraseType::VERB:
+            type_multiplier = 0.9f;  // Slightly lower for verbs
+            break;
+        case PhraseType::ADJECTIVE:
+            type_multiplier = 1.1f;  // Slightly higher for adjectives
+            break;
+        case PhraseType::GENERAL:
+            type_multiplier = 1.0f;  // Base temperature for general phrases
+            break;
+        default:
+            type_multiplier = 1.0f;
+    }
+    
+    // Add small random variation (±10%) while respecting base temperature
+    std::uniform_real_distribution<float> temp_var(0.9f, 1.1f);
+    const float temperature = base_temp * type_multiplier * temp_var(gen);
+    
+    std::cout << "Dynamic temperature: base=" << base_temp 
+              << ", type_mult=" << type_multiplier 
+              << ", final=" << temperature << std::endl;
+              
+    return temperature;
 }

@@ -60,63 +60,67 @@ void reinitialize_batch_weights(Transformer& transformer, const TransformerConfi
     std::random_device rd;
     std::mt19937 gen(rd());
     
-    // Dynamic temperature scaling
-    float temperature = 1.0f + (5.0f * std::exp(-global_step / 500.0f));  // Starts at 6.0, decays to 1.0
+    // More aggressive temperature scaling
+    float temperature = 1.0f + (8.0f * std::exp(-global_step / 300.0f));  // Starts at 9.0, decays faster
     
-    // Multiple scales for different layers
-    float attention_scale = 0.15f * std::exp(-global_step / 2000.0f);  // Slower decay for attention
-    float ffn_scale = 0.1f * std::exp(-global_step / 1000.0f);        // Faster decay for feed-forward
-    float output_scale = 0.05f * std::exp(-global_step / 800.0f);     // Even faster for output layer
+    // More aggressive scales for different layers
+    float attention_scale = 0.25f * std::exp(-global_step / 1500.0f);  // Increased from 0.15f
+    float ffn_scale = 0.15f * std::exp(-global_step / 800.0f);        // Increased from 0.1f
+    float output_scale = 0.08f * std::exp(-global_step / 600.0f);     // Increased from 0.05f
     
-    // Minimum scales to maintain exploration
-    attention_scale = std::max(0.02f, attention_scale);
-    ffn_scale = std::max(0.01f, ffn_scale);
-    output_scale = std::max(0.005f, output_scale);
+    // Higher minimum scales to maintain exploration
+    attention_scale = std::max(0.05f, attention_scale);  // Increased from 0.02f
+    ffn_scale = std::max(0.03f, ffn_scale);            // Increased from 0.01f
+    output_scale = std::max(0.01f, output_scale);      // Increased from 0.005f
     
-    // Get all parameters that need reinitialization
+    // Get all parameters and tokenizer
     auto& params = transformer.parameters();
+    auto tokenizer = transformer.get_tokenizer();
+    if (!tokenizer) {
+        std::cerr << "Error: Tokenizer is null in reinitialize_batch_weights" << std::endl;
+        return;
+    }
     
-    // Reinitialize each parameter matrix with controlled randomness
-    for (size_t p = 0; p < params.size(); p++) {
-        Matrix& current_param = params[p];
-        const size_t rows = current_param.rows();
-        const size_t cols = current_param.cols();
+    // Process each parameter matrix
+    for (auto& param : params) {
+        if (param.empty()) continue;  // Skip empty parameters
         
-        // Choose scale based on layer type (inferred from matrix dimensions)
-        float scale;
-        if (cols == config.hidden_size) {
-            scale = attention_scale;  // Attention layers
-        } else if (cols == config.intermediate_size) {
-            scale = ffn_scale;        // Feed-forward layers
-        } else {
-            scale = output_scale;     // Output layers
-        }
+        const size_t rows = param.rows();
+        const size_t cols = param.cols();
         
-        // Process each matrix in parallel
+        // Process each element in parallel with more aggressive perturbation
         #pragma omp parallel for collapse(2)
         for (size_t i = 0; i < rows; i++) {
             for (size_t j = 0; j < cols; j++) {
                 // Thread-local random generators
-                std::mt19937 local_gen(rd() + i * cols + j);  // Unique seed per element
+                std::mt19937 local_gen(rd() + i * cols + j);
                 
-                // Add temperature-based sampling
-                std::normal_distribution<float> dist(0.0f, scale * temperature);
-                float perturbation = dist(local_gen);
-                
-                // Current weight magnitude affects perturbation
-                float current_value = std::abs(current_param(i, j));
-                float adaptive_scale = scale / (1.0f + current_value * temperature);
-                
-                // Apply perturbation with probability decay
-                float apply_prob = std::exp(-global_step / 3000.0f);  // Probability of applying perturbation
-                if (std::uniform_real_distribution<float>(0.0f, 1.0f)(local_gen) < apply_prob) {
-                    current_param(i, j) += perturbation * adaptive_scale;
+                // Determine scale based on parameter type
+                float scale = ffn_scale;  // Default to FFN scale
+                if (cols == config.hidden_size) {
+                    scale = attention_scale;  // Attention layers typically project to hidden_size
+                } else if (cols == tokenizer->vocab_size()) {
+                    scale = output_scale;  // Output layer projects to vocab size
                 }
                 
-                // Occasionally flip sign of small weights to explore different patterns
-                if (std::abs(current_param(i, j)) < 0.01f && 
-                    std::uniform_real_distribution<float>(0.0f, 1.0f)(local_gen) < 0.1f) {
-                    current_param(i, j) *= -1.0f;
+                // Add temperature-based sampling with higher variance
+                std::normal_distribution<float> dist(0.0f, scale * temperature * 1.5f);  // Increased variance
+                float perturbation = dist(local_gen);
+                
+                // Current weight magnitude affects perturbation more aggressively
+                float current_value = std::abs(param(i, j));
+                float adaptive_scale = scale / (1.0f + current_value * temperature * 0.5f);  // Reduced dampening
+                
+                // Apply perturbation with higher probability
+                float apply_prob = std::exp(-global_step / 5000.0f);  // Slower decay of probability
+                if (std::uniform_real_distribution<float>(0.0f, 1.0f)(local_gen) < apply_prob) {
+                    param(i, j) += perturbation * adaptive_scale;
+                }
+                
+                // More aggressive sign flipping for small weights
+                if (std::abs(param(i, j)) < 0.05f &&  // Increased threshold
+                    std::uniform_real_distribution<float>(0.0f, 1.0f)(local_gen) < 0.2f) {  // Increased probability
+                    param(i, j) *= -1.0f;
                 }
             }
         }
@@ -324,6 +328,13 @@ int main(int argc, char* argv[]) {
                 auto best_config = tuner.get_best_config();
                 std::string tuning_results_path = save_directory + "/tuning_results.json";
                 tuner.save_results(tuning_results_path);
+                
+                // Log best tuning results
+                std::cout << "\nBest tuning configuration achieved:\n"
+                          << "- Mean validation loss: " << tuning_results[0].mean_validation_loss << "\n"
+                          << "- Validation loss std: " << tuning_results[0].validation_loss_std << "\n"
+                          << "- Early stops: " << tuning_results[0].early_stops << std::endl;
+                
                 config = best_config.to_transformer_config();
                 transformer = Transformer(config, tokenizer);
                 debug::log_message("Reinitialized transformer with best hyperparameters", "INFO");
@@ -380,43 +391,58 @@ int main(int argc, char* argv[]) {
                 float iteration_loss = 0.0f;
 
                 // Process each sample in this iteration sequentially
+                // Update learning rate based on schedule
+                if (global_step < warmup_steps) {
+                    // Linear warmup
+                    current_lr = initial_lr + (peak_lr - initial_lr) * (static_cast<float>(global_step) / warmup_steps);
+                } else {
+                    // Cosine decay with minimum learning rate
+                    float min_lr = initial_lr * 0.1f;  // 10% of initial learning rate as minimum
+                    float progress = static_cast<float>(global_step - warmup_steps) / (total_steps - warmup_steps);
+                    progress = std::min(1.0f, progress);
+                    float decay = 0.5f * (1.0f + std::cos(progress * M_PI));
+                    current_lr = min_lr + (peak_lr - min_lr) * decay * std::pow(decay_factor, progress * 10.0f);
+                }
+
                 for (size_t sample_idx = start_idx; sample_idx < end_idx; ++sample_idx) {
-                    const auto& [input_str, target_str] = training_pairs[sample_idx];
+                    const ContextualTrainingExample& example = training_pairs[sample_idx];
                     
-                    // Process single sample
-                    std::string processed_input = input_str;
-                    std::string processed_target = target_str;
-                    tokenizer->preprocess_text(processed_input);
+                    // Process context and input
+                    std::string full_context = example.get_full_context();
+                    std::string processed_context = full_context;
+                    std::string processed_target = example.output;
+                    tokenizer->preprocess_text(processed_context);
                     tokenizer->preprocess_text(processed_target);
                     
-                    std::vector<int> input_tokens = tokenizer->encode(processed_input);
+                    std::vector<int> context_tokens = tokenizer->encode(processed_context);
                     std::vector<int> target_tokens = tokenizer->encode(processed_target);
                     
-                    if (!Utils::validate_input_sequence(input_tokens, tokenizer->vocab_size()) ||
+                    if (!Utils::validate_input_sequence(context_tokens, tokenizer->vocab_size()) ||
                         !Utils::validate_input_sequence(target_tokens, tokenizer->vocab_size())) {
                         std::cout << "Skipping invalid sample " << sample_idx << std::endl;
                         continue;
                     }
 
-                    // Forward pass for single sample
-                    Matrix logits = transformer.forward(input_tokens, "", *tokenizer);
+                    // Forward pass with context
+                    Matrix logits = transformer.forward(context_tokens, full_context, *tokenizer);
 
-                    // Create target distribution for single sample
+                    // Create target distribution
                     Matrix target_distribution = Utils::create_batch_target_distribution(
                         {target_tokens}, *tokenizer, tokenizer->vocab_size(), 1
                     );
 
-                    // Compute loss for this sample
+                    // Compute loss and backward pass
                     float sample_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
                     iteration_loss += sample_loss;
-
-                    // Backward pass for single sample
                     transformer.backward(logits, target_distribution, current_lr);
                 }
 
                 // Average loss over samples in this iteration
                 iteration_loss /= samples_this_iteration;
                 epoch_loss += iteration_loss;
+
+                // Increment global step
+                global_step++;
 
                 // Update training monitor with metrics
                 RunningStatistics grad_stats;
@@ -434,7 +460,8 @@ int main(int argc, char* argv[]) {
                     epoch,                    // Current epoch
                     iter,                     // Current step
                     0.0f,                    // Let the monitor compute the trend
-                    grad_stats               // Basic statistics
+                    grad_stats,              // Basic statistics
+                    current_lr               // Add current learning rate
                 );
                 training_monitor->log_metrics(metrics);
 
@@ -455,6 +482,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << (progress * 100) << "% "
                               << "Iteration " << iter + 1 << "/" << total_iterations 
                               << " (Loss: " << iteration_loss 
+                              << ", LR: " << std::scientific << std::setprecision(3) << current_lr
                               << ", Samples: " << samples_this_iteration
                               << ", Time: " << iteration_duration.count() << "ms)" 
                               << std::flush;
@@ -469,23 +497,32 @@ int main(int argc, char* argv[]) {
                       << " (Loss: " << epoch_loss / total_iterations 
                       << ", Time: " << epoch_duration.count() << "s)" << std::endl;
 
-            // Run quick validation check at end of epoch
-            if ((epoch + 1) % 2 == 0) {
-                std::cout << "\nRunning validation..." << std::endl;
-                auto val_start = std::chrono::high_resolution_clock::now();
-                
-                float validation_loss = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
-                
-                auto val_end = std::chrono::high_resolution_clock::now();
-                auto val_duration = std::chrono::duration_cast<std::chrono::seconds>(val_end - val_start);
-                
-                std::cout << "Validation complete (Loss: " << validation_loss 
-                          << ", Time: " << val_duration.count() << "s)" << std::endl;
-                
-                // Make a few quick test predictions
-                Utils::generate_predictions(transformer, "I go to the", tokenizer);
-                Utils::generate_predictions(transformer, "The weather is", tokenizer);
-            }
+            // Run quick validation check and predictions at end of each epoch
+            std::cout << "\nRunning validation and predictions..." << std::endl;
+            auto val_start = std::chrono::high_resolution_clock::now();
+            
+            ValidationMetrics validation_metrics = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
+            float validation_loss = validation_metrics.loss;
+            
+            auto val_end = std::chrono::high_resolution_clock::now();
+            auto val_duration = std::chrono::duration_cast<std::chrono::seconds>(val_end - val_start);
+            
+            std::cout << "Validation complete (Loss: " << validation_loss 
+                      << ", Accuracy: " << validation_metrics.accuracy
+                      << ", Time: " << val_duration.count() << "s)" << std::endl;
+            
+            // Make test predictions every epoch
+            std::cout << "\nTest predictions for epoch " << epoch + 1 << ":" << std::endl;
+            Utils::generate_predictions(transformer, "I go to the", tokenizer);
+            Utils::generate_predictions(transformer, "The weather is", tokenizer);
+            Utils::generate_predictions(transformer, "She wants to", tokenizer);
+            Utils::generate_predictions(transformer, "They need to", tokenizer);
+            Utils::generate_predictions(transformer, "He read a", tokenizer);
+            Utils::generate_predictions(transformer, "They started to", tokenizer); 
+            Utils::generate_predictions(transformer, "They should", tokenizer);
+            Utils::generate_predictions(transformer, "They run to the", tokenizer);
+            Utils::generate_predictions(transformer, "Researchers study in the", tokenizer); 
+            Utils::generate_predictions(transformer, "The man cooks in the", tokenizer); 
 
             // Save regular checkpoint
             if ((epoch + 1) % checkpoint_frequency == 0) {
@@ -510,30 +547,6 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Test prediction on a sample input
-            if ((epoch + 1) % 2 == 0) {
-                std::cout << "\nTesting generation with " 
-                          << (config.tokenizer.use_subword ? "subword" : "regular") 
-                          << " tokenization:" << std::endl;
-                
-                // Test a simple input
-                std::string test_input = "I go to";
-                std::cout << "\n=== Processing prompt: '" << test_input << "' ===" << std::endl;
-                
-                // Preprocess input
-                std::string processed_input = test_input;
-                tokenizer->preprocess_text(processed_input);
-                std::vector<int> test_tokens = tokenizer->encode(processed_input);
-                
-                // Get model prediction
-                transformer.set_training(false);  // Set to evaluation mode
-                Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
-                
-                // Show the top predictions
-                std::cout << "\nTop Predictions:\n";
-                Utils::print_top_predictions(logits, *tokenizer, transformer, 5);
-            }
-
             if ((epoch + 1) % 5 == 0) { 
                 // Cache clearing removed since TiktokenTokenizer doesn't use caching
             }
@@ -541,7 +554,8 @@ int main(int argc, char* argv[]) {
             // Run validation every 3 epochs
             if ((epoch + 1) % 3 == 0) {
                 std::cout << "\nRunning validation after epoch " << (epoch + 1) << "...\n";
-                float validation_loss = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
+                ValidationMetrics val_metrics = Utils::evaluate_validation(transformer, *tokenizer, validation_data);
+                float validation_loss = val_metrics.loss;
 
                 // Update progress state for cross-validation
                 debug::progress_state.update_cross_validation(
@@ -550,9 +564,17 @@ int main(int argc, char* argv[]) {
                     validation_loss
                 );
 
-                // Log validation results
-                std::cout << "Epoch " << (epoch + 1) << " Validation Loss: " << validation_loss
-                          << std::endl;
+                // Log validation results with more details
+                std::cout << "Epoch " << (epoch + 1) << " Validation Results:\n"
+                          << "- Loss: " << validation_loss << "\n"
+                          << "- Accuracy: " << val_metrics.accuracy << "\n"
+                          << "Type-specific metrics:" << std::endl;
+                
+                for (const auto& [type, acc] : val_metrics.type_specific_accuracy) {
+                    std::cout << "  " << static_cast<int>(type) << ": "
+                              << "Accuracy=" << acc << ", "
+                              << "Loss=" << val_metrics.type_specific_loss[type] << std::endl;
+                }
             }
         }
 

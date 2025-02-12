@@ -97,9 +97,9 @@ public:
                         unsigned int seed = std::random_device{}());
 
     std::vector<TuningResult> tune(
-        const std::vector<std::pair<std::string, std::string>>& training_data,
-        const TiktokenTokenizer& tokenizer
-    );
+        const std::vector<ContextualTrainingExample>& training_data,
+        const TiktokenTokenizer& tokenizer,
+        size_t num_trials = 10);
 
     HyperparameterConfig get_best_config() const;
     void save_results(const std::string& path) const;

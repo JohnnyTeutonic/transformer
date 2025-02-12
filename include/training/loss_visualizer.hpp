@@ -18,7 +18,7 @@ public:
     static constexpr size_t MEDIUM_WINDOW = 50;  // Medium-term moving average window
 
     LossVisualizer(const std::string& log_path = "./loss.log") 
-        : log_file_path(log_path) {
+        : log_file_path(log_path), current_lr(0.0f) {
         try {
             // Open file in truncate mode (std::ios::trunc) to clear previous contents
             log_file.open(log_file_path, std::ios::out | std::ios::trunc);
@@ -69,8 +69,9 @@ public:
         }
     }
 
-    void add_loss(float raw_loss, float smoothed_loss, float trend, float grad_norm = 0.0f) {
+    void add_loss(float raw_loss, float smoothed_loss, float trend, float grad_norm = 0.0f, float learning_rate = 0.0f) {
         std::lock_guard<std::mutex> lock(mutex);
+        current_lr = learning_rate;  // Store current learning rate
         
         // Add to history
         raw_history.push_back(raw_loss);
@@ -101,6 +102,7 @@ private:
     std::string log_file_path;
     std::ofstream log_file;
     std::mutex mutex;
+    float current_lr;  // Add learning rate tracking
 
     std::deque<float> raw_history;
     std::deque<float> smoothed_history;
@@ -224,6 +226,9 @@ private:
         auto now = std::chrono::system_clock::now();
         auto time = std::chrono::system_clock::to_time_t(now);
         log_file << "\n=== Update at " << std::ctime(&time);
+
+        // Add learning rate to log
+        log_file << "Learning Rate: " << std::scientific << std::setprecision(3) << current_lr << "\n\n";
 
         // Raw Loss Section with trend indicator and moving averages
         log_file << "Raw Loss " << raw_stats.trend_indicator << ":\n";

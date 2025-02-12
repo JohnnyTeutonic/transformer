@@ -280,6 +280,12 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
             V(i, j) += params_.value_bias[j];
         }
     }
+
+    // Debug Q,K,V statistics before attention
+    std::cout << "\nAttention component statistics before attention:" << std::endl;
+    print_matrix_stats("Query", Q);
+    print_matrix_stats("Key", K);
+    print_matrix_stats("Value", V);
         
     // If KV cache is provided, use cached values
     if (kv_cache && !kv_cache->empty()) {
@@ -330,13 +336,18 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
     
     // Compute attention scores using matmul and scale
     Matrix scores = matmul(Q, K.transpose());
-    scores *= (1.0f / std::sqrt(static_cast<float>(head_dim)));
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    scores *= scale;
+
+    std::cout << "\nAttention scores before masking:" << std::endl;
+    print_matrix_stats("Scores", scores);
     
     // Create and apply causal mask
     Matrix causal_mask = create_causal_mask(seq_length);
     
     // Apply attention mask if provided
     if (!attention_mask.mask.empty()) {
+        std::cout << "Applying provided attention mask" << std::endl;
         for (size_t b = 0; b < batch_size; b++) {
             for (size_t h = 0; h < num_heads; h++) {
                 for (size_t i = 0; i < seq_length; i++) {
@@ -371,10 +382,27 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
             }
         }
     }
+
+    std::cout << "\nAttention scores after masking:" << std::endl;
+    print_matrix_stats("Masked Scores", scores);
     
-    // Apply softmax using our helper method
-    scores = softmax(scores);
-    std::cout << "Scores dimensions after softmax: " << scores.rows() << "x" << scores.cols() << std::endl;
+    // Use dynamic temperature scaling based on sequence position
+    const float base_temperature = 1.0f;
+    const float position_scale = 1.0f / std::sqrt(static_cast<float>(scores.rows()));
+    const float head_scale = 1.0f / std::sqrt(static_cast<float>(num_heads));
+    
+    // Scale temperature based on position and head
+    for (size_t i = 0; i < scores.rows(); i++) {
+        size_t seq_pos = i % (scores.rows() / num_heads);
+        size_t head_idx = i / (scores.rows() / num_heads);
+        float dynamic_temp = base_temperature * 
+            (1.0f + position_scale * seq_pos) * 
+            (1.0f + head_scale * head_idx);
+        scores.row(i) = softmax_with_temperature(scores.row(i), dynamic_temp);
+    }
+
+    std::cout << "\nAttention scores after dynamic temperature softmax:" << std::endl;
+    print_matrix_stats("Softmax Scores", scores);
     
     // Apply attention dropout during training
     if (training && dropout_prob > 0.0f) {
@@ -386,13 +414,11 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
                 dropout_mask.data()[i] = 0.0f;
             }
         }
-        std::cout << "Dropout mask dimensions: " << dropout_mask.rows() << "x" << dropout_mask.cols() << std::endl;
         scores = elementwise_multiply(scores, dropout_mask) / (1.0f - dropout_prob);
     }
     
     // Compute attention output using matmul
     Matrix attention_output = matmul(scores, V);
-    std::cout << "Attention output dimensions: " << attention_output.rows() << "x" << attention_output.cols() << std::endl;
     
     // Final reshape back to input dimensions
     Matrix reshaped_output(batch_size, hidden_size);  // Match input dimensions exactly
@@ -423,8 +449,11 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& att
             output(i, j) += params_.output_bias[j];
         }
     }
+
+    std::cout << "\nFinal attention output statistics:" << std::endl;
+    print_matrix_stats("Output", output);
     
-    return output;  // Will have shape [batch_size, hidden_size] matching the input
+    return output;
 }
 
 Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matrix& K, const AttentionMask& mask) {
@@ -478,17 +507,16 @@ Matrix MultiHeadAttention::compute_attention_scores(const Matrix& Q, const Matri
     return scores;
 }
 
-Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& input, const Matrix& target) {
-    SCOPE_LOG();
+Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& input, const Matrix& target, const TransformerConfig& config) {
+    const float clip_threshold = config.gradient_clip_threshold;  // Access directly from config
     try {
         std::cout << "\n=== MultiHeadAttention::backward START ===" << std::endl;
         
-        // Constants for gradient clipping and stability
-        const float clip_threshold = 5.0f;  // Match global threshold
         const float eps = 1e-6f;
         
         Matrix output_weights_t = params_.output_weights.transpose();
         Matrix d_value(grad_output.rows(), output_weights_t.cols());
+        
         #ifdef USE_CUDA
         cuda::matmul(grad_output, output_weights_t, d_value);
         #else
@@ -539,6 +567,7 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
         
         // Compute input gradients for backward flow
         Matrix d_input(scaled_grad.rows(), params_.output_weights.cols());
+        
         #ifdef USE_CUDA
         cuda::matmul(scaled_grad, params_.output_weights, d_input);
         #else
@@ -853,7 +882,7 @@ Matrix MultiHeadAttention::compute_attention(const Matrix& Q, const Matrix& K, c
     return reshape_from_attention(Tensor(attention, dims), seq_len, hidden_size);
 }
 
-Matrix MultiHeadAttention::create_causal_mask(size_t seq_length) {
+Matrix MultiHeadAttention::create_causal_mask(size_t seq_length) const {
     Matrix mask(seq_length, seq_length, 0.0f);
     // Create lower triangular matrix (1s below diagonal, 0s above)
     for (size_t i = 0; i < seq_length; i++) {
@@ -1102,5 +1131,92 @@ std::unique_ptr<MultiHeadAttention> MultiHeadAttention::load(std::istream& is, c
 void MultiHeadAttention::update_parameters(float learning_rate) {
     SCOPE_LOG();
     // ... rest of update_parameters
+}
+
+// Add helper function for matrix statistics
+void MultiHeadAttention::print_matrix_stats(const std::string& name, const Matrix& mat) const {
+    float min_val = std::numeric_limits<float>::infinity();
+    float max_val = -std::numeric_limits<float>::infinity();
+    float sum_val = 0.0f;
+    size_t nonzero = 0;
+    
+    for (size_t i = 0; i < mat.rows(); i++) {
+        for (size_t j = 0; j < mat.cols(); j++) {
+            float val = mat(i, j);
+            min_val = std::min(min_val, val);
+            max_val = std::max(max_val, val);
+            sum_val += val;
+            if (std::abs(val) > 1e-6) nonzero++;
+        }
+    }
+    
+    float mean = sum_val / (mat.rows() * mat.cols());
+    
+    std::cout << name << " stats:"
+              << "\n  Shape: " << mat.rows() << "x" << mat.cols()
+              << "\n  Min: " << min_val
+              << "\n  Max: " << max_val
+              << "\n  Mean: " << mean
+              << "\n  Nonzero: " << nonzero << "/" << (mat.rows() * mat.cols())
+              << "\n  Range: " << (max_val - min_val) << std::endl;
+}
+
+// Add Vector version of softmax_with_temperature
+Vector MultiHeadAttention::softmax_with_temperature(const Vector& input, float temperature) const {
+    Vector output(input.size());
+    float max_val = -std::numeric_limits<float>::infinity();
+    
+    // Find max value for numerical stability
+    for (size_t i = 0; i < input.size(); i++) {
+        max_val = std::max(max_val, input[i]);
+    }
+    
+    // Compute exp and sum
+    float sum_exp = 0.0f;
+    for (size_t i = 0; i < input.size(); i++) {
+        output[i] = std::exp((input[i] - max_val) / temperature);
+        sum_exp += output[i];
+    }
+    
+    // Normalize
+    for (size_t i = 0; i < output.size(); i++) {
+        output[i] /= sum_exp;
+    }
+    
+    return output;
+}
+
+// Keep the existing Matrix version
+Matrix MultiHeadAttention::softmax_with_temperature(const Matrix& input, float temperature) const {
+    Matrix output = input;
+    for (size_t i = 0; i < input.rows(); i++) {
+        float max_val = -std::numeric_limits<float>::infinity();
+        for (size_t j = 0; j < input.cols(); j++) {
+            max_val = std::max(max_val, input(i, j));
+        }
+        
+        float sum_exp = 0.0f;
+        for (size_t j = 0; j < input.cols(); j++) {
+            output(i, j) = std::exp((input(i, j) - max_val) / temperature);
+            sum_exp += output(i, j);
+        }
+        
+        for (size_t j = 0; j < input.cols(); j++) {
+            output(i, j) /= sum_exp;
+        }
+    }
+    return output;
+}
+
+// Add implementation of static method for AttentionMask
+AttentionMask AttentionMask::create_causal_mask(size_t size) {
+    Matrix mask_matrix(size, size, 0.0f);
+    // Create lower triangular matrix (1s below diagonal, 0s above)
+    for (size_t i = 0; i < size; i++) {
+        for (size_t j = 0; j <= i; j++) {
+            mask_matrix(i, j) = 1.0f;
+        }
+    }
+    return AttentionMask(mask_matrix);
 }
 

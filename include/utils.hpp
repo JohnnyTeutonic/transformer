@@ -2,6 +2,7 @@
 #include "tiktoken_tokenizer.hpp"
 #include "matrix.hpp"
 #include "transformer.hpp"
+#include "phrase_types.hpp"
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,12 +12,80 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <unordered_map>
 
 // Token category structure
 struct TokenCategories {
     std::unordered_set<std::string> verb_tokens;
     std::unordered_set<std::string> adjective_tokens;
     std::unordered_set<std::string> noun_tokens;
+};
+
+struct TrainingExample {
+    std::string input;
+    std::string output;
+    PhraseType type;
+
+    // Add conversion operator to pair
+    operator std::pair<std::string, std::string>() const {
+        return {input, output};
+    }
+
+    // Add constructor from pair
+    TrainingExample(const std::pair<std::string, std::string>& pair) 
+        : input(pair.first), output(pair.second), type(PhraseType::GENERAL) {}
+
+    // Default constructor
+    TrainingExample() = default;
+
+    // Regular constructor
+    TrainingExample(std::string input_, std::string output_, PhraseType type_)
+        : input(std::move(input_)), output(std::move(output_)), type(type_) {}
+};
+
+struct ContextualTrainingExample {
+    std::vector<std::string> context_window;  // Previous phrases for context
+    std::string input;
+    std::string output;
+    PhraseType type;
+    size_t context_size;  // Size of context window
+
+    ContextualTrainingExample(std::vector<std::string> context, 
+                            std::string input_, 
+                            std::string output_,
+                            PhraseType type_,
+                            size_t ctx_size = 3)
+        : context_window(std::move(context))
+        , input(std::move(input_))
+        , output(std::move(output_))
+        , type(type_)
+        , context_size(ctx_size) {}
+
+    // Get full context including current input
+    std::string get_full_context() const {
+        std::string full_context;
+        for (const auto& ctx : context_window) {
+            full_context += ctx + " ";
+        }
+        full_context += input;
+        return full_context;
+    }
+
+    // Add conversion operators
+    operator TrainingExample() const {
+        return TrainingExample(input, output, type);
+    }
+
+    operator std::pair<std::string, std::string>() const {
+        return {input, output};
+    }
+};
+
+struct ValidationMetrics {
+    float loss;
+    float accuracy;
+    std::unordered_map<PhraseType, float> type_specific_accuracy;
+    std::unordered_map<PhraseType, float> type_specific_loss;
 };
 
 class Utils {
@@ -44,6 +113,13 @@ private:
         float p,
         std::mt19937& gen
     );
+
+    // Add new private methods for data handling
+    static PhraseType detect_phrase_type(const std::string& input, const std::string& output, char delimiter);
+    static float get_sampling_weight(const std::string& category, 
+                                   const std::unordered_map<std::string, size_t>& counts);
+    static std::vector<TrainingExample> balance_dataset(
+        const std::unordered_map<PhraseType, std::vector<TrainingExample>>& categorized_data);
 
 public:
     /**
@@ -83,14 +159,26 @@ public:
         Transformer& transformer,
         int k
     );
-    static std::vector<std::pair<std::string, std::string>> create_training_data();
+
+    // Add new function to save predictions to CSV
+    static void save_predictions_to_csv(
+        const Matrix& logits,
+        const TiktokenTokenizer& tokenizer,
+        const std::string& input_text,
+        const std::string& csv_path = "predictions.csv",
+        int top_k = 10
+    );
+
+    static std::vector<ContextualTrainingExample> create_training_data();
     static void
     analyze_token_mappings(const std::vector<std::pair<std::string, std::string>>& training_data,
                            const TiktokenTokenizer& tokenizer);
-    static std::vector<std::pair<std::string, std::string>> load_validation_data();
-    static float
-    evaluate_validation(Transformer& transformer, const TiktokenTokenizer& tokenizer,
-                        const std::vector<std::pair<std::string, std::string>>& validation_data);
+    static std::vector<ContextualTrainingExample> load_validation_data();
+    static ValidationMetrics evaluate_validation(
+        Transformer& transformer,
+        const TiktokenTokenizer& tokenizer,
+        const std::vector<ContextualTrainingExample>& validation_data
+    );
     static TransformerConfig load_config(const std::string& config_path);
     static Matrix
     create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
@@ -98,7 +186,7 @@ public:
                                      size_t input_max_seq_len);
     static float compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const TiktokenTokenizer& tokenizer);
     static std::vector<std::string>& get_vocabulary(const TiktokenTokenizer& tokenizer);
-    static std::vector<std::pair<std::string, float>> get_multi_token_predictions(
+    static std::vector<std::pair<std::string, std::string>> get_multi_token_predictions(
         const Matrix& logits, const TiktokenTokenizer& tokenizer, int beam_width);
     
     // Token category analysis functions

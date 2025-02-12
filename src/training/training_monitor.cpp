@@ -22,7 +22,8 @@ void TrainingMonitor::log_metrics(const TrainingMetrics& metrics) {
         metrics.loss,               // Raw loss
         loss_tracker.get_recent_average(),  // Smoothed loss
         loss_tracker.get_trend(),   // Trend
-        grad_norm                   // Gradient norm
+        grad_norm,                  // Gradient norm
+        metrics.learning_rate       // Add current learning rate
     );
     
     log_to_tensorboard(metrics);

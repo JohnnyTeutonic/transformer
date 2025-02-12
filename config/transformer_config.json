@@ -5,7 +5,7 @@
         "use_gqa": true,
         "use_rope": true,
         "use_sliding_window": true,
-        "window_size": 32
+        "window_size": 16
     },
     "beam_search": {
         "beam_size": 10,
@@ -30,15 +30,15 @@
     "load_from_checkpoint": false,
     "model": {
         "head_dim": 64,
-        "hidden_size": 1024,
-        "intermediate_size": 4096,
-        "max_seq_length": 512,
-        "num_heads": 16,
-        "num_layers": 8
+        "hidden_size": 256,
+        "intermediate_size": 1024,
+        "max_seq_length": 128,
+        "num_heads": 8,
+        "num_layers": 4
     },
     "optimization": {
-        "gradient_accumulation_steps": 2,
-        "gradient_clip_threshold": 5.0,
+        "gradient_accumulation_steps": 8,
+        "gradient_clip_threshold": 1.0,
         "layer_norm_epsilon": 1e-05,
         "memory_pool_size": 16384,
         "use_fp16": true,
@@ -64,8 +64,8 @@
         },
         "frequency_penalty": 0.1,
         "min_token_prob": 0.05,
-        "presence_penalty": 0.0,
-        "temperature": 1.0,
+        "presence_penalty": 0.1,
+        "temperature": 1.2,
         "top_k": 5,
         "top_p": 0.9
     },
@@ -81,29 +81,30 @@
         "use_subword": false
     },
     "training": {
-        "samples_per_iteration": 5,
+        "samples_per_iteration": 32,
         "cross_validation": {
-            "early_stopping_patience": 2,
+            "enabled": true,
+            "early_stopping_patience": 3,
             "early_stopping_threshold": 1.5,
             "num_epochs": 4,
             "num_folds": 2,
-            "validation_frequency": 1
+            "validation_frequency": 2
         },
-        "dropout_rate": 0.1,
+        "dropout_rate": 0.2,
         "learning_rate": {
             "decay_factor": 0.98,
-            "decay_steps": 250,
-            "initial_lr": 0.0001,
-            "min_lr": 0.0001,
-            "peak_lr": 0.002,
-            "warmup_steps": 15
+            "decay_steps": 200,
+            "initial_lr": 0.00001,
+            "min_lr": 0.000001,
+            "peak_lr": 0.0001,
+            "warmup_steps": 500
         },
-        "num_epochs": 4,
+        "num_epochs": 12,
         "tuning": {
             "enabled": false,
             "evaluation_steps": 50,
             "num_trials": 10
         },
-        "weight_decay": 0.01
+        "weight_decay": 0.05
     }
 }

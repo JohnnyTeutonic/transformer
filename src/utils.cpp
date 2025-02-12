@@ -305,16 +305,16 @@ Matrix Utils::create_batch_target_distribution(
     // Debug output
     std::cout << "Creating target distribution:"
               << "\n- Actual batch size: " << actual_batch_size
-              << "\n- Vocab size: " << vocab_size
-              << "\n- Sequence length: " << sequence_length << std::endl;
+              << "\n- Vocab size: " << vocab_size << std::endl;
     
-    Matrix target_distribution(actual_batch_size, vocab_size, 0.0f);  // [batch_size x vocab_size]
+    // For single-word prediction, we only need one row per sequence
+    Matrix target_distribution(actual_batch_size, vocab_size, 0.0f);
     
-    // Fill target distribution
+    // Fill target distribution only for the final token of each sequence
     for (size_t i = 0; i < actual_batch_size; i++) {
         const auto& sequence = target_tokens[i];
         if (!sequence.empty()) {
-            // Get the last token as target
+            // Get the last token as our target
             int target_token = sequence.back();
             if (target_token >= 0 && static_cast<size_t>(target_token) < vocab_size) {
                 target_distribution(i, target_token) = 1.0f;
@@ -339,92 +339,86 @@ float Utils::compute_batch_loss(
         throw std::runtime_error("Empty logits or target distribution in compute_batch_loss");
     }
 
-    // Debug dimensions
-    std::cout << "Computing loss with:"
-              << "\n- Logits shape: " << logits.rows() << "x" << logits.cols()
-              << "\n- Target shape: " << target_distribution.rows() << "x" << target_distribution.cols() << std::endl;
-
-    // Ensure logits are projected to vocabulary space if needed
-    Matrix projected_logits;
-    if (logits.cols() != target_distribution.cols()) {
-        std::cout << "Projecting logits from hidden dimension to vocabulary dimension" << std::endl;
-        // Assuming we have a projection matrix or method to convert from hidden size to vocab size
-        // This should be handled by the language model head before calling compute_batch_loss
-        throw std::runtime_error("Dimension mismatch: logits must be projected to vocabulary space before computing loss");
-    }
-
-    float total_loss = 0.0f;
+    // Validate dimensions
     const size_t logits_batch_size = logits.rows();
     const size_t target_batch_size = target_distribution.rows();
-    const size_t batch_size = std::min(logits_batch_size, target_batch_size);  // Use smaller of the two
+    const size_t batch_size = std::min(logits_batch_size, target_batch_size);
     const size_t vocab_size = logits.cols();
-    const float epsilon = 1e-7f;
-    const float max_loss_per_token = 100.0f;
 
-    // Validate dimensions
     if (logits.cols() != target_distribution.cols()) {
         throw std::runtime_error("Logits and target distribution must have same number of columns. " 
                                "Got " + std::to_string(logits.cols()) + " and " 
                                + std::to_string(target_distribution.cols()));
     }
-    if (logits_batch_size != target_batch_size) {
-        std::cout << "Warning: Batch size mismatch between logits (" << logits_batch_size 
-                  << ") and target distribution (" << target_batch_size 
-                  << "). Using smaller size: " << batch_size << std::endl;
-    }
 
-    std::cout << "Batch size: " << batch_size << std::endl;
-    std::cout << "Vocab size: " << vocab_size << std::endl;
+    // Constants for numerical stability
+    const float epsilon = 1e-5f;  // Increased from 1e-7f
+    const float max_loss_per_token = 100.0f;
+    const float min_log_prob = -50.0f;  // Prevent excessively small log probabilities
 
-    // Pre-compute max logits for numerical stability
-    std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
+    float total_loss = 0.0f;
+
+    // Process each item in the batch
+    #pragma omp parallel for reduction(+:total_loss)
     for (size_t i = 0; i < batch_size; ++i) {
+        // Find max logit for numerical stability
+        float max_logit = -std::numeric_limits<float>::infinity();
         for (size_t j = 0; j < vocab_size; ++j) {
-            max_logits[i] = std::max(max_logits[i], logits(i, j));
+            max_logit = std::max(max_logit, logits(i, j));
         }
-    }
-    std::cout << "Max logits: " << max_logits.size() << std::endl;
-    // Compute loss with improved numerical stability
-    for (size_t i = 0; i < batch_size; ++i) {
-        float sequence_loss = 0.0f;
+
+        // Compute log-sum-exp trick for softmax denominator
         float sum_exp = 0.0f;
-        // First pass: compute denominator for softmax
         for (size_t j = 0; j < vocab_size; ++j) {
-            float shifted_logit = logits(i, j) - max_logits[i];
+            float shifted_logit = logits(i, j) - max_logit;
+            // Clamp extremely negative values
+            if (shifted_logit > min_log_prob) {
             sum_exp += std::exp(shifted_logit);
         }
+        }
+        
+        // Ensure denominator is valid
         sum_exp = std::max(sum_exp, epsilon);
+        float log_denominator = std::log(sum_exp) + max_logit;
 
-        // Second pass: compute cross-entropy loss
-        std::cout << "Computing loss for target distribution " << i << std::endl;
-        std::cout << "vocab size: " << vocab_size << std::endl;
-        std::cout << "target distribution: " << target_distribution.shape() << std::endl;
+        // Compute cross-entropy loss for this item
+        float sequence_loss = 0.0f;
         for (size_t j = 0; j < vocab_size; ++j) {
             if (target_distribution(i, j) > 0.0f) {
-                float shifted_logit = logits(i, j) - max_logits[i];
-                float log_prob = shifted_logit - std::log(sum_exp);
-                log_prob = std::max(log_prob, -max_loss_per_token);
-                float token_loss = -target_distribution(i, j) * log_prob;
-                token_loss = std::min(token_loss, max_loss_per_token);
-                sequence_loss += token_loss;
+                // Compute log probability with numerical stability
+                float log_prob = logits(i, j) - log_denominator;
+                // Clamp log probability to prevent extreme values
+                log_prob = std::clamp(log_prob, min_log_prob, 0.0f);
+                
+                // Compute weighted cross-entropy term
+                float term = -target_distribution(i, j) * log_prob;
+                // Clamp individual loss terms
+                term = std::min(term, max_loss_per_token);
+                sequence_loss += term;
             }
         }
 
+        // Add sequence loss to total
         if (std::isfinite(sequence_loss)) {
             total_loss += sequence_loss;
         } else {
             std::cout << "Warning: Non-finite sequence loss detected at position " << i << std::endl;
-            total_loss += max_loss_per_token;
+            total_loss += max_loss_per_token;  // Use max loss as fallback
         }
     }
 
+    // Compute average loss with floor
     float avg_loss = total_loss / static_cast<float>(batch_size);
     avg_loss = std::max(avg_loss, 1e-4f);  // Minimum loss floor
 
-    std::cout << "Loss computation:"
+    // Debug output
+    if (avg_loss > 10.0f || avg_loss < 1e-3f) {
+        std::cout << "Unusual loss value detected: " << avg_loss << std::endl;
+        std::cout << "Batch statistics:"
               << "\n- Total loss: " << total_loss
-              << "\n- Average loss: " << avg_loss
-              << "\n- Batch size: " << batch_size << std::endl;
+                  << "\n- Batch size: " << batch_size
+                  << "\n- Vocab size: " << vocab_size << std::endl;
+    }
 
     return avg_loss;
 }
@@ -583,22 +577,85 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
     return config;
 }
 
-std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
-    std::vector<std::pair<std::string, std::string>> training_pairs;
-    std::filesystem::path file_path = "../data/training_pairs.txt";
+PhraseType Utils::detect_phrase_type(const std::string& input, const std::string& output, char delimiter) {
+    // Detect phrase type based on input and output patterns
+    if (input.find("is") != std::string::npos || 
+        input.find("looks") != std::string::npos || 
+        input.find("feels") != std::string::npos ||
+        delimiter == '*') {
+        return PhraseType::ADJECTIVE;
+    } else if (input.find("to") != std::string::npos || delimiter == '#') {
+        return PhraseType::VERB;
+    }
+    return PhraseType::GENERAL;  // Use GENERAL instead of NOUN/OTHER
+}
 
+float Utils::get_sampling_weight(const std::string& category, 
+                               const std::unordered_map<std::string, size_t>& counts) {
+    float base_weight = 1.0f;
+    size_t count = counts.at(category);
+    size_t max_count = 0;
+    for (const auto& [_, c] : counts) {
+        max_count = std::max(max_count, c);
+    }
+    return base_weight * (static_cast<float>(max_count) / count);
+}
+
+std::vector<TrainingExample> Utils::balance_dataset(
+    const std::unordered_map<PhraseType, std::vector<TrainingExample>>& categorized_data) {
+    
+    // Find target size (95% of largest category)
+    size_t max_size = 0;
+    for (const auto& [_, examples] : categorized_data) {
+        max_size = std::max(max_size, examples.size());
+    }
+    size_t target_size = static_cast<size_t>(max_size * 0.95);
+
+    // Prepare balanced dataset
+    std::vector<TrainingExample> balanced_data;
+    std::mt19937 gen(42);  // Fixed seed for reproducibility
+
+    for (const auto& [type, examples] : categorized_data) {
+        std::vector<size_t> indices(examples.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        
+        // If category is smaller than target, oversample
+        if (examples.size() < target_size) {
+            size_t repeats = (target_size + examples.size() - 1) / examples.size();
+            std::vector<size_t> expanded_indices;
+            for (size_t r = 0; r < repeats; r++) {
+                expanded_indices.insert(expanded_indices.end(), indices.begin(), indices.end());
+            }
+            indices = expanded_indices;
+        }
+        
+        // Shuffle indices
+        std::shuffle(indices.begin(), indices.end(), gen);
+        
+        // Take exactly target_size samples
+        for (size_t i = 0; i < target_size; ++i) {
+            balanced_data.push_back(examples[indices[i % indices.size()]]);
+        }
+    }
+
+    // Final shuffle of all balanced data
+    std::shuffle(balanced_data.begin(), balanced_data.end(), gen);
+    return balanced_data;
+}
+
+std::vector<ContextualTrainingExample> Utils::create_training_data() {
+    std::filesystem::path file_path = "../data/training_pairs.txt";
     std::ifstream file(file_path);
     if (!file.is_open()) {
         throw std::runtime_error("Could not open training data file: " + file_path.string());
     }
 
-    std::string line;
-    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> category_pairs;
+    // First pass: collect all examples
+    std::vector<TrainingExample> raw_examples;
     std::unordered_set<std::string> seen_pairs;
     
-    // First, read all pairs and categorize them
+    std::string line;
     while (std::getline(file, line)) {
-        // Skip empty lines
         if (line.empty()) continue;
 
         // Normalize separators
@@ -618,77 +675,301 @@ std::vector<std::pair<std::string, std::string>> Utils::create_training_data() {
             // Create unique key to detect duplicates
             std::string pair_key = input + "|" + output;
             if (seen_pairs.find(pair_key) != seen_pairs.end()) {
-                continue;  // Skip duplicates
+                continue;
             }
             seen_pairs.insert(pair_key);
             
-            // Categorize the pair
-            std::string category;
-            if (input.length() > 50) {
-                category = "complex";
-            } else if (input.find("is") != std::string::npos || 
-                      input.find("looks") != std::string::npos || 
-                      input.find("feels") != std::string::npos) {
-                category = "adjective";
-            } else if (input.find("to") != std::string::npos) {
-                category = "verb";
-            } else {
-                category = "other";
-            }
+            // Detect phrase type and categorize
+            char delimiter = line[delimiter_pos];
+            PhraseType type = detect_phrase_type(input, output, delimiter);
             
-            category_pairs[category].push_back({input, output});
+            raw_examples.emplace_back(input, output, type);
+
+            // Add augmented examples with slight variations
+            // Only augment if the input is long enough
+            if (input.length() > 10) {
+                // Add version with different word order if possible
+                size_t space_pos = input.find(' ');
+                if (space_pos != std::string::npos && space_pos < input.length() - 1) {
+                    std::string first_part = input.substr(0, space_pos);
+                    std::string second_part = input.substr(space_pos + 1);
+                    if (second_part.find("to") == std::string::npos && 
+                        second_part.find("is") == std::string::npos) {  // Don't reorder if it would break grammar
+                        std::string reordered = second_part + " " + first_part;
+                        raw_examples.emplace_back(reordered, output, type);
+                        seen_pairs.insert(reordered + "|" + output);
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: create contextual examples with larger context window
+    std::vector<ContextualTrainingExample> contextual_examples;
+    const size_t CONTEXT_SIZE = 5;  // Increased from 3 to 5
+    
+    // Create sliding windows of examples
+    for (size_t i = 0; i < raw_examples.size(); i++) {
+        // Collect context from previous examples
+        std::vector<std::string> context;
+        
+        // Add more varied context by sometimes skipping examples
+        for (size_t j = 1; j <= CONTEXT_SIZE && i >= j; j++) {
+            // Randomly skip some context (80% chance to include each context item)
+            if (random_float() < 0.8f) {
+                context.insert(context.begin(), raw_examples[i - j].input + " " + raw_examples[i - j].output);
+            }
+        }
+        
+        // Create contextual example
+        contextual_examples.emplace_back(
+            context,
+            raw_examples[i].input,
+            raw_examples[i].output,
+            raw_examples[i].type,
+            CONTEXT_SIZE
+        );
+
+        // Add version with partial context (randomly drop some context items)
+        if (!context.empty() && random_float() < 0.3f) {  // 30% chance
+            std::vector<std::string> partial_context;
+            for (const auto& ctx : context) {
+                if (random_float() < 0.7f) {  // 70% chance to keep each context item
+                    partial_context.push_back(ctx);
+                }
+            }
+            if (!partial_context.empty()) {
+                contextual_examples.emplace_back(
+                    partial_context,
+                    raw_examples[i].input,
+                    raw_examples[i].output,
+                    raw_examples[i].type,
+                    CONTEXT_SIZE
+                );
+            }
+        }
+    }
+
+    // Print statistics
+    std::cout << "\nContextual Training Data Statistics:" << std::endl;
+    std::cout << "Original examples: " << raw_examples.size() << std::endl;
+    std::cout << "Total examples after augmentation: " << contextual_examples.size() << std::endl;
+    std::cout << "Context window size: " << CONTEXT_SIZE << std::endl;
+    
+    // Shuffle the examples
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(contextual_examples.begin(), contextual_examples.end(), g);
+    
+    return contextual_examples;
+}
+
+std::vector<ContextualTrainingExample> Utils::load_validation_data() {
+    std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
+    std::filesystem::path data_dir = exe_path / "data";
+    std::filesystem::path file_path = data_dir / "validation_pairs.txt";
+
+    std::ifstream file(file_path);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open validation data file: " + file_path.string());
+    }
+
+    std::unordered_map<PhraseType, std::vector<ContextualTrainingExample>> categorized_data;
+    std::unordered_set<std::string> seen_pairs;
+    std::vector<std::string> context_buffer;  // Keep track of recent examples for context
+    const size_t CONTEXT_SIZE = 3;
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+
+        // Normalize separators
+        std::string normalized_line = line;
+        std::replace(normalized_line.begin(), normalized_line.end(), '#', '|');
+        std::replace(normalized_line.begin(), normalized_line.end(), '*', '|');
+        
+        size_t delimiter_pos = normalized_line.find('|');
+        if (delimiter_pos != std::string::npos) {
+            std::string input = normalized_line.substr(0, delimiter_pos);
+            std::string output = normalized_line.substr(delimiter_pos + 1);
+            
+            // Trim whitespace
+            input = std::regex_replace(input, std::regex("^\\s+|\\s+$"), "");
+            output = std::regex_replace(output, std::regex("^\\s+|\\s+$"), "");
+            
+            // Create unique key to detect duplicates
+            std::string pair_key = input + "|" + output;
+            if (seen_pairs.find(pair_key) != seen_pairs.end()) {
+                continue;
+            }
+            seen_pairs.insert(pair_key);
+            
+            // Detect phrase type and categorize
+            char delimiter = line[delimiter_pos];
+            PhraseType type = detect_phrase_type(input, output, delimiter);
+            
+            // Create contextual example
+            std::vector<std::string> current_context(context_buffer.end() - std::min(context_buffer.size(), CONTEXT_SIZE), 
+                                                   context_buffer.end());
+            
+            ContextualTrainingExample example(current_context, input, output, type, CONTEXT_SIZE);
+            categorized_data[type].push_back(example);
+            
+            // Update context buffer
+            context_buffer.push_back(input + " " + output);
+            if (context_buffer.size() > CONTEXT_SIZE * 2) {  // Keep buffer size reasonable
+                context_buffer.erase(context_buffer.begin());
+            }
         }
     }
     
-    // Print initial statistics
-    std::cout << "\nInitial Training Data Statistics:" << std::endl;
-    size_t total_pairs = 0;
-    size_t max_category_size = 0;
-    for (const auto& [category, pairs] : category_pairs) {
-        std::cout << category << " pairs: " << pairs.size() << std::endl;
-        total_pairs += pairs.size();
-        max_category_size = std::max(max_category_size, pairs.size());
+    // For validation, we want a smaller but still balanced dataset
+    // Use 20% of the size of the smallest category
+    size_t min_category_size = std::numeric_limits<size_t>::max();
+    for (const auto& [_, examples] : categorized_data) {
+        min_category_size = std::min(min_category_size, examples.size());
     }
-    std::cout << "Total pairs before balancing: " << total_pairs << std::endl;
-
-    // Take a larger portion of each category - use 95% of the largest category
-    size_t target_size = static_cast<size_t>(max_category_size * 0.95);
-    std::cout << "Target size per category: " << target_size << std::endl;
-
-    // Random number generator for shuffling
+    size_t target_size = static_cast<size_t>(min_category_size * 0.2);
+    
+    std::vector<ContextualTrainingExample> validation_data;
     std::mt19937 gen(42);  // Fixed seed for reproducibility
     
-    // Sample from each category with oversampling for smaller categories
-    for (const auto& [category, pairs] : category_pairs) {
-        std::vector<size_t> indices(pairs.size());
+    for (const auto& [type, examples] : categorized_data) {
+        std::vector<size_t> indices(examples.size());
         std::iota(indices.begin(), indices.end(), 0);
-        
-        // If category is smaller than target size, oversample by repeating indices
-        if (pairs.size() < target_size) {
-            size_t repeats = (target_size + pairs.size() - 1) / pairs.size();  // Ceiling division
-            std::vector<size_t> expanded_indices;
-            for (size_t r = 0; r < repeats; r++) {
-                expanded_indices.insert(expanded_indices.end(), indices.begin(), indices.end());
-            }
-            indices = expanded_indices;
-        }
-        
-        // Shuffle all indices (including repeats for oversampling)
         std::shuffle(indices.begin(), indices.end(), gen);
         
-        // Take exactly target_size samples (with possible repeats for small categories)
+        // Take target_size samples from each category
         for (size_t i = 0; i < target_size; ++i) {
-            training_pairs.push_back(pairs[indices[i % indices.size()]]);
+            validation_data.push_back(examples[indices[i]]);
         }
     }
     
-    // Shuffle the final training pairs
-    std::shuffle(training_pairs.begin(), training_pairs.end(), gen);
+    std::cout << "\nValidation Data Statistics:" << std::endl;
+    std::cout << "Total validation examples: " << validation_data.size() << std::endl;
     
-    std::cout << "\nFinal Training Data Statistics:" << std::endl;
-    std::cout << "Total pairs after balancing: " << training_pairs.size() << std::endl;
+    return validation_data;
+}
+
+ValidationMetrics Utils::evaluate_validation(
+    Transformer& transformer,
+    const TiktokenTokenizer& tokenizer,
+    const std::vector<ContextualTrainingExample>& validation_data) {
     
-    return training_pairs;
+    transformer.set_training(false);
+    ValidationMetrics metrics{0.0f, 0.0f};
+    std::unordered_map<PhraseType, float> type_losses;
+    std::unordered_map<PhraseType, float> type_correct;
+    std::unordered_map<PhraseType, size_t> type_counts;
+    
+    const size_t BATCH_SIZE = 32;
+    size_t total_correct = 0;
+    size_t total_samples = 0;
+
+    // Process data in batches
+    for (size_t batch_start = 0; batch_start < validation_data.size(); batch_start += BATCH_SIZE) {
+        size_t batch_end = std::min(batch_start + BATCH_SIZE, validation_data.size());
+        size_t current_batch_size = batch_end - batch_start;
+        
+        std::vector<std::vector<int>> context_batch;
+        std::vector<std::vector<int>> target_batch;
+        std::vector<PhraseType> batch_types;
+        std::vector<std::string> full_contexts;
+
+        // Prepare batch
+        for (size_t i = batch_start; i < batch_end; i++) {
+            const auto& example = validation_data[i];
+            std::string full_context = example.get_full_context();
+            std::string processed_context = full_context;
+            std::string processed_target = example.output;
+            
+            tokenizer.preprocess_text(processed_context);
+            tokenizer.preprocess_text(processed_target);
+            
+            std::vector<int> context_tokens = tokenizer.encode(processed_context);
+            std::vector<int> target_tokens = tokenizer.encode(processed_target);
+            
+            if (context_tokens.empty() || target_tokens.empty()) continue;
+            
+            context_batch.push_back(context_tokens);
+            target_batch.push_back(target_tokens);
+            batch_types.push_back(example.type);
+            full_contexts.push_back(full_context);
+        }
+
+        if (context_batch.empty()) continue;
+
+        // Forward pass for each sequence with context
+        std::vector<Matrix> all_logits;
+        for (size_t i = 0; i < context_batch.size(); i++) {
+            Matrix seq_logits = transformer.forward(context_batch[i], full_contexts[i], tokenizer);
+            Matrix last_logits(1, seq_logits.cols());
+            for (size_t j = 0; j < seq_logits.cols(); j++) {
+                last_logits(0, j) = seq_logits(seq_logits.rows() - 1, j);
+            }
+            all_logits.push_back(last_logits);
+        }
+        
+        // Combine logits and compute metrics
+        Matrix combined_logits(context_batch.size(), tokenizer.vocab_size());
+        for (size_t i = 0; i < all_logits.size(); i++) {
+            for (size_t j = 0; j < all_logits[i].cols(); j++) {
+                combined_logits(i, j) = all_logits[i](0, j);
+            }
+        }
+        
+        // Create target distribution
+        Matrix target_distribution = create_batch_target_distribution(
+            target_batch, tokenizer, tokenizer.vocab_size(), context_batch.size());
+        
+        // Compute loss and accuracy
+        float batch_loss = compute_batch_loss(combined_logits, target_distribution, tokenizer);
+        
+        // Update metrics for each example
+        for (size_t i = 0; i < current_batch_size; i++) {
+            PhraseType type = batch_types[i];
+            type_counts[type]++;
+            
+            // Get predicted token
+            size_t predicted_token = 0;
+            float max_prob = -std::numeric_limits<float>::infinity();
+            for (size_t j = 0; j < combined_logits.cols(); j++) {
+                if (combined_logits(i, j) > max_prob) {
+                    max_prob = combined_logits(i, j);
+                    predicted_token = j;
+                }
+            }
+            
+            // Check if prediction matches target
+            bool is_correct = false;
+            for (size_t j = 0; j < combined_logits.cols(); j++) {
+                if (target_distribution(i, j) > 0.0f && j == predicted_token) {
+                    is_correct = true;
+                    total_correct++;
+                    type_correct[type]++;
+                    break;
+                }
+            }
+            
+            type_losses[type] += batch_loss;
+            total_samples++;
+        }
+        
+        metrics.loss += batch_loss * current_batch_size;
+    }
+
+    // Compute final metrics
+    metrics.loss /= total_samples;
+    metrics.accuracy = static_cast<float>(total_correct) / total_samples;
+    
+    // Compute type-specific metrics
+    for (const auto& [type, count] : type_counts) {
+        metrics.type_specific_loss[type] = type_losses[type] / count;
+        metrics.type_specific_accuracy[type] = type_correct[type] / count;
+    }
+
+    transformer.set_training(true);
+    return metrics;
 }
 
 void Utils::analyze_token_mappings(
@@ -720,169 +1001,6 @@ void Utils::analyze_token_mappings(
               << "Total words: " << total_words << "\n"
               << "Unknown tokens: " << unknown_tokens << " ("
               << (100.0f * unknown_tokens / total_words) << "%)\n";
-}
-
-std::vector<std::pair<std::string, std::string>> Utils::load_validation_data() {
-    std::vector<std::pair<std::string, std::string>> validation_pairs;
-    std::filesystem::path exe_path = std::filesystem::current_path().parent_path();
-    std::filesystem::path data_dir = exe_path / "data";
-    std::filesystem::path file_path = data_dir / "validation_pairs.txt";
-
-    std::ifstream file(file_path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open validation data file: " + file_path.string());
-    }
-
-    std::string line;
-    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> category_pairs;
-    std::unordered_set<std::string> seen_pairs;
-    
-    while (std::getline(file, line)) {
-        // Normalize separators
-        std::string normalized_line = line;
-        std::replace(normalized_line.begin(), normalized_line.end(), '#', '|');
-        std::replace(normalized_line.begin(), normalized_line.end(), '*', '|');
-        
-        size_t delimiter_pos = normalized_line.find('|');
-        if (delimiter_pos != std::string::npos) {
-            std::string input = normalized_line.substr(0, delimiter_pos);
-            std::string output = normalized_line.substr(delimiter_pos + 1);
-            
-            // Trim whitespace
-            input = std::regex_replace(input, std::regex("^\\s+|\\s+$"), "");
-            output = std::regex_replace(output, std::regex("^\\s+|\\s+$"), "");
-            
-            // Create unique key to detect duplicates
-            std::string pair_key = input + "|" + output;
-            if (seen_pairs.find(pair_key) != seen_pairs.end()) {
-                continue;  // Skip duplicates
-            }
-            seen_pairs.insert(pair_key);
-            
-            // Categorize the pair
-            std::string category;
-            if (input.length() > 50) {
-                category = "complex";
-            } else if (input.find("is") != std::string::npos || 
-                      input.find("looks") != std::string::npos || 
-                      input.find("feels") != std::string::npos) {
-                category = "adjective";
-            } else if (input.find("to") != std::string::npos) {
-                category = "verb";
-            } else {
-                category = "other";
-            }
-            
-            category_pairs[category].push_back({input, output});
-        }
-    }
-    
-    // Balance categories but keep more validation samples
-    size_t min_category_size = std::numeric_limits<size_t>::max();
-    for (const auto& [category, pairs] : category_pairs) {
-        min_category_size = std::min(min_category_size, pairs.size());
-    }
-    
-    // Use up to 20% of training size for validation
-    min_category_size = std::min(min_category_size, static_cast<size_t>(min_category_size * 0.2));
-    
-    // Sample evenly from each category
-    std::mt19937 gen(42);  // Fixed seed for reproducibility
-    for (const auto& [category, pairs] : category_pairs) {
-        std::vector<size_t> indices(pairs.size());
-        std::iota(indices.begin(), indices.end(), 0);
-        std::shuffle(indices.begin(), indices.end(), gen);
-        
-        // Take min_category_size samples from each category
-        for (size_t i = 0; i < min_category_size; ++i) {
-            validation_pairs.push_back(pairs[indices[i]]);
-        }
-    }
-    
-    std::cout << "\nValidation Data Statistics:" << std::endl;
-    std::cout << "Total pairs after balancing: " << validation_pairs.size() << std::endl;
-    for (const auto& [category, pairs] : category_pairs) {
-        std::cout << category << " pairs: " << pairs.size() 
-                  << " (used " << min_category_size << ")" << std::endl;
-    }
-    
-    return validation_pairs;
-}
-
-bool Utils::validate_input_sequence(const std::vector<int>& tokens, size_t vocab_size,
-                                    size_t max_seq_length) {
-    // For target sequences, we allow empty sequences
-    if (tokens.empty()) {
-        return true;  // Empty sequences are valid for targets
-    }
-
-    // For non-empty sequences, check length if max_seq_length is specified
-    if (max_seq_length > 0 && tokens.size() > max_seq_length) {
-        std::cout << "Invalid sequence: too long (length: " << tokens.size() 
-                  << ", max: " << max_seq_length << ")" << std::endl;
-        return false;
-    }
-
-    // Validate each token
-    for (int token : tokens) {
-        if (token < 0 || static_cast<size_t>(token) >= vocab_size) {
-            std::cout << "Invalid token " << token << " (vocab size: " << vocab_size << ")" << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
-
-void Utils::print_matrix(const Matrix& m, const std::string& name, size_t max_rows,
-                         size_t max_cols) {
-    std::cout << "\n" << name << " (" << m.rows() << "x" << m.cols() << "):\n";
-    for (size_t i = 0; i < std::min(max_rows, m.rows()); ++i) {
-        for (size_t j = 0; j < std::min(max_cols, m.cols()); ++j) {
-            std::cout << std::fixed << std::setprecision(4) << m(i, j) << " ";
-        }
-        std::cout << (m.cols() > max_cols ? "..." : "") << "\n";
-    }
-    if (m.rows() > max_rows) {
-        std::cout << "...\n";
-    }
-}
-
-// Helper function to get multi-token predictions
-std::vector<std::pair<std::string, float>> Utils::get_multi_token_predictions(
-    const Matrix& logits,
-    const TiktokenTokenizer& tokenizer,
-    int beam_width) {
-    
-    const int last_pos = logits.rows() - 1;
-    std::vector<std::pair<std::string, float>> predictions;
-    
-    // Get top tokens and their probabilities
-    std::vector<std::pair<float, int>> token_probs;
-    for (int j = 0; j < logits.cols(); j++) {
-        token_probs.push_back({logits(last_pos, j), j});
-    }
-    
-    // Sort by probability
-    std::sort(token_probs.begin(), token_probs.end(), std::greater<>());
-    
-    // Take top beam_width tokens
-    for (int i = 0; i < std::min(beam_width, static_cast<int>(token_probs.size())); i++) {
-        int token_id = token_probs[i].second;
-        float prob = token_probs[i].first;
-        
-        // Skip special tokens
-        if (tokenizer.is_special_token(token_id)) continue;
-        
-        // Decode token
-        std::vector<int> token_seq = {token_id};
-        std::string decoded = tokenizer.decode(token_seq);
-        
-        if (!decoded.empty()) {
-            predictions.push_back({decoded, prob});
-        }
-    }
-    
-    return predictions;
 }
 
 TokenCategories Utils::analyze_token_categories(const std::vector<std::pair<std::string, std::string>>& training_data) {
@@ -928,7 +1046,7 @@ std::string Utils::get_token_category(const std::string& token, const TokenCateg
     return "UNKNOWN";
 }
 
-// Modify the print_top_predictions function to show token categories
+// Modify the print_top_predictions function to filter out delimiter tokens
 void Utils::print_top_predictions(
     const Matrix& logits,
     const TiktokenTokenizer& tokenizer,
@@ -943,25 +1061,21 @@ void Utils::print_top_predictions(
     for (size_t i = 0; i < logits.cols(); i++) {
         last_logits.push_back(logits(logits.rows() - 1, i));
     }
-    std::cout << "Debug: Got " << last_logits.size() << " logits" << std::endl;
 
     // Apply temperature scaling
     float temperature = tp_config.temperature;
-    std::cout << "Debug: Applying temperature scaling with T=" << temperature << std::endl;
     for (auto& logit : last_logits) {
         logit /= temperature;
     }
 
     // Apply softmax to get probabilities
     float max_logit = *std::max_element(last_logits.begin(), last_logits.end());
-    std::cout << "Debug: Max logit value: " << max_logit << std::endl;
     std::vector<float> probabilities(last_logits.size());
     float sum_exp = 0.0f;
     for (size_t i = 0; i < last_logits.size(); i++) {
         probabilities[i] = std::exp(last_logits[i] - max_logit);
         sum_exp += probabilities[i];
     }
-    std::cout << "Debug: Sum of exponentials: " << sum_exp << std::endl;
     for (float& prob : probabilities) {
         prob /= sum_exp;
     }
@@ -969,6 +1083,26 @@ void Utils::print_top_predictions(
     // Create index vector for top-k selection
     std::vector<size_t> indices(probabilities.size());
     std::iota(indices.begin(), indices.end(), 0);
+
+    // Filter out delimiter tokens and zero out their probabilities
+    const std::unordered_set<std::string> delimiters = {"|", "#", "*"};
+    for (size_t i = 0; i < probabilities.size(); i++) {
+        std::string token = tokenizer.decode({static_cast<int>(i)});
+        if (delimiters.find(token) != delimiters.end() || 
+            token.find('|') != std::string::npos ||
+            token.find('#') != std::string::npos ||
+            token.find('*') != std::string::npos) {
+            probabilities[i] = 0.0f;
+        }
+    }
+
+    // Renormalize probabilities after filtering
+    sum_exp = std::accumulate(probabilities.begin(), probabilities.end(), 0.0f);
+    if (sum_exp > 0.0f) {
+        for (float& prob : probabilities) {
+            prob /= sum_exp;
+        }
+    }
 
     // Sort indices by probability
     std::partial_sort(indices.begin(), 
@@ -978,92 +1112,51 @@ void Utils::print_top_predictions(
                          return probabilities[a] > probabilities[b];
                      });
 
-    // Print top k predictions
+    // Print top k predictions with detailed information
     std::cout << "\nTop " << k << " predictions:" << std::endl;
+    std::cout << std::string(50, '-') << std::endl;
+    std::cout << std::setw(5) << "Rank" 
+              << std::setw(20) << "Token" 
+              << std::setw(15) << "Category"
+              << std::setw(15) << "Probability"
+              << std::setw(15) << "Logit" << std::endl;
+    std::cout << std::string(50, '-') << std::endl;
+
     int printed = 0;
     for (int i = 0; i < k && i < static_cast<int>(indices.size()); i++) {
         size_t idx = indices[i];
-        std::cout << "Debug: Probability for index " << idx << ": " << probabilities[idx] << std::endl;
         if (probabilities[idx] > 0.0f) {  // Only show non-zero probability tokens
             std::string token = tokenizer.decode({static_cast<int>(idx)});
-            std::string category = "";
-            if (tokenizer.is_verb(token)) category = " (VERB)";
-            else if (tokenizer.is_adjective(token)) category = " (ADJ)";
-            else if (tokenizer.is_noun(token)) category = " (NOUN)";
+            std::string category = "OTHER";
+            if (tokenizer.is_verb(token)) category = "VERB";
+            else if (tokenizer.is_adjective(token)) category = "ADJ";
+            else if (tokenizer.is_noun(token)) category = "NOUN";
             
-            std::cout << i + 1 << ". \"" << token << "\"" << category << " (p=" 
-                      << std::fixed << std::setprecision(4) << probabilities[idx] << ")" << std::endl;
+            // Format token for display (escape special characters, limit length)
+            std::string display_token = token;
+            if (display_token.length() > 15) {
+                display_token = display_token.substr(0, 12) + "...";
+            }
+            
+            std::cout << std::fixed << std::setprecision(4)
+                     << std::setw(5) << (printed + 1)  // Use printed count instead of i
+                     << std::setw(20) << ("\"" + display_token + "\"")
+                     << std::setw(15) << category
+                     << std::setw(15) << probabilities[idx]
+                     << std::setw(15) << last_logits[idx] << std::endl;
             printed++;
         }
     }
-    std::cout << "Debug: Printed " << printed << " predictions" << std::endl;
-}
+    std::cout << std::string(50, '-') << std::endl;
 
-float Utils::evaluate_validation(
-    Transformer& transformer,
-    const TiktokenTokenizer& tokenizer,
-    const std::vector<std::pair<std::string, std::string>>& validation_data) {
-    
-    transformer.set_training(false);
-    float total_loss = 0.0f;
-    size_t total_samples = 0;
-    const size_t BATCH_SIZE = 32;
-
-    // Process data in batches
-    for (size_t batch_start = 0; batch_start < validation_data.size(); batch_start += BATCH_SIZE) {
-        size_t batch_end = std::min(batch_start + BATCH_SIZE, validation_data.size());
-        size_t current_batch_size = batch_end - batch_start;
-        
-        std::vector<std::vector<int>> input_batch;
-        std::vector<std::vector<int>> target_batch;
-
-        // Prepare batch
-        for (size_t i = batch_start; i < batch_end; i++) {
-            const auto& [input_str, target_str] = validation_data[i];
-            std::vector<int> input_tokens = tokenizer.encode(input_str);
-            std::vector<int> target_tokens = tokenizer.encode(target_str);
-            
-            if (input_tokens.empty() || target_tokens.empty()) continue;
-            
-            input_batch.push_back(input_tokens);
-            target_batch.push_back(target_tokens);
-        }
-
-        if (input_batch.empty()) continue;
-
-        // Forward pass - process each sequence in the batch
-        std::vector<Matrix> all_logits;
-        for (const auto& input_tokens : input_batch) {
-            Matrix seq_logits = transformer.forward(input_tokens, "", tokenizer);
-            // Only keep the last row (prediction) from each sequence
-            Matrix last_logits(1, seq_logits.cols());
-            for (size_t j = 0; j < seq_logits.cols(); j++) {
-                last_logits(0, j) = seq_logits(seq_logits.rows() - 1, j);
-            }
-            all_logits.push_back(last_logits);
-        }
-        
-        // Combine logits into a single batch matrix - now each sequence contributes one row
-        Matrix combined_logits(input_batch.size(), tokenizer.vocab_size());
-        for (size_t i = 0; i < all_logits.size(); i++) {
-            for (size_t j = 0; j < all_logits[i].cols(); j++) {
-                combined_logits(i, j) = all_logits[i](0, j);
-            }
-        }
-        
-        // Create target distribution with matching size
-        Matrix target_distribution = create_batch_target_distribution(
-            target_batch, tokenizer, tokenizer.vocab_size(), input_batch.size());
-        
-        // Compute loss
-        float batch_loss = compute_batch_loss(combined_logits, target_distribution, tokenizer);
-        
-        total_loss += batch_loss * input_batch.size();
-        total_samples += input_batch.size();
+    // Get current input context from transformer if available
+    std::string current_context = transformer.get_current_context();
+    if (current_context.empty()) {
+        current_context = "<start of sequence>";
     }
 
-        transformer.set_training(true);
-    return total_samples > 0 ? total_loss / total_samples : 0.0f;
+    // Save predictions with actual context
+    save_predictions_to_csv(logits, tokenizer, current_context, "predictions.csv", k);
 }
 
 std::vector<std::string>& Utils::get_vocabulary(const TiktokenTokenizer& tokenizer) {
@@ -1320,18 +1413,59 @@ void Utils::generate_predictions(
 
     std::cout << "\n=== Processing prompt: '" << input_text << "' ===" << std::endl;
     
+    // Set the current context in the transformer
+    transformer.set_current_context(input_text);
+    
     // Preprocess input
     std::string processed_input = input_text;
     tokenizer->preprocess_text(processed_input);
     std::vector<int> test_tokens = tokenizer->encode(processed_input);
     
+    // Print tokenized input
+    std::cout << "Input tokens: ";
+    for (const auto& token : test_tokens) {
+        std::cout << "'" << tokenizer->decode({token}) << "' ";
+    }
+    std::cout << std::endl;
+    
     // Get model prediction
     transformer.set_training(false);  // Set to evaluation mode
-    Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
+    Matrix logits = transformer.forward(test_tokens, "", *tokenizer);
     
     // Show the top predictions
-    std::cout << "\nTop Predictions:\n";
+    std::cout << "\nPredicted next tokens:" << std::endl;
     print_top_predictions(logits, *tokenizer, transformer, 5);
+
+    // Get top 3 predictions for example completions
+    std::vector<float> last_logits;
+    for (size_t i = 0; i < logits.cols(); i++) {
+        last_logits.push_back(logits(logits.rows() - 1, i));
+    }
+
+    // Create index vector for top predictions
+    std::vector<size_t> top_indices(last_logits.size());
+    std::iota(top_indices.begin(), top_indices.end(), 0);
+
+    // Sort indices by logit values
+    std::partial_sort(top_indices.begin(), 
+                     top_indices.begin() + 3,
+                     top_indices.end(),
+                     [&last_logits](size_t a, size_t b) {
+                         return last_logits[a] > last_logits[b];
+                     });
+
+    // Example completions
+    std::cout << "\nExample completions:" << std::endl;
+    std::cout << std::string(50, '-') << std::endl;
+    for (int i = 0; i < 3; i++) {
+        std::cout << (i + 1) << ". " << input_text;
+        std::string token = tokenizer->decode({static_cast<int>(top_indices[i])});
+        std::cout << " " << token << std::endl;
+    }
+    std::cout << std::string(50, '-') << std::endl;
+
+    // Save predictions with input text
+    save_predictions_to_csv(logits, *tokenizer, input_text, "predictions.csv", 10);
 }
 
 // Add debugging for gradient analysis
@@ -1454,4 +1588,121 @@ void Utils::analyze_loss_progression(const std::vector<float>& losses, size_t wi
     if (increasing_count > moving_avgs.size() * 0.3) {
         debug::log_message("WARNING: Loss shows significant increasing trend", "WARN");
     }
+}
+
+void Utils::save_predictions_to_csv(
+    const Matrix& logits,
+    const TiktokenTokenizer& tokenizer,
+    const std::string& input_text,
+    const std::string& csv_path,
+    int top_k) {
+    
+    // Check if file exists to determine if we need to write headers
+    bool file_exists = std::filesystem::exists(csv_path);
+    
+    // Open file in append mode
+    std::ofstream csv_file(csv_path, std::ios::app);
+    if (!csv_file.is_open()) {
+        std::cerr << "Failed to open file: " << csv_path << std::endl;
+        return;
+    }
+
+    // Write headers if file is new
+    if (!file_exists) {
+        csv_file << "timestamp,input_text,rank,token,probability,logit,category\n";
+    }
+
+    // Get current timestamp
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    std::string timestamp = std::ctime(&time);
+    timestamp = timestamp.substr(0, timestamp.length() - 1); // Remove newline
+
+    // Get the last row of logits (predictions for the next token)
+    std::vector<float> last_logits;
+    for (size_t i = 0; i < logits.cols(); i++) {
+        last_logits.push_back(logits(logits.rows() - 1, i));
+    }
+
+    // Apply softmax to get probabilities
+    float max_logit = *std::max_element(last_logits.begin(), last_logits.end());
+    std::vector<float> probabilities(last_logits.size());
+    float sum_exp = 0.0f;
+    for (size_t i = 0; i < last_logits.size(); i++) {
+        probabilities[i] = std::exp(last_logits[i] - max_logit);
+        sum_exp += probabilities[i];
+    }
+    for (float& prob : probabilities) {
+        prob /= sum_exp;
+    }
+
+    // Create index vector for top-k selection
+    std::vector<size_t> indices(probabilities.size());
+    std::iota(indices.begin(), indices.end(), 0);
+
+    // Sort indices by probability
+    std::partial_sort(indices.begin(), 
+                     indices.begin() + std::min(top_k, static_cast<int>(indices.size())),
+                     indices.end(),
+                     [&probabilities](size_t a, size_t b) {
+                         return probabilities[a] > probabilities[b];
+                     });
+
+    // Write predictions to CSV
+    for (int i = 0; i < top_k && i < static_cast<int>(indices.size()); i++) {
+        size_t idx = indices[i];
+        if (probabilities[idx] > 0.0f) {
+            std::string token = tokenizer.decode({static_cast<int>(idx)});
+            // Clean token for CSV (escape commas and quotes)
+            std::string cleaned_token = token;
+            std::replace(cleaned_token.begin(), cleaned_token.end(), ',', ';');
+            std::replace(cleaned_token.begin(), cleaned_token.end(), '"', '\'');
+            
+            // Determine token category
+            std::string category = "OTHER";
+            if (tokenizer.is_verb(token)) category = "VERB";
+            else if (tokenizer.is_adjective(token)) category = "ADJ";
+            else if (tokenizer.is_noun(token)) category = "NOUN";
+
+            // Clean input text for CSV
+            std::string cleaned_input = input_text;
+            std::replace(cleaned_input.begin(), cleaned_input.end(), ',', ';');
+            std::replace(cleaned_input.begin(), cleaned_input.end(), '"', '\'');
+
+            // Write row to CSV
+            csv_file << std::fixed << std::setprecision(6)
+                    << timestamp << ","
+                    << "\"" << cleaned_input << "\","
+                    << (i + 1) << ","
+                    << "\"" << cleaned_token << "\","
+                    << probabilities[idx] << ","
+                    << last_logits[idx] << ","
+                    << category << "\n";
+        }
+    }
+
+    csv_file.close();
+    std::cout << "Predictions saved to " << csv_path << std::endl;
+}
+
+bool Utils::validate_input_sequence(
+    const std::vector<int>& tokens,
+    size_t vocab_size,
+    size_t max_seq_length) {
+    
+    // Check sequence length
+    if (tokens.size() > max_seq_length) {
+        std::cout << "Sequence too long: " << tokens.size() << " > " << max_seq_length << std::endl;
+        return false;
+    }
+
+    // Check if tokens are within vocabulary range
+    for (const int token : tokens) {
+        if (token < 0 || static_cast<size_t>(token) >= vocab_size) {
+            std::cout << "Token out of vocabulary range: " << token << " (vocab size: " << vocab_size << ")" << std::endl;
+            return false;
+        }
+    }
+
+    return true;
 }

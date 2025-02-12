@@ -323,13 +323,24 @@ void HyperparameterUtils::log_result(const TuningResult& result) {
 }
 
 std::vector<TuningResult> HyperparameterTuner::tune(
-    const std::vector<std::pair<std::string, std::string>>& training_data,
-    const TiktokenTokenizer& tokenizer) {
+    const std::vector<ContextualTrainingExample>& training_data,
+    const TiktokenTokenizer& tokenizer,
+    size_t num_trials) {
     
+    std::vector<TuningResult> results;
+    results.reserve(num_trials);
+
+    // Convert contextual training data to pairs for backward compatibility
+    std::vector<std::pair<std::string, std::string>> training_pairs;
+    training_pairs.reserve(training_data.size());
+    for (const auto& example : training_data) {
+        training_pairs.emplace_back(example.input, example.output);
+    }
+
     // First, check if tuning is enabled in config
     if (!config_.training.tuning.enabled) {
         debug::log_message("Hyperparameter tuning is disabled in config", "INFO");
-        return {};  // Return empty results if tuning is disabled
+        return results;  // Return empty results if tuning is disabled
     }
 
     // Only if tuning is enabled, proceed with initialization and output
@@ -372,20 +383,21 @@ std::vector<TuningResult> HyperparameterTuner::tune(
                                           results_[0].mean_validation_loss);
         
         // Evaluate the configuration
-        auto result = evaluate_config(trial_config, training_data, tokenizer, config_);
-        results_.push_back(result);
+        auto result = evaluate_config(trial_config, training_pairs, tokenizer, config_);
+        results.push_back(result);
+        results_.push_back(result);  // Also store in member variable
         
         // Log progress
         log_trial_progress(trial, result);
     }
     
     // Sort results by performance
-    std::sort(results_.begin(), results_.end());
+    std::sort(results.begin(), results.end());
     
     // Reset progress state after tuning
     debug::progress_state.reset();
     
-    return results_;
+    return results;
 }
 
 HyperparameterConfig HyperparameterTuner::get_best_config() const {

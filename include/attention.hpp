@@ -5,6 +5,10 @@
 #include "components.hpp"
 #include "tensor.hpp"
 #include "config.hpp"
+#ifdef USE_CUDA
+#include "../include/cuda/cuda_utils.cuh"
+#include "../include/cuda/matrix_ops.cuh"
+#endif
 #include <optional>
 #include <memory>
 #include <vector>
@@ -110,11 +114,27 @@ class MultiHeadAttention {
      * @brief Performs the backward pass to compute gradients.
      * @param grad_output Gradient of the loss with respect to the output
      * @param input Original input tensor
-     * @param target_distribution Optional target attention distribution
+     * @param target Target distribution for loss computation
+     * @param config Configuration object containing gradient clipping parameters
      * @return Gradient with respect to the input
      */
-    Matrix backward(const Matrix& grad_output, const Matrix& input,
-                    const Matrix& target_distribution = Matrix());
+    Matrix backward(const Matrix& grad_output, const Matrix& input, 
+                   const Matrix& target, const TransformerConfig& config);
+
+    /**
+     * @brief Legacy backward pass without configuration.
+     * @param grad_output Gradient of the loss with respect to the output
+     * @param input Original input tensor
+     * @param target Target distribution for loss computation
+     * @return Gradient with respect to the input
+     */
+    Matrix backward(const Matrix& grad_output, const Matrix& input, 
+                   const Matrix& target = Matrix()) {
+        // Create a default config with standard clipping threshold
+        TransformerConfig default_config;
+        default_config.gradient_clip_threshold = 5.0f;  // Use default value
+        return backward(grad_output, input, target, default_config);
+    }
 
     /**
      * @brief CUDA-accelerated version of the backward pass.
@@ -268,7 +288,7 @@ class MultiHeadAttention {
      * @param seq_length Length of the sequence
      * @return Matrix containing the causal mask
      */
-    Matrix create_causal_mask(size_t seq_length);
+    Matrix create_causal_mask(size_t seq_length) const;
     
     /**
      * @brief Performs forward pass of multi-head attention.
@@ -300,6 +320,12 @@ class MultiHeadAttention {
     size_t num_kv_heads;     ///< Number of key/value heads for GQA
     size_t max_seq_length;   ///< Maximum sequence length supported
     bool use_fp16_;         ///< Whether to use FP16 computation
+
+    // Helper methods for attention computation
+    void print_matrix_stats(const std::string& name, const Matrix& mat) const;
+    Matrix softmax_with_temperature(const Matrix& input, float temperature) const;
+    Vector softmax_with_temperature(const Vector& input, float temperature) const;
+    void apply_stable_softmax(Matrix& x) const;
 
     // Cache variables
     Matrix cached_keys;              ///< Cached key projections
@@ -380,7 +406,7 @@ class MultiHeadAttention {
     }
 
     // Move implementation to source file
-    void apply_stable_softmax(Matrix& x) const;
+    // void apply_stable_softmax(Matrix& x) const;  // Remove this duplicate declaration
 
     // Add these new methods to handle Tensors directly
     void apply_mask(Tensor& scores, const Matrix& mask) const {
