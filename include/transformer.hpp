@@ -6,6 +6,8 @@
 #include <optional>
 #include <functional>
 #include <random>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "matrix.hpp"
 #include "embeddings.hpp"  // Includes TokenEmbedding and PositionalEncoding
@@ -44,6 +46,15 @@ Matrix compute_loss_gradient(const Matrix& output, const Matrix& target_distribu
 // Make update_parameter_with_clip global functions instead of member functions
 void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learning_rate, const TransformerConfig& config);
 void update_parameter_with_clip(Vector& param, const Vector& grad, float learning_rate, const TransformerConfig& config);
+
+// Token prediction result structure
+struct TokenPrediction {
+    size_t token_id;
+    std::string token_text;
+    float probability;
+    float raw_logit;
+    PhraseType type;
+};
 
 /**
  * @brief A single layer of the Transformer model implementing the standard Transformer architecture.
@@ -238,6 +249,12 @@ private:
     // Change from reference to value to avoid const issues
     TransformerConfig config;  // Store by value instead of reference
     std::shared_ptr<TiktokenTokenizer> tokenizer_;  // Add shared_ptr to tokenizer
+    std::mt19937 gen_;  // Random number generator
+
+    // Add helper function for phrase type detection
+    PhraseType get_phrase_type(const std::string& text) const {
+        return PhraseTypeHandler::detect_phrase_type(text);
+    }
 
     // Components
     std::unique_ptr<TokenEmbedding> token_embedding;
@@ -324,6 +341,259 @@ private:
     }
 
     std::string current_input_context;  // Track current input context
+
+    // Add these function declarations in the private section
+    float get_context_boost(const std::string& token, const std::string& input);
+    bool is_subject(const std::string& word) const;
+    bool is_article(const std::string& word) const;
+    bool is_linking_verb(const std::string& word) const;
+    float compute_semantic_similarity(const std::string& token, const std::string& input) const;
+    std::vector<int> tokenize(const std::string& text) const;
+    std::string detokenize(const std::vector<int>& tokens) const;
+    PhraseType get_token_type(size_t token_id) const;
+    size_t sample_from_distribution(const Vector& probabilities, std::mt19937& gen) const;
+    Vector softmax_with_temperature(const Vector& logits, float temperature) const;
+
+    // Token diversity tracking
+    struct TokenStats {
+        float presence_count;     // How many times token has been generated
+        float recency_penalty;    // Penalty based on how recently token was used
+        std::vector<size_t> positions;  // Positions where token was generated
+    };
+    std::unordered_map<int, TokenStats> generated_token_stats;
+    std::vector<int> generation_history;  // Track sequence of generated tokens
+    
+    // Diversity control parameters
+    const float presence_penalty = 0.3f;    // Base penalty for token reuse
+    const float recency_decay = 0.85f;      // How quickly recency penalty decays
+    const float frequency_penalty = 0.2f;    // Penalty based on frequency
+    const float diversity_boost = 0.15f;     // Boost for novel tokens
+    const size_t recency_window = 10;       // Window for recency calculations
+    
+    // Helper methods for diverse prediction
+    void apply_diversity_penalties(Vector& logits) {
+        // Get current position in generation
+        size_t current_pos = generation_history.size();
+        
+        // Update recency penalties for all tracked tokens
+        for (auto& [token_id, stats] : generated_token_stats) {
+            // Decay recency penalty based on distance from last use
+            if (!stats.positions.empty()) {
+                size_t distance = current_pos - stats.positions.back();
+                stats.recency_penalty *= std::pow(recency_decay, distance);
+            }
+            
+            // Apply penalties to logits
+            float total_penalty = 0.0f;
+            
+            // Presence penalty based on total usage
+            total_penalty += presence_penalty * stats.presence_count;
+            
+            // Recency penalty
+            total_penalty += stats.recency_penalty;
+            
+            // Frequency penalty based on local concentration
+            size_t recent_uses = std::count_if(
+                stats.positions.begin(), 
+                stats.positions.end(),
+                [current_pos, this](size_t pos) {
+                    return current_pos - pos <= recency_window;
+                }
+            );
+            total_penalty += frequency_penalty * recent_uses;
+            
+            // Apply combined penalty
+            logits[token_id] -= total_penalty;
+        }
+        
+        // Add diversity boost for unused tokens
+        for (size_t i = 0; i < logits.size(); i++) {
+            if (generated_token_stats.find(i) == generated_token_stats.end()) {
+                logits[i] += diversity_boost;
+            }
+        }
+    }
+
+    void update_token_stats(int token_id) {
+        size_t current_pos = generation_history.size();
+        
+        // Add to generation history
+        generation_history.push_back(token_id);
+        
+        // Update or create token stats
+        auto& stats = generated_token_stats[token_id];
+        stats.presence_count += 1.0f;
+        stats.recency_penalty += 1.0f;
+        stats.positions.push_back(current_pos);
+        
+        // Prune old positions outside recency window
+        while (!stats.positions.empty() && 
+               current_pos - stats.positions.front() > recency_window) {
+            stats.positions.erase(stats.positions.begin());
+        }
+    }
+
+    float get_adaptive_temperature(size_t tokens_generated) {
+        // Start with higher temperature and gradually decrease
+        float base_temp = 1.2f;
+        float min_temp = 0.7f;
+        
+        // Adjust temperature based on repetition
+        float repetition_factor = 1.0f;
+        if (!generation_history.empty()) {
+            // Check for recent repetitions
+            std::unordered_map<int, size_t> recent_counts;
+            size_t window_start = (generation_history.size() > recency_window) ? 
+                                 generation_history.size() - recency_window : 0;
+            
+            for (size_t i = window_start; i < generation_history.size(); i++) {
+                recent_counts[generation_history[i]]++;
+            }
+            
+            // Increase temperature if seeing repetition
+            size_t max_count = 0;
+            for (const auto& [token, count] : recent_counts) {
+                max_count = std::max(max_count, count);
+            }
+            
+            if (max_count > 1) {
+                repetition_factor = 1.0f + (max_count - 1) * 0.2f;
+            }
+        }
+        
+        // Combine decay and repetition factors
+        float decay = std::exp(-static_cast<float>(tokens_generated) / 20.0f);
+        float temp = min_temp + (base_temp - min_temp) * decay;
+        return temp * repetition_factor;
+    }
+
+    void reset_diversity_tracking() {
+        generated_token_stats.clear();
+        generation_history.clear();
+    }
+
+    // Sampling parameters
+    struct SamplingParams {
+        float base_temperature = 1.2f;
+        float min_temperature = 0.7f;
+        float nucleus_p = 0.9f;          // Default top-p for nucleus sampling
+        float min_p = 0.1f;              // Minimum nucleus p value
+        float max_p = 0.95f;             // Maximum nucleus p value
+        float p_adjustment_rate = 0.05f;  // How quickly to adjust p based on entropy
+    } sampling_params;
+
+    // Helper method for nucleus sampling
+    Vector apply_nucleus_sampling(const Vector& logits, float p, float temperature) {
+        // Sort token indices by probability
+        std::vector<std::pair<float, size_t>> token_probs;
+        token_probs.reserve(logits.size());
+        
+        // Apply temperature and convert to probabilities
+        Vector scaled_logits = logits;
+        for (size_t i = 0; i < logits.size(); i++) {
+            scaled_logits[i] /= temperature;
+        }
+        Vector probs = softmax(scaled_logits);
+        
+        for (size_t i = 0; i < probs.size(); i++) {
+            token_probs.emplace_back(probs[i], i);
+        }
+        
+        // Sort by probability in descending order
+        std::sort(token_probs.begin(), token_probs.end(),
+                 std::greater<std::pair<float, size_t>>());
+        
+        // Calculate cumulative probabilities
+        float cumsum = 0.0f;
+        size_t nucleus_size = 0;
+        
+        for (size_t i = 0; i < token_probs.size(); i++) {
+            cumsum += token_probs[i].first;
+            if (cumsum > p) {
+                nucleus_size = i + 1;
+                break;
+            }
+        }
+        
+        if (nucleus_size == 0) nucleus_size = token_probs.size();
+        
+        // Create new distribution with only nucleus tokens
+        Vector nucleus_probs(logits.size(), 0.0f);
+        float nucleus_sum = 0.0f;
+        
+        for (size_t i = 0; i < nucleus_size; i++) {
+            nucleus_probs[token_probs[i].second] = token_probs[i].first;
+            nucleus_sum += token_probs[i].first;
+        }
+        
+        // Renormalize probabilities
+        if (nucleus_sum > 0.0f) {
+            for (size_t i = 0; i < nucleus_probs.size(); i++) {
+                nucleus_probs[i] /= nucleus_sum;
+            }
+        }
+        
+        return nucleus_probs;
+    }
+
+    // Helper method to compute distribution entropy
+    float compute_entropy(const Vector& probs) {
+        float entropy = 0.0f;
+        for (size_t i = 0; i < probs.size(); i++) {
+            if (probs[i] > 0.0f) {
+                entropy -= probs[i] * std::log2(probs[i]);
+            }
+        }
+        return entropy;
+    }
+
+    // Get adaptive sampling parameters based on generation state
+    std::pair<float, float> get_adaptive_sampling_params(size_t tokens_generated) {
+        float temperature = sampling_params.min_temperature;
+        float nucleus_p = sampling_params.nucleus_p;
+        
+        // Get base adaptive temperature
+        float base_temp = get_adaptive_temperature(tokens_generated);
+        
+        // Adjust nucleus p based on recent entropy
+        if (!generation_history.empty()) {
+            // Calculate entropy of recent generations
+            std::unordered_map<int, float> token_freqs;
+            size_t window_start = (generation_history.size() > recency_window) ? 
+                                 generation_history.size() - recency_window : 0;
+            
+            for (size_t i = window_start; i < generation_history.size(); i++) {
+                token_freqs[generation_history[i]]++;
+            }
+            
+            // Convert frequencies to probabilities
+            Vector recent_probs(token_freqs.size());
+            float sum = 0.0f;
+            for (const auto& [token, freq] : token_freqs) {
+                sum += freq;
+            }
+            for (const auto& [token, freq] : token_freqs) {
+                recent_probs[token] = freq / sum;
+            }
+            
+            // Compute entropy
+            float recent_entropy = compute_entropy(recent_probs);
+            
+            // Adjust nucleus p based on entropy
+            // Lower entropy (more repetitive) -> increase p for more diversity
+            float entropy_factor = std::clamp(1.0f - recent_entropy / 4.0f, 0.0f, 1.0f);
+            nucleus_p = std::clamp(
+                sampling_params.nucleus_p + entropy_factor * sampling_params.p_adjustment_rate,
+                sampling_params.min_p,
+                sampling_params.max_p
+            );
+        }
+        
+        // Combine temperature adjustments
+        temperature = base_temp;
+        
+        return {temperature, nucleus_p};
+    }
 
 public:
     Transformer() = default;
@@ -521,34 +791,71 @@ public:
                             size_t max_length = 100,
                             float temperature = 1.0f) {
         std::vector<int> output_tokens = input_tokens;
+        size_t tokens_generated = 0;
+        
+        // Clear diversity tracking for new generation
+        reset_diversity_tracking();
+        
+        // Decode input tokens to set initial context if not already set
+        if (current_input_context.empty()) {
+            current_input_context = detokenize(input_tokens);
+        }
+        
+        // Initialize random generator with good entropy source
+        std::random_device rd;
+        std::seed_seq seq{rd(), rd(), rd(), rd()};
+        std::mt19937 gen(seq);
         
         while (output_tokens.size() < max_length) {
-            // Forward pass through the model - fix the forward call
-            Matrix logits = forward(output_tokens, "", *tokenizer_);  // Add empty string for query and tokenizer reference
+            // Forward pass through the model with proper context
+            Matrix logits = forward(output_tokens, current_input_context, *tokenizer_);
             
             // Get the last token's logits
             Vector last_token_logits = logits.row(logits.rows() - 1);
             
-            // Apply temperature
-            if (temperature != 1.0f) {
-                for (size_t i = 0; i < last_token_logits.size(); i++) {
-                    last_token_logits[i] /= temperature;
-                }
+            // Apply diversity penalties
+            apply_diversity_penalties(last_token_logits);
+            
+            // Get adaptive sampling parameters
+            auto [adaptive_temp, nucleus_p] = get_adaptive_sampling_params(tokens_generated);
+            
+            // Combine with user-provided temperature
+            float final_temperature = adaptive_temp * temperature;
+            
+            // Apply nucleus sampling with adaptive parameters
+            Vector filtered_probs = apply_nucleus_sampling(last_token_logits, nucleus_p, final_temperature);
+            
+            // Add controlled random noise for exploration
+            if (tokens_generated < max_length / 2) {  // More exploration early in generation
+                add_random_noise(filtered_probs, gen);
             }
             
-            // Apply softmax using the helper function
-            Vector probabilities = softmax(last_token_logits);
+            // Sample next token using the filtered distribution
+            std::discrete_distribution<> dist(filtered_probs.begin(), filtered_probs.end());
+            int next_token = dist(gen);
             
-            // Sample next token
-            int next_token = sample_token(probabilities);
+            // Update token stats for diversity tracking
+            update_token_stats(next_token);
             
             // Add to output
             output_tokens.push_back(next_token);
+            tokens_generated++;
+            
+            // Update context with the new token
+            current_input_context = detokenize(output_tokens);
             
             // Check for end of sequence token
             if (next_token == eos_token_) {
                 break;
             }
+            
+            // Optional: Log sampling parameters for debugging
+            #ifdef DEBUG_SAMPLING
+            std::cout << "Generation step " << tokens_generated << ":\n"
+                      << "Temperature: " << final_temperature << "\n"
+                      << "Nucleus p: " << nucleus_p << "\n"
+                      << "Entropy: " << compute_entropy(filtered_probs) << std::endl;
+            #endif
         }
         
         return output_tokens;
@@ -557,6 +864,9 @@ public:
     // Add context tracking
     std::string get_current_context() const { return current_input_context; }
     void set_current_context(const std::string& context) { current_input_context = context; }
+
+    // Add this function declaration in the public section
+    std::vector<TokenPrediction> predict_next_tokens(const std::string& input, size_t num_predictions);
 
 private:
     /**
@@ -574,7 +884,15 @@ private:
     int sample_token(const Vector& probabilities) {
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::discrete_distribution<> dist(probabilities.begin(), probabilities.end());
+        
+        // Get adaptive parameters
+        auto [temperature, nucleus_p] = get_adaptive_sampling_params(generation_history.size());
+        
+        // Apply nucleus sampling with temperature
+        Vector sampled_probs = apply_nucleus_sampling(probabilities, nucleus_p, temperature);
+        
+        // Sample from the filtered distribution
+        std::discrete_distribution<> dist(sampled_probs.begin(), sampled_probs.end());
         return dist(gen);
     }
     
@@ -601,4 +919,5 @@ public:
 
 };
 
+class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp
 class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp

@@ -6,6 +6,8 @@ enum class PhraseType {
     GENERAL,    // General phrases with | delimiter
     VERB,       // Verb endings with # delimiter
     ADJECTIVE,  // Adjective endings with * delimiter
+    NOUN,
+    OTHER
 };
 
 class PhraseTypeHandler {

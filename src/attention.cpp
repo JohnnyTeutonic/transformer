@@ -534,58 +534,86 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
 }
 
 Matrix MultiHeadAttention::compute_query_gradients(const Matrix& grad, const Matrix& input) {
-    int seq_len = input.rows();
-    Matrix d_query(seq_len, seq_len);  // Attention scores dimensions
-    
-    // Create empty attention mask for this computation
-    AttentionMask empty_mask;
-    Matrix empty_matrix(seq_len, seq_len, 0.0f);  // Create empty mask matrix
-    empty_mask.mask = empty_matrix;
-    
-    // First compute attention score gradients
+    std::cout << "\n=== compute_query_gradients dimensions ===" << std::endl;
+    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
+    std::cout << "input: " << input.rows() << "x" << input.cols() << std::endl;
+    std::cout << "query_weights: " << params_.query_weights.rows() << "x" << params_.query_weights.cols() << std::endl;
+
+    Matrix d_query(grad.rows(), grad.cols());
+    std::cout << "d_query (pre-matmul): " << d_query.rows() << "x" << d_query.cols() << std::endl;
+
     #ifdef USE_CUDA
-    Matrix scores(grad.rows(), input.cols());
-    cuda::matmul(grad, input.transpose(), scores);
-    d_query = scores * (1.0f / std::sqrt(float(input.cols())));
+    cuda::matmul(grad, params_.query_weights.transpose(), d_query);
     #else
-    Matrix scores = matmul(grad, input.transpose());
-    d_query = scores * (1.0f / std::sqrt(float(input.cols())));
+    d_query = matmul(grad, params_.query_weights.transpose());
     #endif
 
+    std::cout << "d_query (final): " << d_query.rows() << "x" << d_query.cols() << std::endl;
     return d_query;
 }
 
 Matrix MultiHeadAttention::compute_key_gradients(const Matrix& grad, const Matrix& input) {
+    std::cout << "\n=== compute_key_gradients dimensions ===" << std::endl;
+    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
+    std::cout << "input: " << input.rows() << "x" << input.cols() << std::endl;
+    std::cout << "key_weights: " << params_.key_weights.rows() << "x" << params_.key_weights.cols() << std::endl;
+
     Matrix d_key(grad.rows(), grad.cols());
+    std::cout << "d_key (pre-matmul): " << d_key.rows() << "x" << d_key.cols() << std::endl;
+
     #ifdef USE_CUDA
     cuda::matmul(grad, params_.key_weights.transpose(), d_key);
     #else
     d_key = matmul(grad, params_.key_weights.transpose());
     #endif
+
+    std::cout << "d_key (final): " << d_key.rows() << "x" << d_key.cols() << std::endl;
     return d_key;
 }
 
 Matrix MultiHeadAttention::compute_value_gradients(const Matrix& grad, const Matrix& input) {
+    std::cout << "\n=== compute_value_gradients dimensions ===" << std::endl;
+    std::cout << "grad: " << grad.rows() << "x" << grad.cols() << std::endl;
+    std::cout << "input: " << input.rows() << "x" << input.cols() << std::endl;
+    std::cout << "value_weights: " << params_.value_weights.rows() << "x" << params_.value_weights.cols() << std::endl;
+
     Matrix d_value(grad.rows(), grad.cols());
+    std::cout << "d_value (pre-matmul): " << d_value.rows() << "x" << d_value.cols() << std::endl;
+
     #ifdef USE_CUDA
     cuda::matmul(grad, params_.value_weights.transpose(), d_value);
     #else
     d_value = matmul(grad, params_.value_weights.transpose());
     #endif
+
+    std::cout << "d_value (final): " << d_value.rows() << "x" << d_value.cols() << std::endl;
     return d_value;
 }
 
 Matrix MultiHeadAttention::combine_gradients(const Matrix& d_query, const Matrix& d_key, const Matrix& d_value) {
-    // Original implementation
-    Matrix combined = d_query;
-    combined += d_key;
-    combined += d_value;
-    
-    std::cout << "combine_gradients dimensions:" << std::endl;
+    std::cout << "\n=== combine_gradients dimensions ===" << std::endl;
     std::cout << "d_query: " << d_query.rows() << "x" << d_query.cols() << std::endl;
     std::cout << "d_key: " << d_key.rows() << "x" << d_key.cols() << std::endl;
     std::cout << "d_value: " << d_value.rows() << "x" << d_value.cols() << std::endl;
-    std::cout << "combined: " << combined.rows() << "x" << combined.cols() << std::endl;
+    
+    // Validate dimensions before combining
+    if (d_query.rows() != d_key.rows() || d_query.cols() != d_key.cols() ||
+        d_key.rows() != d_value.rows() || d_key.cols() != d_value.cols()) {
+        std::cerr << "Dimension mismatch in combine_gradients:" << std::endl;
+        std::cerr << "d_query: " << d_query.rows() << "x" << d_query.cols() << std::endl;
+        std::cerr << "d_key: " << d_key.rows() << "x" << d_key.cols() << std::endl;
+        std::cerr << "d_value: " << d_value.rows() << "x" << d_value.cols() << std::endl;
+        throw std::runtime_error("Gradient dimensions must match for combination");
+    }
+    
+    Matrix combined = d_query;
+    std::cout << "combined (pre-addition): " << combined.rows() << "x" << combined.cols() << std::endl;
+    
+    combined += d_key;
+    std::cout << "combined (after d_key): " << combined.rows() << "x" << combined.cols() << std::endl;
+    
+    combined += d_value;
+    std::cout << "combined (final): " << combined.rows() << "x" << combined.cols() << std::endl;
     
     return combined;
 }

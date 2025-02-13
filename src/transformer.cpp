@@ -11,7 +11,9 @@
 #include "../include/utils.hpp"
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <omp.h>
+#include <set>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
 
@@ -432,113 +434,65 @@ struct BatchSequence {
 };
 
 Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer) {
-    SCOPE_LOG();
+    std::cout << "Entering function 'Transformer::forward'" << std::endl;
     try {
-        // Store input for backward pass
+        check_tokenizer();
+        // Store input for potential backward pass
         last_input_tokens_ = input_tokens;
         last_input_query_ = original_query;
-
-        // Validate input dimensions
-        if (input_tokens.empty()) {
-            throw std::runtime_error("Empty input tokens");
+        // Get embeddings
+        Matrix token_emb = token_embedding->forward(input_tokens);
+        // Create position indices matrix for positional encoding
+        Matrix position_indices(1, input_tokens.size());
+        for (size_t i = 0; i < input_tokens.size(); i++) {
+            position_indices(0, i) = static_cast<float>(i);
         }
-
-        // Get embeddings for input tokens with dimension validation
-        Matrix hidden_states = token_embedding->forward(input_tokens);
-        if (hidden_states.empty()) {
-            throw std::runtime_error("Empty embeddings from token_embedding");
-        }
-        
-        std::cout << "Hidden states dimensions after embedding: " 
-                  << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-        
-        // Cache initial embeddings
-        GradientCheckpoint::cache_activation("initial_embeddings", hidden_states);
-
-        // Add positional encoding with dimension check
-        if (pos_encoding) {
-            if (hidden_states.cols() != config.hidden_size) {
-                throw std::runtime_error("Hidden states dimension (" + 
-                    std::to_string(hidden_states.cols()) + 
-                    ") does not match config hidden_size (" + 
-                    std::to_string(config.hidden_size) + ")");
+        Matrix pos_emb = pos_encoding->forward(position_indices);
+        // Adjust positional encodings based on separator
+        pos_emb = adjust_position_encodings(pos_emb, input_tokens);
+        // Create separator-aware attention mask
+        AttentionMask mask = create_separator_mask(input_tokens);
+        // Broadcast positional embeddings to match token embeddings shape
+        Matrix broadcasted_pos_emb(token_emb.rows(), pos_emb.cols());
+        for (size_t i = 0; i < token_emb.rows(); i++) {
+            for (size_t j = 0; j < pos_emb.cols(); j++) {
+                broadcasted_pos_emb(i, j) = pos_emb(0, j);
             }
-            hidden_states = pos_encoding->forward(hidden_states);
         }
         
-        // Apply dropout during training
+        // Combine embeddings with properly broadcasted positional encodings
+        Matrix x = token_emb + broadcasted_pos_emb;
+        // Apply dropout if in training mode
         if (training && dropout) {
-            dropout->set_training(true);
-            hidden_states = dropout->forward(hidden_states);
-        }
-
-        // Process through transformer layers with dimension tracking
-        for (size_t i = 0; i < layers.size(); ++i) {
-            std::cout << "Processing layer " << i << std::endl;
-            std::cout << "Input dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-            
-            // Cache input to this layer
-            std::string layer_key = "layer_" + std::to_string(i) + "_input";
-            GradientCheckpoint::cache_activation(layer_key, hidden_states);
-            
-            // Create attention mask for this layer
-            AttentionMask attention_mask = AttentionMask::create_causal_mask(hidden_states.rows());
-            
-            // Process through layer with dimension validation
-            Matrix layer_output = layers[i]->forward(hidden_states, attention_mask);
-            if (layer_output.empty()) {
-                throw std::runtime_error("Empty output from layer " + std::to_string(i));
-            }
-            
-            if (layer_output.cols() != config.hidden_size) {
-                throw std::runtime_error("Layer " + std::to_string(i) + 
-                    " output dimension (" + std::to_string(layer_output.cols()) + 
-                    ") does not match hidden_size (" + std::to_string(config.hidden_size) + ")");
-            }
-            
-            hidden_states = layer_output;
-            
-            // Cache output from this layer
-            std::string output_key = "layer_" + std::to_string(i) + "_output";
-            GradientCheckpoint::cache_activation(output_key, hidden_states);
-            
-            std::cout << "Output dimensions: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-        }
-
-        // Apply final layer norm with dimension check
-        if (final_ln) {
-            if (hidden_states.cols() != config.hidden_size) {
-                throw std::runtime_error("Hidden states dimension before final layer norm (" + 
-                    std::to_string(hidden_states.cols()) + 
-                    ") does not match hidden_size (" + 
-                    std::to_string(config.hidden_size) + ")");
-            }
-            hidden_states = final_ln->forward(hidden_states);
+            x = dropout->forward(x);
         }
         
-        // Cache final hidden states
-        GradientCheckpoint::cache_activation("final_hidden_states", hidden_states);
-
+        // Store layer activations for potential backward pass
+        m_layer_activations.clear();
+        m_layer_activations.push_back(x);
+        
+        // Apply transformer layers with separator-aware attention
+        for (auto& layer : layers) {
+            x = layer->forward(x, mask);
+            m_layer_activations.push_back(x);
+        }
+        
+        // Apply final layer norm
+        x = final_ln->forward(x);
+        
+        // Store hidden states for potential backward pass
+        hidden_states = x;
+        last_hidden_states = x;
+        // Cache final hidden states for backward pass
+        GradientCheckpoint::cache_activation("final_hidden_states", x);
+        
         // Project to vocabulary space using language model head
-        if (!lm_head) {
-            throw std::runtime_error("Language model head is null");
-        }
-        
-        Matrix logits = lm_head->forward(hidden_states, training);
-        if (logits.empty()) {
-            throw std::runtime_error("Empty logits from language model head");
-        }
-        
-        std::cout << "Final logits dimensions: " << logits.rows() << "x" << logits.cols() << std::endl;
-        
-        // Cache logits
-        GradientCheckpoint::cache_activation("final_logits", logits);
-
-        return logits;
+        return lm_head->forward(x);
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer::forward: " << e.what() << std::endl;
         throw;
     }
+    std::cout << "Exiting function 'Transformer::forward'" << std::endl;
 }
 
 void Transformer::clear_kv_cache() {
@@ -550,7 +504,7 @@ void Transformer::clear_kv_cache() {
 
 // Original backward method implementation
 void Transformer::backward(const Matrix& grad_output, const std::vector<int>& input_tokens, float learning_rate) {
-    SCOPE_LOG();
+    std::cout << "Entering function 'Transformer::backward'" << std::endl;
     try {
         std::cout << "\nStarting backward pass..." << std::endl;
         std::cout << "Initial gradient dimensions: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
@@ -647,35 +601,42 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         std::cerr << "Error in backward pass: " << e.what() << std::endl;
         throw;
     }
+    std::cout << "Exiting function 'Transformer::backward'" << std::endl;
 }
 
 void Transformer::clear_gradients() {
-    // Reset layer gradients
-    for (auto& layer : layers) {
-        if (auto* attention = layer->getAttention()) {
-            attention->param_gradients() = MultiHeadAttention::Gradients();
+    std::cout << "Entering function 'Transformer::clear_gradients'" << std::endl;
+    try {
+        // Reset layer gradients
+        for (auto& layer : layers) {
+            if (auto* attention = layer->getAttention()) {
+                attention->param_gradients() = MultiHeadAttention::Gradients();
+            }
+            if (auto* ffn = layer->getFeedForward()) {
+                ffn->param_gradients() = FeedForward::Gradients();
+            }
+            if (auto* ln = layer->getLayerNorm()) {
+                ln->param_gradients() = LayerNorm::Gradients();
+            }
         }
-        if (auto* ffn = layer->getFeedForward()) {
-            ffn->param_gradients() = FeedForward::Gradients();
+        
+        // Reset embedding gradients
+        if (token_embedding) {
+            token_embedding->get_gradient_table().initialize_constant(0.0f);
         }
-        if (auto* ln = layer->getLayerNorm()) {
-            ln->param_gradients() = LayerNorm::Gradients();
-        }
+        
+        // Reset parameter gradients
+        parameter_grads.reset();
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::clear_gradients: " << e.what() << std::endl;
+        throw;
     }
-    
-    // Reset embedding gradients
-    if (token_embedding) {
-        token_embedding->get_gradient_table().initialize_constant(0.0f);
-    }
-    
-    // Reset parameter gradients
-    parameter_grads.reset();
+    std::cout << "Exiting function 'Transformer::clear_gradients'" << std::endl;
 }
 
 // New batch backward method implementation
 void Transformer::backward(const Matrix& logits, const Matrix& target_distribution, float learning_rate) {
-    std::cout << "\n=== Transformer::backward START ===" << std::endl;
-
+    std::cout << "Entering function 'Transformer::backward (with target distribution)'" << std::endl;
     try {
         // Get cached hidden states
         Matrix last_hidden = GradientCheckpoint::get_activation("final_hidden_states");
@@ -703,57 +664,65 @@ void Transformer::backward(const Matrix& logits, const Matrix& target_distributi
         std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
         throw;
     }
+    std::cout << "Exiting function 'Transformer::backward (with target distribution)'" << std::endl;
 }
 
 void Transformer::update_parameters(float learning_rate) {
-    SCOPE_LOG();
-    std::cout << "=== Transformer::update_parameters START ===" << std::endl;
+    std::cout << "Entering function 'Transformer::update_parameters'" << std::endl;
+    try {
+        SCOPE_LOG();
+        std::cout << "=== Transformer::update_parameters START ===" << std::endl;
 
-    // Update layer parameters
-    for (auto& layer : layers) {
-        // Update attention parameters
-        if (auto* attention = layer->getAttention()) {
-            auto& attn_params = attention->parameters();
-            auto& attn_grads = attention->param_gradients();
+        // Update layer parameters
+        for (auto& layer : layers) {
+            // Update attention parameters
+            if (auto* attention = layer->getAttention()) {
+                auto& attn_params = attention->parameters();
+                auto& attn_grads = attention->param_gradients();
 
-            // Update weights
-            update_parameter_with_clip(attn_params.query_weights, attn_grads.query_grad, learning_rate, config);
-            update_parameter_with_clip(attn_params.key_weights, attn_grads.key_grad, learning_rate, config);
-            update_parameter_with_clip(attn_params.value_weights, attn_grads.value_grad, learning_rate, config);
-            update_parameter_with_clip(attn_params.output_weights, attn_grads.output_grad, learning_rate, config);
+                // Update weights
+                update_parameter_with_clip(attn_params.query_weights, attn_grads.query_grad, learning_rate, config);
+                update_parameter_with_clip(attn_params.key_weights, attn_grads.key_grad, learning_rate, config);
+                update_parameter_with_clip(attn_params.value_weights, attn_grads.value_grad, learning_rate, config);
+                update_parameter_with_clip(attn_params.output_weights, attn_grads.output_grad, learning_rate, config);
 
-            // Update biases
-            update_parameter_with_clip(attn_params.query_bias, attn_grads.query_bias_grad, learning_rate, config);
-            update_parameter_with_clip(attn_params.key_bias, attn_grads.key_bias_grad, learning_rate, config);
-            update_parameter_with_clip(attn_params.value_bias, attn_grads.value_bias_grad, learning_rate, config);
-            update_parameter_with_clip(attn_params.output_bias, attn_grads.output_bias_grad, learning_rate, config);
+                // Update biases
+                update_parameter_with_clip(attn_params.query_bias, attn_grads.query_bias_grad, learning_rate, config);
+                update_parameter_with_clip(attn_params.key_bias, attn_grads.key_bias_grad, learning_rate, config);
+                update_parameter_with_clip(attn_params.value_bias, attn_grads.value_bias_grad, learning_rate, config);
+                update_parameter_with_clip(attn_params.output_bias, attn_grads.output_bias_grad, learning_rate, config);
+            }
+
+            // Update feed forward parameters
+            if (auto* ffn = layer->getFeedForward()) {
+                auto& ffn_params = ffn->parameters();
+                auto& ffn_grads = ffn->param_gradients();
+
+                // Update weights
+                update_parameter_with_clip(ffn_params.ff1_weights, ffn_grads.ff1_grad, learning_rate, config);
+                update_parameter_with_clip(ffn_params.ff2_weights, ffn_grads.ff2_grad, learning_rate, config);
+
+                // Update biases
+                update_parameter_with_clip(ffn_params.ff1_bias, ffn_grads.ff1_bias_grad, learning_rate, config);
+                update_parameter_with_clip(ffn_params.ff2_bias, ffn_grads.ff2_bias_grad, learning_rate, config);
+            }
+
+            // Update layer norm parameters
+            if (auto* ln = layer->getLayerNorm()) {
+                auto& ln_params = ln->parameters();
+                auto& ln_grads = ln->param_gradients();
+                
+                update_parameter_with_clip(ln_params.gamma, ln_grads.gamma_grad, learning_rate, config);
+                update_parameter_with_clip(ln_params.beta, ln_grads.beta_grad, learning_rate, config);
+            }
         }
 
-        // Update feed forward parameters
-        if (auto* ffn = layer->getFeedForward()) {
-            auto& ffn_params = ffn->parameters();
-            auto& ffn_grads = ffn->param_gradients();
-
-            // Update weights
-            update_parameter_with_clip(ffn_params.ff1_weights, ffn_grads.ff1_grad, learning_rate, config);
-            update_parameter_with_clip(ffn_params.ff2_weights, ffn_grads.ff2_grad, learning_rate, config);
-
-            // Update biases
-            update_parameter_with_clip(ffn_params.ff1_bias, ffn_grads.ff1_bias_grad, learning_rate, config);
-            update_parameter_with_clip(ffn_params.ff2_bias, ffn_grads.ff2_bias_grad, learning_rate, config);
-        }
-
-        // Update layer norm parameters
-        if (auto* ln = layer->getLayerNorm()) {
-            auto& ln_params = ln->parameters();
-            auto& ln_grads = ln->param_gradients();
-            
-            update_parameter_with_clip(ln_params.gamma, ln_grads.gamma_grad, learning_rate, config);
-            update_parameter_with_clip(ln_params.beta, ln_grads.beta_grad, learning_rate, config);
-        }
+        std::cout << "=== Transformer::update_parameters END ===" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::update_parameters: " << e.what() << std::endl;
+        throw;
     }
-
-    std::cout << "=== Transformer::update_parameters END ===" << std::endl;
+    std::cout << "Exiting function 'Transformer::update_parameters'" << std::endl;
 }
 
 std::vector<Matrix>& Transformer::parameters() {
@@ -1390,159 +1359,180 @@ static DynamicLossScaler loss_scaler;
 
 // Add learning_rate parameter to backward_pass
 void Transformer::backward_pass(const Matrix& output, const Matrix& target_distribution, float learning_rate) {
-    // Compute loss gradient with proper sequence handling
-    Matrix loss_grad = Utils::compute_loss_gradient(output, target_distribution);
-    
-    // Retrieve sequence boundaries
-    const auto& seq_boundaries = last_seq_boundaries;
-    
-    // Apply adaptive loss scaling if using FP16
-    if (config.use_fp16) {
-        // Track gradient statistics for adaptive scaling
-        static float running_max_grad = 0.0f;
-        static float running_min_grad = std::numeric_limits<float>::max();
-        static float scale_growth_factor = 2.0f;
-        static float scale_reduction_factor = 0.5f;
-        static size_t stable_steps = 0;
-        static const size_t STABILITY_THRESHOLD = 1000;
-        static const float MAX_SCALE = 32768.0f;
-        static const float MIN_SCALE = 1.0f;
+    std::cout << "Entering function 'Transformer::backward_pass'" << std::endl;
+    try {
+        // Compute loss gradient with proper sequence handling
+        Matrix loss_grad = Utils::compute_loss_gradient(output, target_distribution);
         
-        // Compute current gradient statistics
-        float current_max_grad = 0.0f;
-        float current_min_grad = std::numeric_limits<float>::max();
-        bool has_inf_nan = false;
+        // Retrieve sequence boundaries
+        const auto& seq_boundaries = last_seq_boundaries;
         
-        #pragma omp parallel for reduction(max:current_max_grad) reduction(min:current_min_grad) reduction(||:has_inf_nan)
-        for (size_t i = 0; i < loss_grad.rows(); i++) {
-            for (size_t j = 0; j < loss_grad.cols(); j++) {
-                float val = std::abs(loss_grad(i, j));
-                if (std::isfinite(val)) {
-                    current_max_grad = std::max(current_max_grad, val);
-                    current_min_grad = std::min(current_min_grad, val);
-                } else {
-                    has_inf_nan = true;
+        // Apply adaptive loss scaling if using FP16
+        if (config.use_fp16) {
+            // Track gradient statistics for adaptive scaling
+            static float running_max_grad = 0.0f;
+            static float running_min_grad = std::numeric_limits<float>::max();
+            static float scale_growth_factor = 2.0f;
+            static float scale_reduction_factor = 0.5f;
+            static size_t stable_steps = 0;
+            static const size_t STABILITY_THRESHOLD = 1000;
+            static const float MAX_SCALE = 32768.0f;
+            static const float MIN_SCALE = 1.0f;
+            
+            // Compute current gradient statistics
+            float current_max_grad = 0.0f;
+            float current_min_grad = std::numeric_limits<float>::max();
+            bool has_inf_nan = false;
+            
+            #pragma omp parallel for reduction(max:current_max_grad) reduction(min:current_min_grad) reduction(||:has_inf_nan)
+            for (size_t i = 0; i < loss_grad.rows(); i++) {
+                for (size_t j = 0; j < loss_grad.cols(); j++) {
+                    float val = std::abs(loss_grad(i, j));
+                    if (std::isfinite(val)) {
+                        current_max_grad = std::max(current_max_grad, val);
+                        current_min_grad = std::min(current_min_grad, val);
+                    } else {
+                        has_inf_nan = true;
+                    }
                 }
             }
-        }
-        
-        // Update running statistics with exponential moving average
-        const float alpha = 0.95f;
-        running_max_grad = alpha * running_max_grad + (1.0f - alpha) * current_max_grad;
-        running_min_grad = alpha * running_min_grad + (1.0f - alpha) * current_min_grad;
-        
-        // Get current scale
-        float current_scale = loss_scaler.get_scale();
-        
-        // Adjust scale based on gradient statistics and stability
-        if (has_inf_nan) {
-            // Reduce scale on inf/nan
-            current_scale *= scale_reduction_factor;
-            stable_steps = 0;
-        } else {
-            stable_steps++;
             
-            // Check if gradients are too small
-            if (running_max_grad < 1e-4f && current_scale < MAX_SCALE) {
-                current_scale *= scale_growth_factor;
-                stable_steps = 0;
-            }
-            // Check if gradients are too large
-            else if (running_max_grad > 1.0f && current_scale > MIN_SCALE) {
+            // Update running statistics with exponential moving average
+            const float alpha = 0.95f;
+            running_max_grad = alpha * running_max_grad + (1.0f - alpha) * current_max_grad;
+            running_min_grad = alpha * running_min_grad + (1.0f - alpha) * current_min_grad;
+            
+            // Get current scale
+            float current_scale = loss_scaler.get_scale();
+            
+            // Adjust scale based on gradient statistics and stability
+            if (has_inf_nan) {
+                // Reduce scale on inf/nan
                 current_scale *= scale_reduction_factor;
                 stable_steps = 0;
-            }
-            // Increase scale if we've been stable for a while
-            else if (stable_steps >= STABILITY_THRESHOLD && current_scale < MAX_SCALE) {
-                current_scale *= scale_growth_factor;
-                stable_steps = 0;
-            }
-        }
-        
-        // Clamp scale to valid range
-        current_scale = std::clamp(current_scale, MIN_SCALE, MAX_SCALE);
-        
-        // Update loss scaler
-        loss_scaler.set_scale(current_scale);
-        
-        // Apply scale to gradients
-        #pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < loss_grad.rows(); i++) {
-            for (size_t j = 0; j < loss_grad.cols(); j++) {
-                loss_grad(i, j) *= current_scale;
-            }
-        }
-        
-        std::cout << "FP16 scaling - Scale: " << current_scale 
-                  << ", Max grad: " << running_max_grad 
-                  << ", Min grad: " << running_min_grad 
-                  << ", Stable steps: " << stable_steps << std::endl;
-    }
-    
-    // Initialize gradient accumulation buffers
-    std::vector<Matrix> layer_gradients;
-    layer_gradients.reserve(layers.size());
-    
-    bool has_inf_nan = false;
-    
-    // Backward through layers with proper sequence handling
-    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
-        std::string layer_key = "layer_" + std::to_string(i) + "_input";
-        Matrix layer_input = GradientCheckpoint::get_activation(layer_key);
-        
-        if (layer_input.empty()) {
-            throw std::runtime_error("No cached activation found for layer " + std::to_string(i));
-        }
-        
-        try {
-            Matrix layer_grad = layers[i]->backward(loss_grad, layer_input);
-            if (!layer_grad.empty()) {
-                if (config.use_fp16 && loss_scaler.has_inf_or_nan(layer_grad)) {
-                    has_inf_nan = true;
-                    break;
-                }
+            } else {
+                stable_steps++;
                 
-                layer_gradients.push_back(layer_grad);
-                loss_grad = layer_grad;  // Propagate gradients to next layer
+                // Check if gradients are too small
+                if (running_max_grad < 1e-4f && current_scale < MAX_SCALE) {
+                    current_scale *= scale_growth_factor;
+                    stable_steps = 0;
+                }
+                // Check if gradients are too large
+                else if (running_max_grad > 1.0f && current_scale > MIN_SCALE) {
+                    current_scale *= scale_reduction_factor;
+                    stable_steps = 0;
+                }
+                // Increase scale if we've been stable for a while
+                else if (stable_steps >= STABILITY_THRESHOLD && current_scale < MAX_SCALE) {
+                    current_scale *= scale_growth_factor;
+                    stable_steps = 0;
+                }
             }
-        } catch (const std::exception& e) {
-            std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
-            throw;
+            
+            // Clamp scale to valid range
+            current_scale = std::clamp(current_scale, MIN_SCALE, MAX_SCALE);
+            
+            // Update loss scaler
+            loss_scaler.set_scale(current_scale);
+            
+            // Apply scale to gradients
+            #pragma omp parallel for collapse(2)
+            for (size_t i = 0; i < loss_grad.rows(); i++) {
+                for (size_t j = 0; j < loss_grad.cols(); j++) {
+                    loss_grad(i, j) *= current_scale;
+                }
+            }
+            
+            std::cout << "FP16 scaling - Scale: " << current_scale 
+                      << ", Max grad: " << running_max_grad 
+                      << ", Min grad: " << running_min_grad 
+                      << ", Stable steps: " << stable_steps << std::endl;
         }
-    }
-    
-    // Handle FP16 unscaling at the end
-    if (config.use_fp16 && !has_inf_nan) {
-        float inv_scale = 1.0f / loss_scaler.get_scale();
-        for (auto& grad : layer_gradients) {
-            grad *= inv_scale;
+        
+        // Initialize gradient accumulation buffers
+        std::vector<Matrix> layer_gradients;
+        layer_gradients.reserve(layers.size());
+        
+        bool has_inf_nan = false;
+        
+        // Backward through layers with proper sequence handling
+        for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+            std::string layer_key = "layer_" + std::to_string(i) + "_input";
+            Matrix layer_input = GradientCheckpoint::get_activation(layer_key);
+            
+            if (layer_input.empty()) {
+                throw std::runtime_error("No cached activation found for layer " + std::to_string(i));
+            }
+            
+            try {
+                Matrix layer_grad = layers[i]->backward(loss_grad, layer_input);
+                if (!layer_grad.empty()) {
+                    if (config.use_fp16 && loss_scaler.has_inf_or_nan(layer_grad)) {
+                        has_inf_nan = true;
+                        break;
+                    }
+                    
+                    layer_gradients.push_back(layer_grad);
+                    loss_grad = layer_grad;  // Propagate gradients to next layer
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
+                throw;
+            }
         }
+        
+        // Handle FP16 unscaling at the end
+        if (config.use_fp16 && !has_inf_nan) {
+            float inv_scale = 1.0f / loss_scaler.get_scale();
+            for (auto& grad : layer_gradients) {
+                grad *= inv_scale;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::backward_pass: " << e.what() << std::endl;
+        throw;
     }
+    std::cout << "Exiting function 'Transformer::backward_pass'" << std::endl;
 }
 
 // Helper function to unscale gradients
 void Transformer::unscale_gradients(MultiHeadAttention::Gradients& grads, float scale) {
-    // Unscale weight gradients
-    grads.query_grad *= scale;
-    grads.key_grad *= scale;
-    grads.value_grad *= scale;
-    grads.output_grad *= scale;
+    std::cout << "Entering function 'Transformer::unscale_gradients (attention)'" << std::endl;
+    try {
+        // Unscale weight gradients
+        grads.query_grad *= scale;
+        grads.key_grad *= scale;
+        grads.value_grad *= scale;
+        grads.output_grad *= scale;
 
-    // Unscale bias gradients
-    grads.query_bias_grad *= scale;
-    grads.key_bias_grad *= scale;
-    grads.value_bias_grad *= scale;
-    grads.output_bias_grad *= scale;
+        // Unscale bias gradients
+        grads.query_bias_grad *= scale;
+        grads.key_bias_grad *= scale;
+        grads.value_bias_grad *= scale;
+        grads.output_bias_grad *= scale;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::unscale_gradients: " << e.what() << std::endl;
+        throw;
+    }
+    std::cout << "Exiting function 'Transformer::unscale_gradients (attention)'" << std::endl;
 }
 
 void Transformer::unscale_gradients(FeedForward::Gradients& grads, float scale) {
-    // Unscale weight gradients
-    grads.ff1_grad *= scale;
-    grads.ff2_grad *= scale;
+    std::cout << "Entering function 'Transformer::unscale_gradients (feedforward)'" << std::endl;
+    try {
+        // Unscale weight gradients
+        grads.ff1_grad *= scale;
+        grads.ff2_grad *= scale;
 
-    // Unscale bias gradients
-    grads.ff1_bias_grad *= scale;
-    grads.ff2_bias_grad *= scale;
+        // Unscale bias gradients
+        grads.ff1_bias_grad *= scale;
+        grads.ff2_bias_grad *= scale;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::unscale_gradients: " << e.what() << std::endl;
+        throw;
+    }
+    std::cout << "Exiting function 'Transformer::unscale_gradients (feedforward)'" << std::endl;
 }
 
 Transformer& Transformer::operator=(const Transformer& other) {
@@ -1600,52 +1590,294 @@ Transformer& Transformer::operator=(const Transformer& other) {
 }
 
 void Transformer::backward(const Matrix& grad, const Matrix& activation, size_t layer_idx) {
-    if (layer_idx >= layers.size()) {
-        throw std::runtime_error("Layer index out of bounds in backward pass");
-    }
-    
-    // Ensure we're in training mode
-    if (!training) {
-        throw std::runtime_error("Cannot perform backward pass while in inference mode");
-    }
+    std::cout << "Entering function 'Transformer::backward (layer-specific)'" << std::endl;
+    try {
+        if (layer_idx >= layers.size()) {
+            throw std::runtime_error("Layer index out of bounds in backward pass");
+        }
+        
+        // Ensure we're in training mode
+        if (!training) {
+            throw std::runtime_error("Cannot perform backward pass while in inference mode");
+        }
 
-    // Store gradients for the current layer
-    if (!parameter_grads.has_value()) {
-        parameter_grads = std::vector<Matrix>();
+        // Store gradients for the current layer
+        if (!parameter_grads.has_value()) {
+            parameter_grads = std::vector<Matrix>();
+        }
+        
+        // Compute gradients through the layer
+        Matrix layer_grads = layers[layer_idx]->backward(grad, activation);
+        parameter_grads->push_back(layer_grads);
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::backward: " << e.what() << std::endl;
+        throw;
     }
-    
-    // Compute gradients through the layer
-    Matrix layer_grads = layers[layer_idx]->backward(grad, activation);
-    parameter_grads->push_back(layer_grads);
+    std::cout << "Exiting function 'Transformer::backward (layer-specific)'" << std::endl;
 }
 
 float Transformer::get_dynamic_temperature(PhraseType phrase_type, std::mt19937& gen) {
-    // Get base temperature from config
-    const float base_temp = config.token_prediction.temperature;
+    std::cout << "Entering function 'Transformer::get_dynamic_temperature'" << std::endl;
+    try {
+        // Base temperature from config
+        float base_temp = config.token_prediction.temperature;
+        
+        // Add randomness to temperature
+        std::uniform_real_distribution<float> temp_noise(0.9f, 1.1f);
+        float random_factor = temp_noise(gen);
+        
+        // Adjust temperature based on phrase type
+        float type_multiplier = 1.0f;
+        switch(phrase_type) {
+            case PhraseType::VERB:
+                type_multiplier = 1.3f;  // Higher temperature for verbs
+                break;
+            case PhraseType::ADJECTIVE:
+                type_multiplier = 1.2f;  // Higher temperature for adjectives
+                break;
+            case PhraseType::NOUN:
+                type_multiplier = 1.1f;  // Slightly higher for nouns
+                break;
+            default:
+                type_multiplier = 1.0f;
+        }
+        
+        // Consider input length - longer inputs get lower temperature
+        float length_factor = 1.0f;
+        if (!last_input_tokens_.empty()) {
+            length_factor = 1.0f + (0.1f * std::min(last_input_tokens_.size(), size_t(5)));
+        }
+        
+        // Calculate final temperature
+        float final_temp = base_temp * type_multiplier * random_factor / length_factor;
+        
+        // Ensure temperature stays within reasonable bounds
+        return std::clamp(final_temp, 0.8f, 2.5f);
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::get_dynamic_temperature: " << e.what() << std::endl;
+        throw;
+    }
+    std::cout << "Exiting function 'Transformer::get_dynamic_temperature'" << std::endl;
+}
+
+std::vector<TokenPrediction> Transformer::predict_next_tokens(const std::string& input, size_t num_predictions) {
+    std::cout << "Entering function 'Transformer::predict_next_tokens'" << std::endl;
+    try {
+        // First get the input tokens
+        std::vector<int> input_tokens = tokenize(input);
+        
+        // Get logits from forward pass
+        Matrix logits = forward(input_tokens, input, *tokenizer_);
+        
+        // Apply diversity penalty to logits
+        const float diversity_penalty = 0.9f;  // Penalty factor for repeated tokens
+        const float presence_penalty = 0.3f;   // Penalty for tokens present in input
+        
+        std::unordered_map<size_t, float> token_penalties;
+        
+        // Initialize penalties based on input tokens
+        for (const auto& token : input_tokens) {
+            token_penalties[token] = presence_penalty;
+        }
+        
+        // Track used tokens for diversity penalty
+        std::set<size_t> used_tokens;
+        std::vector<TokenPrediction> predictions;
+        
+        // Get the final row of logits for prediction
+        Vector final_logits = logits.row(logits.rows() - 1);
+        
+        for (size_t i = 0; i < num_predictions; i++) {
+            // Apply penalties to logits
+            Vector adjusted_logits = final_logits;
+            for (size_t j = 0; j < adjusted_logits.size(); j++) {
+                // Apply presence penalty
+                if (token_penalties.count(j)) {
+                    adjusted_logits[j] -= token_penalties[j];
+                }
+                
+                // Apply diversity penalty for already predicted tokens
+                if (used_tokens.count(j)) {
+                    adjusted_logits[j] *= diversity_penalty;
+                }
+            }
+            
+            // Get temperature for this prediction
+            float temp = get_dynamic_temperature(get_phrase_type(input), gen_);
+            
+            // Get probabilities with temperature
+            Vector probs = softmax_with_temperature(adjusted_logits, temp);
+            
+            // Sample from distribution
+            size_t token_id = sample_from_distribution(probs, gen_);
+            float prob = probs[token_id];
+            float raw_logit = final_logits[token_id];
+            
+            // Add prediction
+            predictions.push_back({
+                token_id,
+                detokenize({static_cast<int>(token_id)}),
+                prob,
+                raw_logit,
+                get_token_type(token_id)
+            });
+            
+            // Update tracking
+            used_tokens.insert(token_id);
+            token_penalties[token_id] = presence_penalty;
+        }
+        
+        return predictions;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::predict_next_tokens: " << e.what() << std::endl;
+        throw;
+    }
+    std::cout << "Exiting function 'Transformer::predict_next_tokens'" << std::endl;
+}
+
+float Transformer::get_context_boost(const std::string& token, const std::string& input) {
+    // Parse input context into words
+    std::vector<std::string> context_words;
+    std::string word;
+    std::istringstream iss(input);
     
-    // Adjust temperature based on phrase type while maintaining base temperature ratio
-    float type_multiplier = 1.0f;
-    switch (phrase_type) {
-        case PhraseType::VERB:
-            type_multiplier = 0.9f;  // Slightly lower for verbs
-            break;
-        case PhraseType::ADJECTIVE:
-            type_multiplier = 1.1f;  // Slightly higher for adjectives
-            break;
-        case PhraseType::GENERAL:
-            type_multiplier = 1.0f;  // Base temperature for general phrases
-            break;
-        default:
-            type_multiplier = 1.0f;
+    while (iss >> word) {
+        context_words.push_back(word);
     }
     
-    // Add small random variation (±10%) while respecting base temperature
-    std::uniform_real_distribution<float> temp_var(0.9f, 1.1f);
-    const float temperature = base_temp * type_multiplier * temp_var(gen);
+    // Get token type
+    PhraseType token_type = get_token_type(tokenizer_->encode(token)[0]);
     
-    std::cout << "Dynamic temperature: base=" << base_temp 
-              << ", type_mult=" << type_multiplier 
-              << ", final=" << temperature << std::endl;
-              
-    return temperature;
+    float boost = 1.0f;
+    
+    // Boost based on grammatical context
+    if (!context_words.empty()) {
+        std::string last_word = context_words.back();
+        
+        // Boost verbs after subjects
+        if (is_subject(last_word) && token_type == PhraseType::VERB) {
+            boost *= 1.2f;
+        }
+        
+        // Boost nouns after articles
+        if (is_article(last_word) && token_type == PhraseType::NOUN) {
+            boost *= 1.15f;
+        }
+        
+        // Boost adjectives after linking verbs
+        if (is_linking_verb(last_word) && token_type == PhraseType::ADJECTIVE) {
+            boost *= 1.25f;
+        }
+    }
+    
+    // Semantic relevance boost
+    float semantic_score = compute_semantic_similarity(token, input);
+    boost *= (1.0f + semantic_score * 0.3f);
+    
+    // Length-based penalty for very short or long tokens
+    size_t token_length = token.length();
+    if (token_length < 3 || token_length > 12) {
+        boost *= 0.9f;
+    }
+    
+    return boost;
+}
+
+bool Transformer::is_subject(const std::string& word) const {
+    static const std::unordered_set<std::string> subjects = {
+        "i", "you", "he", "she", "it", "we", "they",
+        "this", "that", "these", "those", "who", "which",
+        "the", "a", "an"
+    };
+    std::string lower_word = word;
+    std::transform(lower_word.begin(), lower_word.end(), lower_word.begin(), ::tolower);
+    return subjects.find(lower_word) != subjects.end();
+}
+
+bool Transformer::is_article(const std::string& word) const {
+    static const std::unordered_set<std::string> articles = {"a", "an", "the"};
+    std::string lower_word = word;
+    std::transform(lower_word.begin(), lower_word.end(), lower_word.begin(), ::tolower);
+    return articles.find(lower_word) != articles.end();
+}
+
+bool Transformer::is_linking_verb(const std::string& word) const {
+    static const std::unordered_set<std::string> linking_verbs = {
+        "is", "are", "was", "were", "be", "been", "being",
+        "seems", "appears", "looks", "feels", "sounds",
+        "becomes", "remains", "stays", "grows", "turns"
+    };
+    std::string lower_word = word;
+    std::transform(lower_word.begin(), lower_word.end(), lower_word.begin(), ::tolower);
+    return linking_verbs.find(lower_word) != linking_verbs.end();
+}
+
+float Transformer::compute_semantic_similarity(const std::string& token, const std::string& input) const {
+    // Simple implementation - can be enhanced with more sophisticated similarity metrics
+    if (input.find(token) != std::string::npos) {
+        return 1.0f;  // Token appears in input
+    }
+    return 0.0f;
+}
+
+std::vector<int> Transformer::tokenize(const std::string& text) const {
+    if (!tokenizer_) {
+        throw std::runtime_error("Tokenizer not initialized");
+    }
+    return tokenizer_->encode(text);
+}
+
+std::string Transformer::detokenize(const std::vector<int>& tokens) const {
+    if (!tokenizer_) {
+        throw std::runtime_error("Tokenizer not initialized");
+    }
+    return tokenizer_->decode(tokens);
+}
+
+PhraseType Transformer::get_token_type(size_t token_id) const {
+    std::cout << "Entering function 'Transformer::get_token_type'" << std::endl;
+    try {
+        std::string token = detokenize({static_cast<int>(token_id)});
+        if (is_likely_verb(token)) {
+            return PhraseType::VERB;
+        } else if (is_likely_adjective(token)) {
+            return PhraseType::ADJECTIVE;
+        } else if (token.length() > 2) {  // Simple heuristic for nouns
+            return PhraseType::NOUN;
+        }
+        return PhraseType::OTHER;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::get_token_type: " << e.what() << std::endl;
+        throw;
+    }
+    std::cout << "Exiting function 'Transformer::get_token_type'" << std::endl;
+}
+
+size_t Transformer::sample_from_distribution(const Vector& probabilities, std::mt19937& gen) const {
+    std::discrete_distribution<size_t> dist(probabilities.begin(), probabilities.end());
+    return dist(gen);
+}
+
+Vector Transformer::softmax_with_temperature(const Vector& logits, float temperature) const {
+    std::cout << "Entering function 'Transformer::softmax_with_temperature'" << std::endl;
+    try {
+        Vector output(logits.size());
+        float max_val = *std::max_element(logits.begin(), logits.end());
+        
+        float sum_exp = 0.0f;
+        for (size_t i = 0; i < logits.size(); i++) {
+            output[i] = std::exp((logits[i] - max_val) / temperature);
+            sum_exp += output[i];
+        }
+        
+        for (size_t i = 0; i < output.size(); i++) {
+            output[i] /= sum_exp;
+        }
+        
+        return output;
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::softmax_with_temperature: " << e.what() << std::endl;
+        throw;
+    }
+    std::cout << "Exiting function 'Transformer::softmax_with_temperature'" << std::endl;
 }

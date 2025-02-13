@@ -2,7 +2,7 @@
     "attention": {
         "num_kv_heads": 4,
         "use_flash_attention": true,
-        "use_gqa": true,
+        "use_gqa": false,
         "use_rope": true,
         "use_sliding_window": true,
         "window_size": 16
