@@ -344,35 +344,24 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
     scores *= scale;
     
     // Apply attention mask
-    for (size_t h = 0; h < num_heads; h++) {
-        for (size_t i = 0; i < seq_length; i++) {
-            for (size_t j = 0; j < seq_length; j++) {
-                if (mask.is_masked(i, j)) {
-                    scores(h * seq_length + i, j) = -std::numeric_limits<float>::infinity();
+    if (mask) {
+        // Get the base attention mask
+        Matrix attention_mask = mask.value();
+        
+        // Apply the mask
+        for (size_t h = 0; h < num_heads; h++) {
+            for (size_t i = 0; i < seq_length; i++) {
+                for (size_t j = 0; j < seq_length; j++) {
+                    if (attention_mask(i, j) == 0.0f) {
+                        scores(h * seq_length + i, j) = -std::numeric_limits<float>::infinity();
+                    }
                 }
             }
         }
     }
     
-    // Apply softmax row-wise
-    for (size_t i = 0; i < scores.rows(); i++) {
-        float max_val = -std::numeric_limits<float>::infinity();
-        for (size_t j = 0; j < scores.cols(); j++) {
-            max_val = std::max(max_val, scores(i, j));
-        }
-        
-        float sum_exp = 0.0f;
-        for (size_t j = 0; j < scores.cols(); j++) {
-            scores(i, j) = std::exp(scores(i, j) - max_val);
-            sum_exp += scores(i, j);
-        }
-        
-        if (sum_exp > 0.0f) {
-            for (size_t j = 0; j < scores.cols(); j++) {
-                scores(i, j) /= sum_exp;
-            }
-        }
-    }
+    // Apply softmax to get attention weights
+    apply_stable_softmax(scores);
     
     // Compute attention output
     Matrix attention_output = matmul(scores, V_reshaped);
@@ -678,6 +667,7 @@ void MultiHeadAttention::apply_stable_softmax(Matrix& x) const {
         // Subtract max value and compute exp for this row
         float row_sum = 0.0f;
         for (size_t col = 0; col < x.cols(); col++) {
+            // Subtract max value before exp for numerical stability
             x(row, col) = std::exp(x(row, col) - max_val);
             row_sum += x(row, col);
         }
@@ -1196,5 +1186,126 @@ AttentionMask AttentionMask::create_causal_mask(size_t size) {
         }
     }
     return AttentionMask(mask_matrix);
+}
+
+AttentionMask AttentionMask::create_separator_mask(const std::vector<int>& tokens, size_t size) {
+    Matrix mask_matrix(size, size, 1.0f);  // Start with full attention
+    
+    // Track separator positions and types
+    std::vector<std::pair<size_t, char>> separators;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        char sep_type = get_separator_type(tokens[i]);
+        if (sep_type != '\0') {
+            separators.push_back({i, sep_type});
+        }
+    }
+    
+    // Apply separator-specific attention rules
+    for (size_t i = 0; i < size; i++) {
+        for (size_t j = 0; j < size; j++) {
+            // Find the separators that bound these positions
+            char i_type = '\0', j_type = '\0';
+            for (const auto& [pos, type] : separators) {
+                if (pos <= i) i_type = type;
+                if (pos <= j) j_type = type;
+            }
+            
+            // Apply attention rules based on separator types
+            if (i_type != '\0' && j_type != '\0') {
+                // Same type separators can attend to each other
+                if (i_type != j_type) {
+                    mask_matrix(i, j) = 0.0f;  // Prevent cross-type attention
+                }
+                
+                // Special rules for different separator types
+                switch (i_type) {
+                    case '#':  // Verb phrases
+                        // Verbs can attend to general context but not adjectives
+                        if (j_type == '*') mask_matrix(i, j) = 0.0f;
+                        break;
+                    case '*':  // Adjective phrases
+                        // Adjectives can attend to general context but not verbs
+                        if (j_type == '#') mask_matrix(i, j) = 0.0f;
+                        break;
+                    case '|':  // General phrases
+                        // General phrases can attend to everything
+                        break;
+                }
+            }
+        }
+    }
+    
+    return AttentionMask(mask_matrix);
+}
+
+void AttentionMask::apply_separator_rules(const std::vector<int>& tokens) {
+    if (!has_mask_ || mask_.empty()) return;
+    
+    size_t size = mask_.rows();
+    
+    // Find all separators and their types
+    std::vector<std::pair<size_t, char>> separators;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        char sep_type = get_separator_type(tokens[i]);
+        if (sep_type != '\0') {
+            separators.push_back({i, sep_type});
+        }
+    }
+    
+    // Apply attention modifications based on separator types
+    for (size_t i = 0; i < size; i++) {
+        // Find the current context type
+        char current_type = '\0';
+        for (const auto& [pos, type] : separators) {
+            if (pos <= i) current_type = type;
+        }
+        
+        if (current_type != '\0') {
+            for (size_t j = 0; j < size; j++) {
+                // Find the target context type
+                char target_type = '\0';
+                for (const auto& [pos, type] : separators) {
+                    if (pos <= j) target_type = type;
+                }
+                
+                // Apply type-specific attention rules
+                if (target_type != '\0') {
+                    float attention_weight = 1.0f;
+                    
+                    // Adjust attention weights based on separator types
+                    switch (current_type) {
+                        case '#':  // Verb phrases
+                            if (target_type == '*') attention_weight = 0.0f;  // Verbs don't attend to adjectives
+                            else if (target_type == '|') attention_weight = 0.8f;  // Reduced attention to general context
+                            break;
+                            
+                        case '*':  // Adjective phrases
+                            if (target_type == '#') attention_weight = 0.0f;  // Adjectives don't attend to verbs
+                            else if (target_type == '|') attention_weight = 0.8f;  // Reduced attention to general context
+                            break;
+                            
+                        case '|':  // General phrases
+                            // General phrases can attend to everything but with varying weights
+                            if (target_type == '#') attention_weight = 0.9f;  // Strong attention to verbs
+                            else if (target_type == '*') attention_weight = 0.9f;  // Strong attention to adjectives
+                            break;
+                    }
+                    
+                    mask_(i, j) *= attention_weight;
+                }
+            }
+        }
+    }
+}
+
+int AttentionMask::find_separator_position(const std::vector<int>& tokens) {
+    // Search from the end to find the last separator
+    for (int i = static_cast<int>(tokens.size()) - 1; i >= 0; i--) {
+        char sep_type = get_separator_type(tokens[i]);
+        if (sep_type != '\0') {
+            return i;
+        }
+    }
+    return -1;
 }
 

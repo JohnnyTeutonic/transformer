@@ -63,14 +63,14 @@ struct PathConfig {
  * - Generation and beam search settings
  */
 struct TransformerConfig {
-    // Model architecture
-    size_t hidden_size;
-    size_t num_heads;
+    // Model parameters
     size_t num_layers;
-    size_t head_dim;
+    size_t num_heads;
+    size_t hidden_size;
     size_t intermediate_size;
-    size_t num_kv_heads;
+    size_t head_dim;
     size_t max_seq_length;
+    size_t vocab_size = 0;  // Initialize to 0 to detect if not properly set
 
     // Training parameters
     size_t batch_size;
@@ -105,6 +105,7 @@ struct TransformerConfig {
     bool use_sliding_window;
     size_t window_size;
     bool use_gqa;
+    size_t num_kv_heads;  // Add number of key-value heads for GQA
 
     // Paths
     PathConfig paths;
@@ -161,6 +162,14 @@ struct TransformerConfig {
         } tuning;
     } training;
 
+    // Add method to update vocab size
+    void update_vocab_size(size_t new_vocab_size) {
+        if (new_vocab_size == 0) {
+            throw std::runtime_error("Cannot set vocabulary size to 0");
+        }
+        vocab_size = new_vocab_size;
+    }
+
     /**
      * @brief Constructs a transformer configuration with default values.
      * @param max_seq_length Maximum sequence length (default: 512)
@@ -184,7 +193,7 @@ struct TransformerConfig {
     /**
      * @brief Loads configuration from a JSON file.
      */
-    void load_from_json(const std::string& config_path);
+    void load_from_json(const std::string& path);
 };
 
 // JSON serialization declarations

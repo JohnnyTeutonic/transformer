@@ -393,37 +393,48 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
 // Transformer implementation
 Transformer::Transformer(const TransformerConfig& config_, std::shared_ptr<TiktokenTokenizer> tokenizer) 
     : config(config_), tokenizer_(tokenizer) {
-    SCOPE_LOG();
     if (!tokenizer_) {
         throw std::runtime_error("Tokenizer cannot be null");
     }
 
-    // Initialize components
-    dropout = std::make_unique<Dropout>(config.dropout_rate);
-    final_ln = std::make_unique<LayerNorm>(config.hidden_size, config.layer_norm_epsilon);
+    // Get and validate vocabulary size from tokenizer
+    size_t vocab_size = tokenizer_->vocab_size();
+    if (vocab_size == 0) {
+        throw std::runtime_error("Tokenizer reports vocabulary size of 0");
+    }
+    
+    // Update config with correct vocab size
+    config.update_vocab_size(vocab_size);
+    
+    std::cout << "Initializing transformer with vocabulary size: " << vocab_size << std::endl;
 
-    // Initialize layers
+    // Initialize embeddings with validated vocab size
+    token_embedding = std::make_unique<TokenEmbedding>(vocab_size, config.hidden_size);
+    if (!token_embedding) {
+        throw std::runtime_error("Failed to create token embedding layer");
+    }
+
+    // Initialize positional encoding with correct hidden_size dimension
+    pos_encoding = std::make_unique<PositionalEncoding>(config.max_seq_length, config.hidden_size);
+    if (!pos_encoding) {
+        throw std::runtime_error("Failed to create positional encoding layer");
+    }
+    
+    // Create transformer layers
     layers.reserve(config.num_layers);
     for (size_t i = 0; i < config.num_layers; i++) {
-        layers.push_back(std::make_unique<TransformerLayer>(config, i));
+        layers.push_back(TransformerLayer::create(config, i));
     }
-
-    // Initialize token embedding
-    token_embedding = std::make_unique<TokenEmbedding>(tokenizer_->vocab_size(), config.hidden_size);
     
-    // Initialize positional encoding
-    pos_encoding = std::make_unique<PositionalEncoding>(config.max_seq_length, config.hidden_size);
+    final_ln = std::make_unique<LayerNorm>(config.hidden_size, config.layer_norm_epsilon);
+    lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, vocab_size);
+    dropout = std::make_unique<Dropout>(config.dropout_rate);
     
-    // Initialize language model head
-    lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, tokenizer_->vocab_size());
-
-    // Initialize optimizer state if using momentum or Adam
-    if (config.use_momentum || config.use_adam) {
-        momentum_buffers.resize(parameters().size());
-        if (config.use_adam) {
-            velocity_buffers.resize(parameters().size());
-        }
-    }
+    // Initialize attention layers with tokenizer
+    initialize_attention_layers();
+    
+    // Initialize weights
+    initialize_weights();
 }
 
 // Add new BatchSequence structure to handle proper sequence boundaries
@@ -437,21 +448,39 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
     std::cout << "Entering function 'Transformer::forward'" << std::endl;
     try {
         check_tokenizer();
+        
+        // Validate input tokens
+        size_t vocab_size = tokenizer_->vocab_size();
+        for (size_t i = 0; i < input_tokens.size(); i++) {
+            if (input_tokens[i] < 0 || static_cast<size_t>(input_tokens[i]) >= vocab_size) {
+                throw std::runtime_error("Token id " + std::to_string(input_tokens[i]) + 
+                                       " out of range [0, " + std::to_string(vocab_size) + ") at position " + 
+                                       std::to_string(i));
+            }
+        }
+        
         // Store input for potential backward pass
         last_input_tokens_ = input_tokens;
         last_input_query_ = original_query;
+        
         // Get embeddings
         Matrix token_emb = token_embedding->forward(input_tokens);
+        std::cout << "token_emb: " << token_emb.rows() << "x" << token_emb.cols() << std::endl;
         // Create position indices matrix for positional encoding
         Matrix position_indices(1, input_tokens.size());
         for (size_t i = 0; i < input_tokens.size(); i++) {
             position_indices(0, i) = static_cast<float>(i);
         }
+        
+        // Get base positional encodings
         Matrix pos_emb = pos_encoding->forward(position_indices);
+        std::cout << "pos_emb: " << pos_emb.rows() << "x" << pos_emb.cols() << std::endl;
         // Adjust positional encodings based on separator
         pos_emb = adjust_position_encodings(pos_emb, input_tokens);
+        
         // Create separator-aware attention mask
         AttentionMask mask = create_separator_mask(input_tokens);
+        
         // Broadcast positional embeddings to match token embeddings shape
         Matrix broadcasted_pos_emb(token_emb.rows(), pos_emb.cols());
         for (size_t i = 0; i < token_emb.rows(); i++) {
@@ -459,9 +488,20 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
                 broadcasted_pos_emb(i, j) = pos_emb(0, j);
             }
         }
+        std::cout << "broadcasted_pos_emb: " << broadcasted_pos_emb.rows() << "x" << broadcasted_pos_emb.cols() << std::endl;
+        
+        // Validate dimensions before addition
+        if (token_emb.cols() != broadcasted_pos_emb.cols()) {
+            throw std::runtime_error("Dimension mismatch: token embeddings (" + 
+                std::to_string(token_emb.rows()) + "x" + std::to_string(token_emb.cols()) + 
+                ") and positional embeddings (" + 
+                std::to_string(broadcasted_pos_emb.rows()) + "x" + std::to_string(broadcasted_pos_emb.cols()) + 
+                ") must have same number of columns");
+        }
         
         // Combine embeddings with properly broadcasted positional encodings
         Matrix x = token_emb + broadcasted_pos_emb;
+        
         // Apply dropout if in training mode
         if (training && dropout) {
             x = dropout->forward(x);
@@ -471,28 +511,32 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         m_layer_activations.clear();
         m_layer_activations.push_back(x);
         
-        // Apply transformer layers with separator-aware attention
-        for (auto& layer : layers) {
-            x = layer->forward(x, mask);
+        // Process through transformer layers
+        for (size_t i = 0; i < layers.size(); i++) {
+            // Cache the normalized input for attention
+            std::string attn_key = "attn_norm_" + std::to_string(i);
+            GradientCheckpoint::cache_activation(attn_key, x);
+            
+            // Forward through layer
+            x = layers[i]->forward(x, mask);
+            
+            // Store activation for backward pass
             m_layer_activations.push_back(x);
         }
         
-        // Apply final layer norm
+        // Final layer norm
         x = final_ln->forward(x);
-        
-        // Store hidden states for potential backward pass
-        hidden_states = x;
+        hidden_states = x;  // Store all hidden states
         last_hidden_states = x;
-        // Cache final hidden states for backward pass
         GradientCheckpoint::cache_activation("final_hidden_states", x);
-        
+        std::cout << "x: " << x.rows() << "x" << x.cols() << std::endl;
         // Project to vocabulary space using language model head
         return lm_head->forward(x);
+        
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer::forward: " << e.what() << std::endl;
         throw;
     }
-    std::cout << "Exiting function 'Transformer::forward'" << std::endl;
 }
 
 void Transformer::clear_kv_cache() {
@@ -951,11 +995,11 @@ PhraseType Transformer::analyze_phrase_type(
         std::string token = tokenizer.decode({static_cast<int>(top_tokens[i].second)});
         
         // Check verb patterns
-        if (is_likely_verb(token)) {
+        if (this->is_likely_verb(token)) {
             verb_score += prob;
         }
         // Check adjective patterns
-        else if (is_likely_adjective(token)) {
+        else if (this->is_likely_adjective(token)) {
             adj_score += prob;
         }
         else {
@@ -964,7 +1008,7 @@ PhraseType Transformer::analyze_phrase_type(
     }
     
     // Add context-based scoring
-    std::string context = tokenizer.decode(last_input_tokens_);
+    std::string context = tokenizer.decode(this->last_input_tokens_);
     std::transform(context.begin(), context.end(), context.begin(), ::tolower);
     
     // Common verb context patterns
@@ -1062,12 +1106,12 @@ std::string Transformer::extract_prediction(
         // Apply phrase type specific boosts
         switch (phrase_type) {
             case PhraseType::VERB:
-                if (is_likely_verb(token)) {
+                if (this->is_likely_verb(token)) {
                     probabilities[i] *= 1.5f;
                 }
                 break;
             case PhraseType::ADJECTIVE:
-                if (is_likely_adjective(token)) {
+                if (this->is_likely_adjective(token)) {
                     probabilities[i] *= 1.5f;
                 }
                 break;
@@ -1121,50 +1165,54 @@ std::string Transformer::extract_prediction(
 }
 
 void Transformer::boost_verb_probabilities(
-    std::vector<float>& probabilities,
+    Vector& probabilities,
     const TiktokenTokenizer& tokenizer,
-    std::mt19937* gen) {
-    // Create a local generator if none provided
-    std::mt19937 local_gen = gen ? *gen : Utils::get_new_generator();
-    
-    // Get random boost factor
-    std::uniform_real_distribution<float> boost_dist(1.3f, 1.7f);
-    const float boost_factor = boost_dist(local_gen);
+    std::mt19937* gen
+) {
+    const float verb_boost = 0.3f;
+    const float non_verb_penalty = 0.1f;
     
     for (size_t i = 0; i < probabilities.size(); i++) {
         std::string token = tokenizer.decode({static_cast<int>(i)});
         if (is_likely_verb(token)) {
-            probabilities[i] *= boost_factor;
+            probabilities[i] *= (1.0f + verb_boost);
+        } else {
+            probabilities[i] *= (1.0f - non_verb_penalty);
         }
     }
-    // Renormalize
-    float sum = std::accumulate(probabilities.begin(), probabilities.end(), 0.0f);
-    for (float& prob : probabilities) {
-        prob /= sum;
+    
+    // Add random noise if generator provided
+    if (gen) {
+        std::normal_distribution<float> noise(0.0f, 0.05f);
+        for (size_t i = 0; i < probabilities.size(); i++) {
+            probabilities[i] *= (1.0f + noise(*gen));
+        }
     }
 }
 
 void Transformer::boost_adjective_probabilities(
-    std::vector<float>& probabilities,
+    Vector& probabilities,
     const TiktokenTokenizer& tokenizer,
-    std::mt19937* gen) {
-    // Create a local generator if none provided
-    std::mt19937 local_gen = gen ? *gen : Utils::get_new_generator();
-    
-    // Get random boost factor
-    std::uniform_real_distribution<float> boost_dist(1.3f, 1.7f);
-    const float boost_factor = boost_dist(local_gen);
+    std::mt19937* gen
+) {
+    const float adj_boost = 0.3f;
+    const float non_adj_penalty = 0.1f;
     
     for (size_t i = 0; i < probabilities.size(); i++) {
         std::string token = tokenizer.decode({static_cast<int>(i)});
         if (is_likely_adjective(token)) {
-            probabilities[i] *= boost_factor;
+            probabilities[i] *= (1.0f + adj_boost);
+        } else {
+            probabilities[i] *= (1.0f - non_adj_penalty);
         }
     }
-    // Renormalize
-    float sum = std::accumulate(probabilities.begin(), probabilities.end(), 0.0f);
-    for (float& prob : probabilities) {
-        prob /= sum;
+    
+    // Add random noise if generator provided
+    if (gen) {
+        std::normal_distribution<float> noise(0.0f, 0.05f);
+        for (size_t i = 0; i < probabilities.size(); i++) {
+            probabilities[i] *= (1.0f + noise(*gen));
+        }
     }
 }
 
@@ -1391,7 +1439,7 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
                     if (std::isfinite(val)) {
                         current_max_grad = std::max(current_max_grad, val);
                         current_min_grad = std::min(current_min_grad, val);
-                    } else {
+        } else {
                         has_inf_nan = true;
                     }
                 }
@@ -1616,19 +1664,21 @@ void Transformer::backward(const Matrix& grad, const Matrix& activation, size_t 
     std::cout << "Exiting function 'Transformer::backward (layer-specific)'" << std::endl;
 }
 
-float Transformer::get_dynamic_temperature(PhraseType phrase_type, std::mt19937& gen) {
+float Transformer::get_dynamic_temperature(PhraseType type, const std::mt19937& gen) const {
     std::cout << "Entering function 'Transformer::get_dynamic_temperature'" << std::endl;
     try {
         // Base temperature from config
         float base_temp = config.token_prediction.temperature;
         
         // Add randomness to temperature
+        // Create a local copy of the generator since we need to modify it
+        std::mt19937 local_gen(gen.default_seed);
         std::uniform_real_distribution<float> temp_noise(0.9f, 1.1f);
-        float random_factor = temp_noise(gen);
+        float random_factor = temp_noise(local_gen);
         
         // Adjust temperature based on phrase type
         float type_multiplier = 1.0f;
-        switch(phrase_type) {
+        switch(type) {
             case PhraseType::VERB:
                 type_multiplier = 1.3f;  // Higher temperature for verbs
                 break;
@@ -1735,52 +1785,117 @@ std::vector<TokenPrediction> Transformer::predict_next_tokens(const std::string&
     std::cout << "Exiting function 'Transformer::predict_next_tokens'" << std::endl;
 }
 
+float Transformer::compute_semantic_similarity(const std::string& token, const std::string& input) const {
+    float similarity = 0.0f;
+    
+    // Check for direct substring match
+    if (input.find(token) != std::string::npos) {
+        similarity += 0.5f;
+    }
+    
+    // Check for subject-verb agreement
+    if (is_likely_verb(token) && is_subject(input)) {
+        similarity += 0.3f;
+    }
+    
+    // Check for adjective-noun agreement
+    if (is_likely_adjective(token) && input.find(' ') != std::string::npos) {
+        std::string last_word = input.substr(input.find_last_of(' ') + 1);
+        if (!is_article(last_word) && !is_likely_verb(last_word)) {
+            similarity += 0.3f;
+        }
+    }
+    
+    // Check for linking verb patterns
+    if (is_linking_verb(token) && is_likely_adjective(input)) {
+        similarity += 0.4f;
+    }
+    
+    // Consider recent context from generation history
+    if (!generation_history.empty()) {
+        std::vector<std::string> recent_tokens;
+        size_t context_window = std::min(generation_history.size(), size_t(5));
+        for (size_t i = generation_history.size() - context_window; i < generation_history.size(); i++) {
+            recent_tokens.push_back(tokenizer_->decode({generation_history[i]}));
+        }
+        
+        // Check for semantic coherence with recent tokens
+        for (const auto& recent : recent_tokens) {
+            if (is_likely_verb(recent) && is_likely_verb(token)) {
+                similarity -= 0.2f;  // Penalize consecutive verbs
+            }
+            if (is_likely_adjective(recent) && is_likely_adjective(token)) {
+                similarity -= 0.2f;  // Penalize consecutive adjectives
+            }
+        }
+    }
+    
+    return std::clamp(similarity, 0.0f, 1.0f);
+}
+
 float Transformer::get_context_boost(const std::string& token, const std::string& input) {
-    // Parse input context into words
-    std::vector<std::string> context_words;
-    std::string word;
+    float boost = 0.0f;
+    
+    // Parse input for key components
     std::istringstream iss(input);
-    
+    std::vector<std::string> words;
+    std::string word;
     while (iss >> word) {
-        context_words.push_back(word);
+        words.push_back(word);
     }
     
-    // Get token type
-    PhraseType token_type = get_token_type(tokenizer_->encode(token)[0]);
+    // Analyze input structure
+    bool has_subject = false;
+    bool has_verb = false;
+    bool has_adjective = false;
+    std::string subject;
     
-    float boost = 1.0f;
+    for (const auto& w : words) {
+        if (is_subject(w)) {
+            has_subject = true;
+            subject = w;
+        }
+        if (is_likely_verb(w)) has_verb = true;
+        if (is_likely_adjective(w)) has_adjective = true;
+    }
     
-    // Boost based on grammatical context
-    if (!context_words.empty()) {
-        std::string last_word = context_words.back();
+    // Boost based on grammatical completeness
+    if (is_likely_verb(token)) {
+        if (has_subject && !has_verb) boost += 0.4f;  // Need a verb
+        if (has_verb) boost -= 0.2f;  // Already have a verb
+    }
+    
+    if (is_likely_adjective(token)) {
+        if (has_subject && !has_adjective) boost += 0.3f;  // Adjective could help
+        if (has_adjective) boost -= 0.2f;  // Already descriptive
+    }
+    
+    // Boost based on semantic relationships
+    if (!subject.empty() && !hidden_states.empty()) {
+        std::vector<int> subject_tokens = tokenizer_->encode(subject);
+        std::vector<int> token_tokens = tokenizer_->encode(token);
         
-        // Boost verbs after subjects
-        if (is_subject(last_word) && token_type == PhraseType::VERB) {
-            boost *= 1.2f;
-        }
-        
-        // Boost nouns after articles
-        if (is_article(last_word) && token_type == PhraseType::NOUN) {
-            boost *= 1.15f;
-        }
-        
-        // Boost adjectives after linking verbs
-        if (is_linking_verb(last_word) && token_type == PhraseType::ADJECTIVE) {
-            boost *= 1.25f;
+        if (!subject_tokens.empty() && !token_tokens.empty()) {
+            Vector subject_embedding = hidden_states.row(subject_tokens[0]);
+            Vector token_embedding = hidden_states.row(token_tokens[0]);
+            
+            // Compute cosine similarity
+            float dot_product = 0.0f;
+            float norm1 = 0.0f;
+            float norm2 = 0.0f;
+            
+            for (size_t i = 0; i < subject_embedding.size(); i++) {
+                dot_product += subject_embedding[i] * token_embedding[i];
+                norm1 += subject_embedding[i] * subject_embedding[i];
+                norm2 += token_embedding[i] * token_embedding[i];
+            }
+            
+            float similarity = dot_product / (std::sqrt(norm1) * std::sqrt(norm2) + 1e-6f);
+            boost += similarity * 0.3f;
         }
     }
     
-    // Semantic relevance boost
-    float semantic_score = compute_semantic_similarity(token, input);
-    boost *= (1.0f + semantic_score * 0.3f);
-    
-    // Length-based penalty for very short or long tokens
-    size_t token_length = token.length();
-    if (token_length < 3 || token_length > 12) {
-        boost *= 0.9f;
-    }
-    
-    return boost;
+    return std::clamp(boost, -0.5f, 0.5f);
 }
 
 bool Transformer::is_subject(const std::string& word) const {
@@ -1812,14 +1927,6 @@ bool Transformer::is_linking_verb(const std::string& word) const {
     return linking_verbs.find(lower_word) != linking_verbs.end();
 }
 
-float Transformer::compute_semantic_similarity(const std::string& token, const std::string& input) const {
-    // Simple implementation - can be enhanced with more sophisticated similarity metrics
-    if (input.find(token) != std::string::npos) {
-        return 1.0f;  // Token appears in input
-    }
-    return 0.0f;
-}
-
 std::vector<int> Transformer::tokenize(const std::string& text) const {
     if (!tokenizer_) {
         throw std::runtime_error("Tokenizer not initialized");
@@ -1838,7 +1945,7 @@ PhraseType Transformer::get_token_type(size_t token_id) const {
     std::cout << "Entering function 'Transformer::get_token_type'" << std::endl;
     try {
         std::string token = detokenize({static_cast<int>(token_id)});
-        if (is_likely_verb(token)) {
+    if (is_likely_verb(token)) {
             return PhraseType::VERB;
         } else if (is_likely_adjective(token)) {
             return PhraseType::ADJECTIVE;
@@ -1881,3 +1988,283 @@ Vector Transformer::softmax_with_temperature(const Vector& logits, float tempera
     }
     std::cout << "Exiting function 'Transformer::softmax_with_temperature'" << std::endl;
 }
+
+Vector Transformer::forward(const std::vector<int>& input_tokens, bool update_kv_cache) {
+    // ... existing forward pass code ...
+    
+    // Get logits from the final layer
+    // Convert the row vector to a 1xN matrix before passing to lm_head
+    Matrix last_hidden_row(1, hidden_states.cols());
+    last_hidden_row.row(0) = hidden_states.row(hidden_states.rows() - 1);
+    Vector logits = lm_head->forward(last_hidden_row);
+    
+    
+    // If we're generating, update the frequency stats for the last token
+    if (!input_tokens.empty() && update_kv_cache) {
+        update_token_frequency(input_tokens.back());
+    }
+    
+    return logits;
+}
+
+void Transformer::reset_cache() {
+    // Reset KV cache in all layers
+    for (auto& layer : layers) {
+        if (layer && layer->getAttention()) {
+            layer->getAttention()->reset_cache();
+        }
+    }
+    
+    // Reset frequency statistics
+    reset_frequency_stats();
+    
+    // Reset current context
+    current_input_context.clear();
+    
+    // Reset any other stateful components
+    if (lm_head) {
+        lm_head->reset_state();
+    }
+}
+
+// Frequency tracking
+struct TokenFrequencyStats {
+    size_t total_occurrences = 0;
+    size_t recent_occurrences = 0;  // Within recency window
+    std::vector<size_t> positions;  // Track positions where token was used
+    float frequency_penalty = 0.0f;
+    float recency_penalty = 0.0f;
+};
+
+std::unordered_map<int, TokenFrequencyStats> token_frequency_stats;
+size_t total_tokens_generated = 0;
+const size_t RECENCY_WINDOW = 50;  // Consider last 50 tokens for recency
+const float BASE_FREQUENCY_PENALTY = 0.1f;  // Reduced from 0.3f
+const float BASE_RECENCY_PENALTY = 0.05f;   // Reduced from 0.2f
+const float PENALTY_DECAY = 0.98f;  // Increased from 0.95f
+
+// Implementation of update_token_frequency
+void Transformer::update_token_frequency(int token_id) {
+    auto& stats = token_frequency_stats[token_id];
+    
+    // Update total occurrences
+    stats.total_occurrences++;
+    
+    // Update positions list
+    stats.positions.push_back(total_tokens_generated);
+    
+    // Update recent occurrences (within recency window)
+    stats.recent_occurrences = std::count_if(
+        stats.positions.begin(),
+        stats.positions.end(),
+        [this](size_t pos) {
+            return total_tokens_generated - pos <= RECENCY_WINDOW;
+        }
+    );
+    
+    // Prune old positions outside recency window
+    while (!stats.positions.empty() && 
+           total_tokens_generated - stats.positions.front() > RECENCY_WINDOW) {
+        stats.positions.erase(stats.positions.begin());
+    }
+    
+    // Update penalties
+    stats.frequency_penalty = BASE_FREQUENCY_PENALTY * 
+        (static_cast<float>(stats.total_occurrences) / (total_tokens_generated + 1));
+    
+    stats.recency_penalty = BASE_RECENCY_PENALTY * 
+        (static_cast<float>(stats.recent_occurrences) / RECENCY_WINDOW);
+    
+    // Apply decay to penalties
+    stats.frequency_penalty *= PENALTY_DECAY;
+    stats.recency_penalty *= PENALTY_DECAY;
+    
+    total_tokens_generated++;
+}
+
+// Add initialization of attention layers
+void Transformer::initialize_attention_layers() {
+    if (!tokenizer_) {
+        throw std::runtime_error("Tokenizer not set during attention layer initialization");
+    }
+    
+    for (auto& layer : layers) {
+        if (layer && layer->getAttention()) {
+            layer->getAttention()->set_tokenizer(tokenizer_);
+        }
+    }
+}
+
+std::vector<int> Transformer::generate(const std::vector<int>& input_tokens, 
+                            size_t max_length,
+                            float temperature) {
+    std::cout << "\n=== Starting Transformer::generate ===" << std::endl;
+    std::cout << "Input tokens: " << input_tokens.size() << std::endl;
+    std::cout << "Max length: " << max_length << std::endl;
+    std::cout << "Temperature: " << temperature << std::endl;
+    
+    if (!lm_head) {
+        throw std::runtime_error("Language model head is not initialized!");
+    }
+    
+    if (input_tokens.empty()) {
+        throw std::runtime_error("Input tokens cannot be empty");
+    }
+    
+    std::vector<int> output_tokens = input_tokens;
+    size_t tokens_generated = 0;
+    
+    // Clear diversity tracking for new generation
+    std::cout << "Resetting diversity tracking..." << std::endl;
+    reset_diversity_tracking();
+    
+    // Decode input tokens to set initial context if not already set
+    if (current_input_context.empty()) {
+        std::cout << "Setting initial context from input tokens..." << std::endl;
+        current_input_context = detokenize(input_tokens);
+    }
+    std::cout << "Current context: '" << current_input_context << "'" << std::endl;
+    
+    // Initialize KV cache for efficient generation
+    std::cout << "Clearing KV cache..." << std::endl;
+    clear_kv_cache();
+    
+    // Set to inference mode
+    std::cout << "Setting to inference mode..." << std::endl;
+    set_training(false);
+    
+    try {
+        while (output_tokens.size() < max_length) {
+            std::cout << "\n--- Generation step " << tokens_generated + 1 << " ---" << std::endl;
+            std::cout << "Current sequence length: " << output_tokens.size() << std::endl;
+            
+            // Forward pass through the model with proper context
+            std::cout << "Performing forward pass..." << std::endl;
+            Matrix logits = forward(output_tokens, current_input_context, *tokenizer_);
+            std::cout << "Logits shape: [" << logits.rows() << " x " << logits.cols() << "]" << std::endl;
+            
+            if (logits.empty()) {
+                throw std::runtime_error("Forward pass returned empty logits");
+            }
+            
+            // Validate logits dimensions
+            if (logits.rows() == 0 || logits.cols() == 0) {
+                throw std::runtime_error("Invalid logits dimensions: [" + 
+                    std::to_string(logits.rows()) + " x " + std::to_string(logits.cols()) + "]");
+            }
+            
+            // Get the last row of logits for next token prediction
+            std::cout << "Extracting last row of logits..." << std::endl;
+            if (logits.rows() == 0) {
+                throw std::runtime_error("Cannot extract last row from empty logits");
+            }
+            
+            Matrix last_logits(1, logits.cols());
+            try {
+                for (size_t j = 0; j < logits.cols(); j++) {
+                    last_logits(0, j) = logits(logits.rows() - 1, j);
+                }
+            } catch (const std::exception& e) {
+                throw std::runtime_error("Error extracting last row: " + std::string(e.what()) + 
+                    "\nLogits shape: [" + std::to_string(logits.rows()) + " x " + 
+                    std::to_string(logits.cols()) + "]");
+            }
+            
+            // Apply diversity penalties
+            std::cout << "Applying diversity penalties..." << std::endl;
+            std::cout << "last_logits dimensions: [" << last_logits.rows() << " x " << last_logits.cols() << "]" << std::endl;
+            
+            // Create a new Vector directly from the data
+            Vector logits_vec(last_logits.cols());
+            for (size_t i = 0; i < last_logits.cols(); i++) {
+                logits_vec[i] = last_logits(0, i);
+            }
+            
+            std::cout << "Created logits vector of size: " << logits_vec.size() << std::endl;
+            
+            // Get dynamic temperature based on generation state
+            std::cout << "Computing dynamic temperature..." << std::endl;
+            float dynamic_temp = get_dynamic_temperature(
+                predict_phrase_type(current_input_context, *tokenizer_),
+                gen_
+            );
+            std::cout << "Dynamic temperature: " << dynamic_temp << std::endl;
+            
+            // Combine base and dynamic temperature
+            float effective_temp = temperature * dynamic_temp;
+            std::cout << "Effective temperature: " << effective_temp << std::endl;
+            
+            // Use the language model head's sampling function for next token prediction
+            std::cout << "Sampling next token..." << std::endl;
+            Vector sampled;
+            try {
+                sampled = lm_head->sample_next_token(last_logits, current_input_context, effective_temp);
+            } catch (const std::exception& e) {
+                throw std::runtime_error("Error in sample_next_token: " + std::string(e.what()));
+            }
+            
+            // Find the index of the sampled token
+            std::cout << "Finding sampled token index..." << std::endl;
+            int next_token = -1;
+            for (size_t i = 0; i < sampled.size(); i++) {
+                if (sampled[i] > 0.5f) {  // Use 0.5 threshold for numerical stability
+                    next_token = static_cast<int>(i);
+                    break;
+                }
+            }
+            
+            if (next_token == -1) {
+                throw std::runtime_error("Failed to sample valid token");
+            }
+            
+            // Update token stats for diversity tracking
+            std::cout << "Updating token statistics..." << std::endl;
+            update_token_stats(next_token);
+            
+            // Add to output
+            output_tokens.push_back(next_token);
+            tokens_generated++;
+            
+            // Update context with the new token
+            std::string new_token = tokenizer_->decode({next_token});
+            current_input_context += new_token;
+            
+            // Debug output
+            std::cout << "Generated token " << tokens_generated << ": '" << new_token << "'" << std::endl;
+            std::cout << "Updated context: '" << current_input_context << "'" << std::endl;
+            
+            // Check for end of sequence token
+            if (next_token == eos_token_) {
+                std::cout << "End of sequence token generated, stopping generation." << std::endl;
+                break;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error in generate: " << e.what() << std::endl;
+        throw;  // Re-throw the exception after logging
+    }
+    
+    std::cout << "=== Generation complete ===" << std::endl;
+    std::cout << "Total tokens generated: " << tokens_generated << std::endl;
+    std::cout << "Final sequence length: " << output_tokens.size() << std::endl;
+    std::cout << "Final context: '" << current_input_context << "'" << std::endl;
+    
+    return output_tokens;
+}
+
+Matrix Transformer::create_target_distribution(const std::vector<int>& target_tokens, size_t vocab_size) const {
+    // Create target distribution with one-hot encoding for the target token
+    Matrix distribution(1, vocab_size, 0.0f);
+    
+    // Set the probability of the target token to 1.0
+    if (!target_tokens.empty()) {
+        int target_token = target_tokens.back();  // Use the last token as target
+        if (target_token >= 0 && static_cast<size_t>(target_token) < vocab_size) {
+            distribution(0, target_token) = 1.0f;
+        }
+    }
+    
+    return distribution;
+}
+
+

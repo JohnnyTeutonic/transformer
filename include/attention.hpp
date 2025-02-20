@@ -5,6 +5,7 @@
 #include "components.hpp"
 #include "tensor.hpp"
 #include "config.hpp"
+#include "tiktoken_tokenizer.hpp"
 #ifdef USE_CUDA
 #include "../include/cuda/cuda_utils.cuh"
 #include "../include/cuda/matrix_ops.cuh"
@@ -13,6 +14,7 @@
 #include <memory>
 #include <vector>
 #include <random>
+#include <string>
 using FloatVector = Vector;
 
 // Utility functions for gradient computation
@@ -44,7 +46,29 @@ class AttentionMask {
      * @return An AttentionMask object with a padding mask
      */
     static AttentionMask create_padding_mask(const std::vector<int>& lengths, size_t max_len);
-    
+
+    /**
+     * @brief Creates a separator-aware attention mask
+     * @param tokens Input token sequence
+     * @param size Sequence length
+     * @return An AttentionMask object that respects separator boundaries
+     */
+    static AttentionMask create_separator_mask(const std::vector<int>& tokens, size_t size);
+
+    /**
+     * @brief Adjusts attention based on separator types
+     * @param tokens Input token sequence
+     * @return Modified attention mask that respects separator semantics
+     */
+    void apply_separator_rules(const std::vector<int>& tokens);
+
+    /**
+     * @brief Find the position of the last separator in the sequence
+     * @param tokens Input token sequence
+     * @return Position of the last separator, or -1 if none found
+     */
+    static int find_separator_position(const std::vector<int>& tokens);
+
     AttentionMask() = default;
     explicit operator bool() const { return has_mask_; }
     const Matrix& value() const { return mask_; }
@@ -60,6 +84,16 @@ class AttentionMask {
   private:
     Matrix mask_;
     bool has_mask_ = false;
+    
+    // Helper method to identify separator type
+    static char get_separator_type(int token) {
+        // Convert token to string to check for separator characters
+        std::string token_str = std::to_string(token);
+        if (token_str.find('|') != std::string::npos) return '|';
+        if (token_str.find('#') != std::string::npos) return '#';
+        if (token_str.find('*') != std::string::npos) return '*';
+        return '\0';
+    }
 };
 
 class KVCache;
@@ -303,6 +337,93 @@ class MultiHeadAttention {
     // Add the missing update_parameters declaration
     void update_parameters(float learning_rate);
 
+    // Separator token handling
+    const std::vector<std::string> separators = {"|", "#", "*"};  // All possible separators
+    size_t find_separator_position(const std::vector<int>& tokens) const {
+        if (!tokenizer_) {
+            throw std::runtime_error("Tokenizer not set in MultiHeadAttention");
+        }
+        
+        if (tokens.empty()) {
+            return 0;
+        }
+        
+        for (size_t i = 0; i < tokens.size(); i++) {
+            std::string token_text = tokenizer_->decode({tokens[i]});
+            if (std::find(separators.begin(), separators.end(), token_text) != separators.end()) {
+                return i;
+            }
+        }
+        return tokens.size();
+    }
+
+    // Create a separator-aware attention mask
+    AttentionMask create_separator_mask(const std::vector<int>& tokens) const {
+        if (tokens.empty()) {
+            return AttentionMask(Matrix(0, 0));  // Return empty mask for empty tokens
+        }
+        
+        size_t seq_len = tokens.size();
+        size_t sep_pos = find_separator_position(tokens);
+        
+        // Create mask matrix
+        Matrix mask_matrix(seq_len, seq_len, 0.0f);
+        
+        // For positions before separator: can attend to all previous tokens
+        // For positions after separator: can only attend to tokens before separator
+        for (size_t i = 0; i < seq_len; i++) {
+            for (size_t j = 0; j < seq_len; j++) {
+                if (i < sep_pos) {
+                    // Before separator: standard causal masking
+                    mask_matrix(i, j) = (j <= i) ? 1.0f : 0.0f;
+                } else {
+                    // After separator: can only attend to tokens before separator
+                    mask_matrix(i, j) = (j < sep_pos) ? 1.0f : 0.0f;
+                }
+            }
+        }
+        
+        return AttentionMask(mask_matrix);
+    }
+    
+    // Adjust positional encodings based on separator position
+    Matrix adjust_position_encodings(const Matrix& pos_enc, const std::vector<int>& tokens) const {
+        Matrix adjusted = pos_enc;
+        size_t sep_pos = find_separator_position(tokens);
+        
+        // For tokens after separator, use positions relative to separator
+        for (size_t i = sep_pos + 1; i < tokens.size(); i++) {
+            for (size_t j = 0; j < pos_enc.cols(); j++) {
+                // Reset position to be relative to separator
+                size_t relative_pos = i - sep_pos;
+                adjusted(i, j) = pos_enc(relative_pos, j);
+            }
+        }
+        
+        return adjusted;
+    }
+
+    // Update tokenizer methods
+    void set_tokenizer(const std::shared_ptr<TiktokenTokenizer>& tokenizer) {
+        if (!tokenizer) {
+            throw std::runtime_error("Cannot set null tokenizer");
+        }
+        tokenizer_ = tokenizer;
+    }
+
+    std::shared_ptr<TiktokenTokenizer> get_tokenizer() const {
+        return tokenizer_;
+    }
+
+    /**
+     * @brief Resets the key-value cache used for attention
+     */
+    void reset_cache() {
+        key_cache = Matrix();    // Reset to empty matrix
+        value_cache = Matrix();  // Reset to empty matrix
+        cache_position = 0;      // Reset position counter
+    }
+
   private:
     Parameters params_;
     Gradients grads_;
@@ -517,6 +638,21 @@ class MultiHeadAttention {
         }
         return result;
     }
+
+    std::shared_ptr<TiktokenTokenizer> tokenizer_;  // Tokenizer member
+    
+    // Helper method for adding noise to vectors
+    void add_random_noise(Vector& vec, std::mt19937& gen) const {
+        std::normal_distribution<float> noise_dist(0.0f, 0.1f);
+        for (size_t i = 0; i < vec.size(); i++) {
+            vec[i] += noise_dist(gen);
+        }
+    }
+
+    // Add cache-related members
+    Matrix key_cache;                  ///< Cache for key projections
+    Matrix value_cache;                ///< Cache for value projections
+    size_t cache_position = 0;         ///< Current position in the cache
 };
 
 // Add sliding window attention

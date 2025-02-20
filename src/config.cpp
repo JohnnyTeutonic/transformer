@@ -12,7 +12,8 @@ TransformerConfig::TransformerConfig(size_t max_seq_length_, size_t hidden_size_
       num_layers(num_layers_),
       head_dim(hidden_size_ / num_heads_),
       intermediate_size(4 * hidden_size_),
-      max_seq_length(max_seq_length_) {
+      max_seq_length(max_seq_length_),
+      num_kv_heads(num_heads_) {
     
     // Initialize training config
     training.samples_per_iteration = samples_per_iteration_;

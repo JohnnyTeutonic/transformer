@@ -82,6 +82,23 @@ class LanguageModelHead {
     std::unique_ptr<LayerNorm> layer_norm;  ///< Layer normalization
     std::shared_ptr<TiktokenTokenizer> tokenizer;  ///< Tokenizer instance
 
+    // Add vocabulary cache
+    std::vector<std::string> vocabulary_cache;
+    bool vocabulary_initialized = false;
+
+    // Add method to initialize vocabulary
+    void ensure_vocabulary_initialized();
+
+    // Add method to get token text
+    std::string get_token_text(size_t token_id) const {
+        if (vocabulary_initialized && token_id < vocabulary_cache.size()) {
+            return vocabulary_cache[token_id];
+        } else if (tokenizer) {
+            return tokenizer->decode({static_cast<int>(token_id)});
+        }
+        return "";
+    }
+
     /**
      * @brief Computes gradients for the linear projection.
      * @param grad_output Gradient of the loss with respect to the output
@@ -118,6 +135,10 @@ class LanguageModelHead {
 
     // Helper methods
     void bias_completion_format(Matrix& logits);
+
+    // Add new member variables for caching
+    Matrix last_logits_;                 ///< Cache of last computed logits
+    Matrix last_hidden_state_;           ///< Cache of last hidden state
 
   public:
     /**
@@ -232,7 +253,7 @@ class LanguageModelHead {
     void set_training(bool training_mode);  // Add setter for training mode
 
     // Add tokenizer setter
-    void set_tokenizer(std::shared_ptr<TiktokenTokenizer> tok) { tokenizer = tok; }
+    void set_tokenizer(std::shared_ptr<TiktokenTokenizer> tok);
 
     // Add getter for token frequencies
     const std::vector<float>& get_token_frequencies() const {
@@ -294,5 +315,63 @@ class LanguageModelHead {
         d_active_tokens = nullptr;
         d_active_token_indices = nullptr;
     #endif
+    }
+
+    // Add softmax helper function
+    Vector softmax(const Vector& input) const {
+        Vector output(input.size());
+        float max_val = *std::max_element(input.begin(), input.end());
+        float sum = 0.0f;
+        
+        // Compute exp and sum with numerical stability
+        for (size_t i = 0; i < input.size(); i++) {
+            output[i] = std::exp(input[i] - max_val);
+            sum += output[i];
+        }
+        
+        // Normalize
+        if (sum > 0.0f) {  // Guard against division by zero
+            for (size_t i = 0; i < output.size(); i++) {
+                output[i] /= sum;
+            }
+        } else {
+            // If sum is zero, return uniform distribution
+            float uniform_val = 1.0f / output.size();
+            std::fill(output.begin(), output.end(), uniform_val);
+        }
+        
+        return output;
+    }
+
+    /**
+     * @brief Sample next token using input-dependent randomness
+     * @param logits Raw logits from the model
+     * @param input_str Input string used for seeding
+     * @param temperature Sampling temperature
+     * @return One-hot vector representing the sampled token
+     */
+    Vector sample_next_token(const Matrix& logits, const std::string& input_str, float temperature = 1.0f);
+
+    /**
+     * @brief Resets any stateful information in the language model head
+     */
+    void reset_state() {
+        // Reset cached matrices to empty matrices
+        last_logits_ = Matrix();
+        last_hidden_state_ = Matrix();
+        hidden_states = Matrix();
+        hidden_states_ = Matrix();
+        
+        // Reset vectors
+        token_frequencies.clear();
+        active_tokens.clear();
+        active_token_indices.clear();
+        
+        // Reset counters
+        training_steps = 0;
+        
+        // Reset vocabulary cache
+        vocabulary_initialized = false;
+        vocabulary_cache.clear();
     }
 };

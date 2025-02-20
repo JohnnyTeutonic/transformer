@@ -652,40 +652,64 @@ std::vector<ContextualTrainingExample> Utils::create_training_data() {
 
     // First pass: collect all examples
     std::vector<TrainingExample> raw_examples;
-    std::unordered_set<std::string> seen_pairs;
+    size_t total_lines = 0;
+    std::unordered_map<char, size_t> separator_counts;  // Track usage of different separators
+    
+    std::cout << "\nDebug: Starting to load training data..." << std::endl;
     
     std::string line;
     while (std::getline(file, line)) {
+        total_lines++;
         if (line.empty()) continue;
 
-        // Normalize separators
-        std::string normalized_line = line;
-        std::replace(normalized_line.begin(), normalized_line.end(), '#', '|');
-        std::replace(normalized_line.begin(), normalized_line.end(), '*', '|');
+        // Find the separator while preserving its type
+        size_t separator_pos = std::string::npos;
+        char separator = '\0';
         
-        size_t delimiter_pos = normalized_line.find('|');
-        if (delimiter_pos != std::string::npos) {
-            std::string input = normalized_line.substr(0, delimiter_pos);
-            std::string output = normalized_line.substr(delimiter_pos + 1);
+        // Check for each type of separator while preserving its meaning
+        if ((separator_pos = line.find('|')) != std::string::npos) {
+            separator = '|';  // General phrase/noun separator
+        } else if ((separator_pos = line.find('#')) != std::string::npos) {
+            separator = '#';  // Verb phrase separator
+        } else if ((separator_pos = line.find('*')) != std::string::npos) {
+            separator = '*';  // Adjective phrase separator
+        }
+
+        if (separator_pos != std::string::npos) {
+            std::string input = line.substr(0, separator_pos);
+            std::string output = line.substr(separator_pos + 1);
             
             // Trim whitespace
             trim(input);
             trim(output);
             
-            // Create unique key to detect duplicates
-            std::string pair_key = input + "|" + output;
-            if (seen_pairs.find(pair_key) != seen_pairs.end()) {
-                continue;
+            // Detect phrase type based on the separator
+            PhraseType type;
+            switch (separator) {
+                case '#':
+                    type = PhraseType::VERB;
+                    break;
+                case '*':
+                    type = PhraseType::ADJECTIVE;
+                    break;
+                case '|':
+                default:
+                    type = PhraseType::GENERAL;
+                    break;
             }
-            seen_pairs.insert(pair_key);
             
-            // Detect phrase type and categorize
-            char delimiter = line[delimiter_pos];
-            PhraseType type = detect_phrase_type(input, output, delimiter);
-            
+            separator_counts[separator]++;
             raw_examples.emplace_back(input, output, type);
         }
     }
+
+    std::cout << "\nDebug: Training data loading statistics:" << std::endl;
+    std::cout << "Total lines read: " << total_lines << std::endl;
+    std::cout << "Total examples: " << raw_examples.size() << std::endl;
+    std::cout << "Separator distribution:" << std::endl;
+    std::cout << "  General phrases (|): " << separator_counts['|'] << std::endl;
+    std::cout << "  Verb phrases (#): " << separator_counts['#'] << std::endl;
+    std::cout << "  Adjective phrases (*): " << separator_counts['*'] << std::endl;
 
     // Second pass: create contextual examples
     std::vector<ContextualTrainingExample> contextual_examples;
@@ -715,7 +739,7 @@ std::vector<ContextualTrainingExample> Utils::create_training_data() {
     std::cout << "Contextual examples: " << contextual_examples.size() << std::endl;
     std::cout << "Context window size: " << CONTEXT_SIZE << std::endl;
     
-    // Shuffle the examples
+    // Shuffle the examples while maintaining separator distribution
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(contextual_examples.begin(), contextual_examples.end(), g);
@@ -1021,8 +1045,17 @@ void Utils::print_top_predictions(
         last_logits.push_back(logits(logits.rows() - 1, i));
     }
 
-    // Apply temperature scaling
-    float temperature = tp_config.temperature;
+    // Apply dynamic temperature
+    std::string current_context = transformer.get_current_context();
+    PhraseType current_type = transformer.predict_phrase_type(current_context, tokenizer);
+    
+    // Create a proper random generator that lives for the duration of the function
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    float temperature = transformer.get_dynamic_temperature(current_type, std::as_const(gen));
+    
+    std::cout << "Using temperature: " << temperature << std::endl;
+    
     for (auto& logit : last_logits) {
         logit /= temperature;
     }
@@ -1043,19 +1076,34 @@ void Utils::print_top_predictions(
     std::vector<size_t> indices(probabilities.size());
     std::iota(indices.begin(), indices.end(), 0);
 
-    // Filter out delimiter tokens and zero out their probabilities
+    // Only filter out standalone delimiter tokens, not tokens containing delimiters
     const std::unordered_set<std::string> delimiters = {"|", "#", "*"};
     for (size_t i = 0; i < probabilities.size(); i++) {
         std::string token = tokenizer.decode({static_cast<int>(i)});
-        if (delimiters.find(token) != delimiters.end() || 
-            token.find('|') != std::string::npos ||
-            token.find('#') != std::string::npos ||
-            token.find('*') != std::string::npos) {
+        if (delimiters.find(token) != delimiters.end()) {
             probabilities[i] = 0.0f;
         }
     }
 
-    // Renormalize probabilities after filtering
+    // Add diversity bonus for less frequent tokens
+    std::unordered_map<std::string, int> token_categories;
+    for (size_t i = 0; i < probabilities.size(); i++) {
+        if (probabilities[i] > 0.0f) {
+            std::string token = tokenizer.decode({static_cast<int>(i)});
+            std::string category = "OTHER";
+            if (tokenizer.is_verb(token)) category = "VERB";
+            else if (tokenizer.is_adjective(token)) category = "ADJ";
+            else if (tokenizer.is_noun(token)) category = "NOUN";
+            token_categories[category]++;
+            
+            // Boost underrepresented categories
+            if (token_categories[category] < 3) {  // Boost first few tokens of each category
+                probabilities[i] *= 1.2f;
+            }
+        }
+    }
+
+    // Renormalize probabilities
     sum_exp = std::accumulate(probabilities.begin(), probabilities.end(), 0.0f);
     if (sum_exp > 0.0f) {
         for (float& prob : probabilities) {
@@ -1082,40 +1130,41 @@ void Utils::print_top_predictions(
     std::cout << std::string(50, '-') << std::endl;
 
     int printed = 0;
+    std::unordered_set<std::string> seen_categories;  // Track category diversity
+    
     for (int i = 0; i < k && i < static_cast<int>(indices.size()); i++) {
         size_t idx = indices[i];
-        if (probabilities[idx] > 0.0f) {  // Only show non-zero probability tokens
+        if (probabilities[idx] > 0.0f) {
             std::string token = tokenizer.decode({static_cast<int>(idx)});
             std::string category = "OTHER";
             if (tokenizer.is_verb(token)) category = "VERB";
             else if (tokenizer.is_adjective(token)) category = "ADJ";
             else if (tokenizer.is_noun(token)) category = "NOUN";
             
-            // Format token for display (escape special characters, limit length)
-            std::string display_token = token;
-            if (display_token.length() > 15) {
-                display_token = display_token.substr(0, 12) + "...";
+            // Ensure category diversity in top predictions
+            if (printed < 3 || seen_categories.find(category) == seen_categories.end()) {
+                seen_categories.insert(category);
+                
+                // Format token for display
+                std::string display_token = token;
+                if (display_token.length() > 15) {
+                    display_token = display_token.substr(0, 12) + "...";
+                }
+                
+                std::cout << std::fixed << std::setprecision(4)
+                         << std::setw(5) << (printed + 1)
+                         << std::setw(20) << ("\"" + display_token + "\"")
+                         << std::setw(15) << category
+                         << std::setw(15) << probabilities[idx]
+                         << std::setw(15) << last_logits[idx] << std::endl;
+                printed++;
             }
-            
-            std::cout << std::fixed << std::setprecision(4)
-                     << std::setw(5) << (printed + 1)  // Use printed count instead of i
-                     << std::setw(20) << ("\"" + display_token + "\"")
-                     << std::setw(15) << category
-                     << std::setw(15) << probabilities[idx]
-                     << std::setw(15) << last_logits[idx] << std::endl;
-            printed++;
         }
     }
     std::cout << std::string(50, '-') << std::endl;
 
-    // Get current input context from transformer if available
-    std::string current_context = transformer.get_current_context();
-    if (current_context.empty()) {
-        current_context = "<start of sequence>";
-    }
-
     // Save predictions with actual context
-    save_predictions_to_csv(logits, tokenizer, current_context, "predictions.csv", k);
+    save_predictions_to_csv(logits, tokenizer, transformer.get_current_context(), "predictions.csv", k);
 }
 
 std::vector<std::string>& Utils::get_vocabulary(const TiktokenTokenizer& tokenizer) {
@@ -1370,7 +1419,7 @@ void Utils::generate_predictions(
         return;
     }
 
-    std::cout << "\n=== Processing prompt: '" << input_text << "' ===" << std::endl;
+    std::cout << "\n=== Processing input: '" << input_text << "' ===" << std::endl;
     
     // Set the current context in the transformer
     transformer.set_current_context(input_text);
@@ -1378,53 +1427,69 @@ void Utils::generate_predictions(
     // Preprocess input
     std::string processed_input = input_text;
     tokenizer->preprocess_text(processed_input);
-    std::vector<int> test_tokens = tokenizer->encode(processed_input);
+    std::vector<int> input_tokens = tokenizer->encode(processed_input);
     
-    // Print tokenized input
+    // Print input tokens
     std::cout << "Input tokens: ";
-    for (const auto& token : test_tokens) {
+    for (const auto& token : input_tokens) {
         std::cout << "'" << tokenizer->decode({token}) << "' ";
     }
     std::cout << std::endl;
     
-    // Get model prediction
-    transformer.set_training(false);  // Set to evaluation mode
-    Matrix logits = transformer.forward(test_tokens, "", *tokenizer);
+    // Set generation parameters
+    const size_t max_length = input_tokens.size() + 50;  // Generate up to 50 new tokens
+    const float base_temperature = 0.8f;  // Lower temperature for more focused generation
     
-    // Show the top predictions
-    std::cout << "\nPredicted next tokens:" << std::endl;
+    // Generate sequence
+    std::cout << "\nGenerating sequence..." << std::endl;
+    transformer.set_training(false);  // Ensure we're in inference mode
+    
+    try {
+        std::vector<int> generated_tokens = transformer.generate(
+            input_tokens,
+            max_length,
+            base_temperature
+        );
+        
+        // Print the generated sequence
+        std::cout << "\nGeneration Results:" << std::endl;
+        std::cout << std::string(50, '-') << std::endl;
+        
+        // Print original input
+        std::cout << "Original input: " << input_text << std::endl;
+        
+        // Print full generated text
+        std::string generated_text = tokenizer->decode(generated_tokens);
+        std::cout << "Generated text: " << generated_text << std::endl;
+        
+        // Print token-by-token breakdown
+        std::cout << "\nToken-by-token breakdown:" << std::endl;
+        for (size_t i = input_tokens.size(); i < generated_tokens.size(); i++) {
+            std::string token_text = tokenizer->decode({generated_tokens[i]});
+            std::cout << i - input_tokens.size() + 1 << ". '" << token_text << "' "
+                     << "(ID: " << generated_tokens[i] << ")" << std::endl;
+        }
+        
+        // Save generation results
+        std::ofstream output_file("generation_results.txt", std::ios::app);
+        output_file << "\n=== Generation Results ===\n";
+        output_file << "Input: " << input_text << "\n";
+        output_file << "Generated: " << generated_text << "\n";
+        output_file << "Parameters:\n";
+        output_file << "- Base temperature: " << base_temperature << "\n";
+        output_file << "- Max length: " << max_length << "\n";
+        output_file << "- Tokens generated: " << (generated_tokens.size() - input_tokens.size()) << "\n";
+        output_file << std::string(50, '-') << "\n";
+        output_file.close();
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error during generation: " << e.what() << std::endl;
+    }
+    
+    // Also show top predictions for the next token (for comparison)
+    std::cout << "\nTop next token predictions (for reference):" << std::endl;
+    Matrix logits = transformer.forward(input_tokens, input_text, *tokenizer);
     print_top_predictions(logits, *tokenizer, transformer, 5);
-
-    // Get top 3 predictions for example completions
-    std::vector<float> last_logits;
-    for (size_t i = 0; i < logits.cols(); i++) {
-        last_logits.push_back(logits(logits.rows() - 1, i));
-    }
-
-    // Create index vector for top predictions
-    std::vector<size_t> top_indices(last_logits.size());
-    std::iota(top_indices.begin(), top_indices.end(), 0);
-
-    // Sort indices by logit values
-    std::partial_sort(top_indices.begin(), 
-                     top_indices.begin() + 3,
-                     top_indices.end(),
-                     [&last_logits](size_t a, size_t b) {
-                         return last_logits[a] > last_logits[b];
-                     });
-
-    // Example completions
-    std::cout << "\nExample completions:" << std::endl;
-    std::cout << std::string(50, '-') << std::endl;
-    for (int i = 0; i < 3; i++) {
-        std::cout << (i + 1) << ". " << input_text;
-        std::string token = tokenizer->decode({static_cast<int>(top_indices[i])});
-        std::cout << " " << token << std::endl;
-    }
-    std::cout << std::string(50, '-') << std::endl;
-
-    // Save predictions with input text
-    save_predictions_to_csv(logits, *tokenizer, input_text, "predictions.csv", 10);
 }
 
 // Add debugging for gradient analysis

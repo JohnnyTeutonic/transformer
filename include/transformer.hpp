@@ -8,6 +8,8 @@
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
+#include <sstream>
+#include <iostream>
 
 #include "matrix.hpp"
 #include "embeddings.hpp"  // Includes TokenEmbedding and PositionalEncoding
@@ -166,6 +168,11 @@ class TransformerLayer {
     MultiHeadAttention* getAttention() {
         return self_attention.get();
     }
+
+    const MultiHeadAttention* getAttention() const {
+        return self_attention.get();
+    }
+
     FeedForward* getFeedForward() {
         return feed_forward.get();
     }
@@ -225,6 +232,12 @@ class TransformerLayer {
             ffn_ln->update_parameters(learning_rate);
         }
     }
+
+    void set_tokenizer(const std::shared_ptr<TiktokenTokenizer>& tokenizer) {
+        if (self_attention) {
+            self_attention->set_tokenizer(tokenizer);
+        }
+    }
 };
 
 /**
@@ -250,11 +263,19 @@ private:
     TransformerConfig config;  // Store by value instead of reference
     std::shared_ptr<TiktokenTokenizer> tokenizer_;  // Add shared_ptr to tokenizer
     std::mt19937 gen_;  // Random number generator
+    static constexpr int DEFAULT_EOS_TOKEN = 50256;  // Default EOS token ID for GPT-style tokenizers
+    int eos_token_ = DEFAULT_EOS_TOKEN;  // End of sequence token ID
 
     // Add helper function for phrase type detection
     PhraseType get_phrase_type(const std::string& text) const {
         return PhraseTypeHandler::detect_phrase_type(text);
     }
+
+    // Add analyze_phrase_type method for internal phrase type analysis
+    PhraseType analyze_phrase_type(const Matrix& hidden_states, const TiktokenTokenizer& tokenizer);
+
+    // Add initialization method for attention layers
+    void initialize_attention_layers();
 
     // Components
     std::unique_ptr<TokenEmbedding> token_embedding;
@@ -281,12 +302,19 @@ private:
     std::optional<std::vector<Matrix>> parameter_grads;
 
     // Randomization helpers
-    float get_dynamic_temperature(PhraseType phrase_type, std::mt19937& gen);
-
     void add_random_noise(Matrix& logits, std::mt19937& gen) const {
         std::normal_distribution<float> noise_dist(0.0f, 0.1f);
-        for (size_t i = 0; i < logits.cols(); i++) {
-            logits(0, i) += noise_dist(gen);
+        for (size_t i = 0; i < logits.rows(); i++) {
+            for (size_t j = 0; j < logits.cols(); j++) {
+                logits(i, j) += noise_dist(gen);
+            }
+        }
+    }
+
+    void add_random_noise(Vector& vec, std::mt19937& gen) const {
+        std::normal_distribution<float> noise_dist(0.0f, 0.1f);
+        for (size_t i = 0; i < vec.size(); i++) {
+            vec[i] += noise_dist(gen);
         }
     }
 
@@ -313,13 +341,13 @@ private:
 
     // Helper methods for phrase prediction
     void boost_verb_probabilities(
-        std::vector<float>& probabilities,
+        Vector& probabilities,
         const TiktokenTokenizer& tokenizer,
         std::mt19937* gen = nullptr
     );
 
     void boost_adjective_probabilities(
-        std::vector<float>& probabilities,
+        Vector& probabilities,
         const TiktokenTokenizer& tokenizer,
         std::mt19937* gen = nullptr
     );
@@ -595,6 +623,55 @@ private:
         return {temperature, nucleus_p};
     }
 
+    // Add separator-aware methods
+    Matrix adjust_position_encodings(const Matrix& pos_enc, const std::vector<int>& tokens) const {
+        // Get first attention layer to use its separator handling
+        if (layers.empty() || !layers[0] || !layers[0]->getAttention()) {
+            throw std::runtime_error("No attention layer available for position encoding adjustment");
+        }
+        return layers[0]->getAttention()->adjust_position_encodings(pos_enc, tokens);
+    }
+
+    AttentionMask create_separator_mask(const std::vector<int>& tokens) const {
+        // Get first attention layer to use its separator handling
+        if (layers.empty() || !layers[0] || !layers[0]->getAttention()) {
+            throw std::runtime_error("No attention layer available for mask creation");
+        }
+        return layers[0]->getAttention()->create_separator_mask(tokens);
+    }
+
+    size_t find_separator_position(const std::vector<int>& tokens) const {
+        // Get first attention layer to use its separator handling
+        if (layers.empty() || !layers[0] || !layers[0]->getAttention()) {
+            throw std::runtime_error("No attention layer available for separator detection");
+        }
+        return layers[0]->getAttention()->find_separator_position(tokens);
+    }
+
+    // Frequency tracking
+    struct TokenFrequencyStats {
+        size_t total_occurrences = 0;
+        size_t recent_occurrences = 0;  // Within recency window
+        std::vector<size_t> positions;  // Track positions where token was used
+        float frequency_penalty = 0.0f;
+        float recency_penalty = 0.0f;
+    };
+    
+    std::unordered_map<int, TokenFrequencyStats> token_frequency_stats;
+    size_t total_tokens_generated = 0;
+    const size_t RECENCY_WINDOW = 50;  // Consider last 50 tokens for recency
+    const float BASE_FREQUENCY_PENALTY = 0.3f;
+    const float BASE_RECENCY_PENALTY = 0.2f;
+    const float PENALTY_DECAY = 0.95f;
+
+    // Frequency tracking methods
+    void update_token_frequency(int token_id);
+
+    void reset_frequency_stats() {
+        token_frequency_stats.clear();
+        total_tokens_generated = 0;
+    }
+
 public:
     Transformer() = default;
 
@@ -740,6 +817,14 @@ public:
     }
 
     /**
+     * @brief Gets the tokenizer associated with this transformer.
+     * @return Shared pointer to the tokenizer
+     */
+    std::shared_ptr<TiktokenTokenizer> get_tokenizer() const {
+        return tokenizer_;
+    }
+
+    /**
      * @brief Updates model parameters using computed gradients.
      * @param learning_rate Learning rate for the update
      */
@@ -787,137 +872,53 @@ public:
         return output;
     }
 
-    std::vector<int> generate(const std::vector<int>& input_tokens, 
-                            size_t max_length = 100,
-                            float temperature = 1.0f) {
-        std::vector<int> output_tokens = input_tokens;
-        size_t tokens_generated = 0;
-        
-        // Clear diversity tracking for new generation
-        reset_diversity_tracking();
-        
-        // Decode input tokens to set initial context if not already set
-        if (current_input_context.empty()) {
-            current_input_context = detokenize(input_tokens);
-        }
-        
-        // Initialize random generator with good entropy source
-        std::random_device rd;
-        std::seed_seq seq{rd(), rd(), rd(), rd()};
-        std::mt19937 gen(seq);
-        
-        while (output_tokens.size() < max_length) {
-            // Forward pass through the model with proper context
-            Matrix logits = forward(output_tokens, current_input_context, *tokenizer_);
-            
-            // Get the last token's logits
-            Vector last_token_logits = logits.row(logits.rows() - 1);
-            
-            // Apply diversity penalties
-            apply_diversity_penalties(last_token_logits);
-            
-            // Get adaptive sampling parameters
-            auto [adaptive_temp, nucleus_p] = get_adaptive_sampling_params(tokens_generated);
-            
-            // Combine with user-provided temperature
-            float final_temperature = adaptive_temp * temperature;
-            
-            // Apply nucleus sampling with adaptive parameters
-            Vector filtered_probs = apply_nucleus_sampling(last_token_logits, nucleus_p, final_temperature);
-            
-            // Add controlled random noise for exploration
-            if (tokens_generated < max_length / 2) {  // More exploration early in generation
-                add_random_noise(filtered_probs, gen);
-            }
-            
-            // Sample next token using the filtered distribution
-            std::discrete_distribution<> dist(filtered_probs.begin(), filtered_probs.end());
-            int next_token = dist(gen);
-            
-            // Update token stats for diversity tracking
-            update_token_stats(next_token);
-            
-            // Add to output
-            output_tokens.push_back(next_token);
-            tokens_generated++;
-            
-            // Update context with the new token
-            current_input_context = detokenize(output_tokens);
-            
-            // Check for end of sequence token
-            if (next_token == eos_token_) {
-                break;
-            }
-            
-            // Optional: Log sampling parameters for debugging
-            #ifdef DEBUG_SAMPLING
-            std::cout << "Generation step " << tokens_generated << ":\n"
-                      << "Temperature: " << final_temperature << "\n"
-                      << "Nucleus p: " << nucleus_p << "\n"
-                      << "Entropy: " << compute_entropy(filtered_probs) << std::endl;
-            #endif
-        }
-        
-        return output_tokens;
-    }
-
     // Add context tracking
     std::string get_current_context() const { return current_input_context; }
     void set_current_context(const std::string& context) { current_input_context = context; }
 
+    /**
+     * @brief Generates a sequence of tokens given an input sequence
+     * @param input_tokens Initial sequence of tokens
+     * @param max_length Maximum length of the generated sequence
+     * @param temperature Sampling temperature (higher = more random)
+     * @return Generated sequence of tokens
+     */
+    std::vector<int> generate(const std::vector<int>& input_tokens, 
+                            size_t max_length = 100,
+                            float temperature = 1.0f);
+
     // Add this function declaration in the public section
     std::vector<TokenPrediction> predict_next_tokens(const std::string& input, size_t num_predictions);
 
-private:
     /**
-     * @brief Analyzes logits to determine the most likely phrase type
-     * @param logits The output logits from the model
-     * @param tokenizer The tokenizer instance
-     * @return The predicted phrase type
+     * @brief Forward pass through the transformer model with KV cache update option
+     * @param input_tokens Input token IDs
+     * @param update_kv_cache Whether to update the key-value cache
+     * @return Vector of logits for next token prediction
      */
-    PhraseType analyze_phrase_type(
-        const Matrix& logits,
-        const TiktokenTokenizer& tokenizer
-    );
-
-    // Helper method for token sampling
-    int sample_token(const Vector& probabilities) {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        
-        // Get adaptive parameters
-        auto [temperature, nucleus_p] = get_adaptive_sampling_params(generation_history.size());
-        
-        // Apply nucleus sampling with temperature
-        Vector sampled_probs = apply_nucleus_sampling(probabilities, nucleus_p, temperature);
-        
-        // Sample from the filtered distribution
-        std::discrete_distribution<> dist(sampled_probs.begin(), sampled_probs.end());
-        return dist(gen);
-    }
-    
-    int eos_token_ = 50256;  // Default GPT-2 EOS token
-
-public:
-    /**
-     * @brief Set the tokenizer for this transformer
-     * @param tokenizer Raw pointer to tokenizer instance
-     */
-    void set_tokenizer(TiktokenTokenizer* tokenizer) {
-        if (tokenizer) {
-            tokenizer_ = std::unique_ptr<TiktokenTokenizer>(tokenizer);
-        }
-    }
+    Vector forward(const std::vector<int>& input_tokens, bool update_kv_cache);
 
     /**
-     * @brief Get the current tokenizer
-     * @return Raw pointer to current tokenizer
+     * @brief Reset the transformer's key-value cache and frequency statistics
      */
-    TiktokenTokenizer* get_tokenizer() const {
-        return tokenizer_.get();
-    }
+    void reset_cache();
+
+    /**
+     * @brief Get dynamic temperature for sampling based on phrase type and current state
+     * @param type The type of phrase being generated
+     * @param gen Random number generator for adding noise
+     * @return Dynamic temperature value
+     */
+    float get_dynamic_temperature(PhraseType type, const std::mt19937& gen) const;
+
+    /**
+     * @brief Creates a target distribution matrix for training
+     * @param target_tokens Target token sequence
+     * @param vocab_size Size of the vocabulary
+     * @return Matrix containing the target distribution
+     */
+    Matrix create_target_distribution(const std::vector<int>& target_tokens, size_t vocab_size) const;
 
 };
 
-class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp
 class PositionalEncoding;  // Forward declaration is enough since we include embeddings.hpp

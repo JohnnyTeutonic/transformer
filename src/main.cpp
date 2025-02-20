@@ -35,25 +35,6 @@ struct Data {
     std::vector<int> labels;
 };
 
-// Add debug logging to the generate_predictions function
-void generate_predictions(Transformer& transformer, const std::string& input_text, std::shared_ptr<TiktokenTokenizer> tokenizer) {
-    if (!tokenizer) {
-        std::cerr << "Error: TiktokenTokenizer is null" << std::endl;
-        return;
-    }
-
-    // Tokenize input
-    std::vector<int> input_tokens = tokenizer->encode(input_text);
-    
-    // Generate prediction
-    std::vector<int> output_tokens = transformer.generate(input_tokens);
-    
-    // Decode and print result
-    std::string output_text = tokenizer->decode(output_tokens);
-    std::cout << "Input: " << input_text << std::endl;
-    std::cout << "Output: " << output_text << std::endl;
-}
-
 // Add this function before the main training loop
 void reinitialize_batch_weights(Transformer& transformer, const TransformerConfig& config, size_t global_step) {
     // Get a random seed based on time and batch number

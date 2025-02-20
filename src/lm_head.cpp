@@ -62,31 +62,60 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
-    SCOPE_LOG();
+    std::cout << "\n=== LanguageModelHead::forward START ===" << std::endl;
+    std::cout << "Input shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
+    std::cout << "Training mode: " << (training ? "true" : "false") << std::endl;
     
     if (hidden_states.cols() != hidden_size_) {
-        throw std::runtime_error("Hidden dimension mismatch: " + std::to_string(hidden_states.cols()) +
-                               " != " + std::to_string(hidden_size_));
+        std::cerr << "Error: Hidden dimension mismatch. Expected " << hidden_size_ 
+                  << ", got " << hidden_states.cols() << std::endl;
+        throw std::runtime_error("Hidden dimension mismatch");
     }
     
     // Cache hidden states for backward pass
     hidden_states_ = hidden_states;
     
     // Project hidden states to vocabulary space
-    // hidden_states: [batch_size x hidden_size]
-    // projection: [hidden_size x vocab_size]
-    // result: [batch_size x vocab_size]
-    Matrix logits(hidden_states.rows(), vocab_size_);    
-    // Perform matrix multiplication (no need for transposition now)
-    cuda::matmul(hidden_states, projection, logits);
+    Matrix logits(hidden_states.rows(), vocab_size_);
     
-    // Add bias
-    for (size_t i = 0; i < logits.rows(); ++i) {
-        for (size_t j = 0; j < logits.cols(); ++j) {
-            logits(i, j) += bias[j];
+    try {
+        // Perform matrix multiplication
+        logits = matmul(hidden_states, projection);
+        
+        // Add bias
+        for (size_t i = 0; i < logits.rows(); ++i) {
+            for (size_t j = 0; j < logits.cols(); ++j) {
+                logits(i, j) += bias[j];
+            }
         }
+        
+        std::cout << "Output logits shape: " << logits.rows() << "x" << logits.cols() << std::endl;
+        
+        // Debug: Print statistics about the logits
+        float min_logit = std::numeric_limits<float>::max();
+        float max_logit = -std::numeric_limits<float>::max();
+        float sum_logits = 0.0f;
+        
+        for (size_t i = 0; i < logits.rows(); ++i) {
+            for (size_t j = 0; j < logits.cols(); ++j) {
+                float val = logits(i, j);
+                min_logit = std::min(min_logit, val);
+                max_logit = std::max(max_logit, val);
+                sum_logits += val;
+            }
+        }
+        
+        std::cout << "Logits statistics:" << std::endl;
+        std::cout << "  Min: " << min_logit << std::endl;
+        std::cout << "  Max: " << max_logit << std::endl;
+        std::cout << "  Mean: " << sum_logits / (logits.rows() * logits.cols()) << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error in forward pass: " << e.what() << std::endl;
+        throw;
     }
     
+    std::cout << "=== LanguageModelHead::forward END ===\n" << std::endl;
     return logits;
 }
 
@@ -411,4 +440,218 @@ void LanguageModelHead::bias_completion_format(Matrix& logits) {
             }
         }
     }
-} 
+}
+
+Vector LanguageModelHead::sample_next_token(const Matrix& logits, const std::string& input_str, float temperature) {
+    std::cout << "\n=== Starting LanguageModelHead::sample_next_token ===" << std::endl;
+    std::cout << "Input matrix shape: " << logits.rows() << "x" << logits.cols() << std::endl;
+    std::cout << "Input context: '" << input_str << "'" << std::endl;
+    std::cout << "Temperature: " << temperature << std::endl;
+    
+    // Initialize vocabulary if needed
+    if (!vocabulary_initialized) {
+        std::cout << "Initializing vocabulary..." << std::endl;
+        ensure_vocabulary_initialized();
+    }
+    
+    // Get logits for last token
+    std::cout << "Extracting last row of logits..." << std::endl;
+    Vector token_logits = logits.row(logits.rows() - 1);
+    std::cout << "Token logits size: " << token_logits.size() << std::endl;
+    
+    // Print initial logits statistics
+    float min_logit = std::numeric_limits<float>::max();
+    float max_logit = -std::numeric_limits<float>::max();
+    float sum_logits = 0.0f;
+    for (size_t i = 0; i < token_logits.size(); i++) {
+        min_logit = std::min(min_logit, token_logits[i]);
+        max_logit = std::max(max_logit, token_logits[i]);
+        sum_logits += token_logits[i];
+    }
+    std::cout << "Initial logits statistics:" << std::endl;
+    std::cout << "  Min: " << min_logit << std::endl;
+    std::cout << "  Max: " << max_logit << std::endl;
+    std::cout << "  Mean: " << sum_logits / token_logits.size() << std::endl;
+    
+    // Store original logits for debugging
+    Vector original_logits = token_logits;
+    
+    // Apply context-aware adjustments before temperature scaling
+    if (tokenizer) {
+        std::cout << "Applying context-aware adjustments..." << std::endl;
+        Matrix logits_matrix(1, token_logits.size());
+        for (size_t i = 0; i < token_logits.size(); i++) {
+            logits_matrix(0, i) = token_logits[i];
+        }
+        bias_completion_format(logits_matrix);
+        token_logits = logits_matrix.row(0);
+    }
+    
+    // Apply temperature scaling after adjustments
+    std::cout << "Applying temperature scaling (T=" << temperature << ")..." << std::endl;
+    float effective_temp = std::max(temperature, 0.1f); // Prevent division by zero
+    for (size_t i = 0; i < token_logits.size(); i++) {
+        token_logits[i] /= effective_temp;
+    }
+    
+    // Convert to probabilities with softmax
+    std::cout << "Converting to probabilities..." << std::endl;
+    Vector probabilities = softmax(token_logits);
+    
+    // Print probability statistics
+    float min_prob = 1.0f;
+    float max_prob = 0.0f;
+    float sum_prob = 0.0f;
+    size_t non_zero_probs = 0;
+    for (size_t i = 0; i < probabilities.size(); i++) {
+        if (probabilities[i] > 0.0f) {
+            min_prob = std::min(min_prob, probabilities[i]);
+            max_prob = std::max(max_prob, probabilities[i]);
+            sum_prob += probabilities[i];
+            non_zero_probs++;
+        }
+    }
+    std::cout << "Probability statistics:" << std::endl;
+    std::cout << "  Min (non-zero): " << min_prob << std::endl;
+    std::cout << "  Max: " << max_prob << std::endl;
+    std::cout << "  Sum: " << sum_prob << std::endl;
+    std::cout << "  Non-zero probabilities: " << non_zero_probs << "/" << probabilities.size() << std::endl;
+    
+    // Debug: Print top 5 tokens before sampling
+    std::cout << "\nGathering top 5 tokens..." << std::endl;
+    std::vector<std::pair<float, size_t>> top_tokens;
+    top_tokens.reserve(probabilities.size());
+    for (size_t i = 0; i < probabilities.size(); i++) {
+        top_tokens.push_back({probabilities[i], i});
+    }
+    
+    std::cout << "Sorting tokens..." << std::endl;
+    std::partial_sort(top_tokens.begin(), 
+                     top_tokens.begin() + std::min(size_t(5), top_tokens.size()),
+                     top_tokens.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+    
+    std::cout << "\nTop 5 tokens before sampling:" << std::endl;
+    for (size_t i = 0; i < std::min(size_t(5), top_tokens.size()); i++) {
+        std::string token_text = get_token_text(top_tokens[i].second);
+        std::cout << i + 1 << ". '" << token_text << "' "
+                 << "(ID: " << top_tokens[i].second 
+                 << ", prob: " << top_tokens[i].first 
+                 << ", logit: " << original_logits[top_tokens[i].second] << ")" << std::endl;
+    }
+    
+    // Input-dependent seeding
+    std::cout << "\nPreparing random sampling..." << std::endl;
+    std::random_device rd;
+    std::seed_seq seed{
+        rd(),
+        static_cast<unsigned>(std::hash<std::string>{}(input_str)),
+        static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count())
+    };
+    std::mt19937 gen(seed);
+    
+    // Get valid token indices (filter out very low probability tokens)
+    std::cout << "Filtering valid tokens..." << std::endl;
+    std::vector<size_t> valid_indices;
+    valid_indices.reserve(probabilities.size());
+    const float prob_threshold = 1e-6f;
+    
+    for (size_t i = 0; i < probabilities.size(); i++) {
+        if (probabilities[i] > prob_threshold) {
+            valid_indices.push_back(i);
+        }
+    }
+    std::cout << "Valid tokens after filtering: " << valid_indices.size() << std::endl;
+    
+    if (valid_indices.empty()) {
+        std::cout << "No valid tokens found, including all tokens..." << std::endl;
+        valid_indices.resize(probabilities.size());
+        std::iota(valid_indices.begin(), valid_indices.end(), 0);
+    }
+    
+    // Create distribution for sampling
+    std::cout << "Creating sampling distribution..." << std::endl;
+    std::vector<float> valid_probs;
+    valid_probs.reserve(valid_indices.size());
+    float sum_probs = 0.0f;
+    
+    for (size_t idx : valid_indices) {
+        valid_probs.push_back(probabilities[idx]);
+        sum_probs += probabilities[idx];
+    }
+    
+    // Renormalize probabilities
+    std::cout << "Renormalizing probabilities..." << std::endl;
+    if (sum_probs > 0.0f) {
+        for (float& prob : valid_probs) {
+            prob /= sum_probs;
+        }
+    }
+    
+    // Sample token using the normalized distribution
+    std::cout << "Sampling token..." << std::endl;
+    std::discrete_distribution<> dist(valid_probs.begin(), valid_probs.end());
+    size_t sampled_idx = valid_indices[dist(gen)];
+    
+    // Create one-hot vector
+    std::cout << "Creating one-hot vector result..." << std::endl;
+    Vector result(probabilities.size(), 0.0f);
+    result[sampled_idx] = 1.0f;
+    
+    // Debug output
+    std::cout << "\nSampling details:" << std::endl;
+    std::cout << "Input context: '" << input_str << "'" << std::endl;
+    std::cout << "Temperature: " << temperature << std::endl;
+    std::cout << "Valid tokens: " << valid_indices.size() << "/" << probabilities.size() << std::endl;
+    std::cout << "Sampled token: " << sampled_idx << " ('" << get_token_text(sampled_idx) << "')" << std::endl;
+    std::cout << "Original logit: " << original_logits[sampled_idx] << std::endl;
+    std::cout << "Final probability: " << probabilities[sampled_idx] << std::endl;
+    
+    std::cout << "=== LanguageModelHead::sample_next_token complete ===\n" << std::endl;
+    return result;
+}
+
+void LanguageModelHead::set_tokenizer(std::shared_ptr<TiktokenTokenizer> tok) {
+    std::cout << "Setting tokenizer..." << std::endl;
+    if (!tok) {
+        std::cerr << "Warning: Null tokenizer provided!" << std::endl;
+        return;
+    }
+    tokenizer = tok;
+    std::cout << "Tokenizer set successfully. Vocab size: " << tok->vocab_size() << std::endl;
+    
+    // Reset vocabulary cache when tokenizer changes
+    vocabulary_initialized = false;
+    vocabulary_cache.clear();
+}
+
+void LanguageModelHead::ensure_vocabulary_initialized() {
+    std::cout << "Checking vocabulary initialization..." << std::endl;
+    
+    if (!tokenizer) {
+        std::cerr << "Error: Cannot initialize vocabulary - tokenizer not set!" << std::endl;
+        return;
+    }
+    
+    if (!vocabulary_initialized) {
+        std::cout << "Initializing vocabulary with size " << vocab_size_ << "..." << std::endl;
+        vocabulary_cache.clear();
+        vocabulary_cache.reserve(vocab_size_);
+        
+        for (size_t i = 0; i < vocab_size_; i++) {
+            try {
+                std::string token = tokenizer->decode({static_cast<int>(i)});
+                vocabulary_cache.push_back(token);
+                if (i < 10 || i > vocab_size_ - 10) {  // Print first and last 10 tokens
+                    std::cout << "Token " << i << ": '" << token << "'" << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error decoding token " << i << ": " << e.what() << std::endl;
+                vocabulary_cache.push_back("");  // Add empty string for failed tokens
+            }
+        }
+        
+        vocabulary_initialized = true;
+        std::cout << "Vocabulary initialization complete. Size: " << vocabulary_cache.size() << std::endl;
+    }
+}

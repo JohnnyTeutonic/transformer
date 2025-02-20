@@ -2,7 +2,7 @@
     "attention": {
         "num_kv_heads": 4,
         "use_flash_attention": true,
-        "use_gqa": false,
+        "use_gqa": true,
         "use_rope": true,
         "use_sliding_window": true,
         "window_size": 16
@@ -30,15 +30,15 @@
     "load_from_checkpoint": false,
     "model": {
         "head_dim": 64,
-        "hidden_size": 256,
+        "hidden_size": 384,
         "intermediate_size": 1024,
         "max_seq_length": 128,
-        "num_heads": 8,
-        "num_layers": 4
+        "num_heads": 12,
+        "num_layers": 8
     },
     "optimization": {
         "gradient_accumulation_steps": 8,
-        "gradient_clip_threshold": 1.0,
+        "gradient_clip_threshold": 5.0,
         "layer_norm_epsilon": 1e-05,
         "memory_pool_size": 16384,
         "use_fp16": true,
@@ -58,16 +58,16 @@
     },
     "token_prediction": {
         "category_bonus": {
-            "adjective": 0.2,
-            "noun": 0.3,
-            "verb": 0.2
+            "adjective": 0.4,
+            "noun": 0.5,
+            "verb": 0.3
         },
         "frequency_penalty": 0.1,
         "min_token_prob": 0.05,
         "presence_penalty": 0.1,
-        "temperature": 1.2,
-        "top_k": 5,
-        "top_p": 0.9
+        "temperature": 1.8,
+        "top_k": 25,
+        "top_p": 0.75
     },
     "tokenizer": {
         "model_path": "model/tokenizer.model",
@@ -90,21 +90,21 @@
             "num_folds": 2,
             "validation_frequency": 2
         },
-        "dropout_rate": 0.2,
+        "dropout_rate": 0.1,
         "learning_rate": {
             "decay_factor": 0.98,
             "decay_steps": 200,
-            "initial_lr": 0.00001,
+            "initial_lr": 0.0001,
             "min_lr": 0.000001,
-            "peak_lr": 0.0001,
+            "peak_lr": 0.0003,
             "warmup_steps": 500
         },
-        "num_epochs": 12,
+        "num_epochs": 10,
         "tuning": {
             "enabled": false,
             "evaluation_steps": 50,
             "num_trials": 10
         },
-        "weight_decay": 0.05
+        "weight_decay": 0.1
     }
 }
