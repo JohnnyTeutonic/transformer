@@ -1,12 +1,50 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <random>
 
 class TransformerModel {
 private:
     int d_model; // Dimension of the model
     int num_heads; // Number of attention heads
     int num_layers; // Number of transformer layers
+
+    // Attention weights and biases
+    std::vector<std::vector<std::vector<float>>> attention_weights;
+    std::vector<std::vector<float>> attention_biases;
+
+    // Feed-forward network weights and biases
+    std::vector<std::vector<std::vector<float>>> ff_weights;
+    std::vector<std::vector<float>> ff_biases;
+
+    // Helper function to initialize weights and biases
+    void initialize_parameters() {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::normal_distribution<> d(0, 0.02);
+
+        for (int layer = 0; layer < num_layers; ++layer) {
+            attention_weights.push_back(std::vector<std::vector<float>>(num_heads, std::vector<float>(d_model, 0)));
+            attention_biases.push_back(std::vector<float>(d_model, 0));
+
+            ff_weights.push_back(std::vector<std::vector<float>>(d_model, std::vector<float>(d_model, 0)));
+            ff_biases.push_back(std::vector<float>(d_model, 0));
+
+            for (int head = 0; head < num_heads; ++head) {
+                for (int i = 0; i < d_model; ++i) {
+                    attention_weights[layer][head][i] = d(gen);
+                }
+            }
+
+            for (int i = 0; i < d_model; ++i) {
+                attention_biases[layer][i] = d(gen);
+                ff_biases[layer][i] = d(gen);
+                for (int j = 0; j < d_model; ++j) {
+                    ff_weights[layer][i][j] = d(gen);
+                }
+            }
+        }
+    }
 
     // Helper function to calculate attention scores
     std::vector<std::vector<float>> calculate_attention_scores(const std::vector<std::vector<float>>& queries,
@@ -46,37 +84,56 @@ private:
         return softmax_scores;
     }
 
-    // Helper function to apply multi-head attention
-    std::vector<std::vector<float>> multi_head_attention(const std::vector<std::vector<float>>& queries,
-                                                         const std::vector<std::vector<float>>& keys,
-                                                         const std::vector<std::vector<float>>& values) {
-        int seq_len = queries.size();
-        int head_dim = d_model / num_heads;
+    // Helper function to apply multi-head attention with weights and biases
+    std::vector<std::vector<float>> multi_head_attention(const std::vector<std::vector<float>>& input) {
+        int seq_len = input.size();
         std::vector<std::vector<float>> output(seq_len, std::vector<float>(d_model));
 
-        for (int head = 0; head < num_heads; ++head) {
-            std::vector<std::vector<float>> head_queries(seq_len, std::vector<float>(head_dim));
-            std::vector<std::vector<float>> head_keys(seq_len, std::vector<float>(head_dim));
-            std::vector<std::vector<float>> head_values(seq_len, std::vector<float>(head_dim));
+        for (int layer = 0; layer < num_layers; ++layer) {
+            std::vector<std::vector<float>> queries(seq_len, std::vector<float>(d_model));
+            std::vector<std::vector<float>> keys(seq_len, std::vector<float>(d_model));
+            std::vector<std::vector<float>> values(seq_len, std::vector<float>(d_model));
 
             for (int i = 0; i < seq_len; ++i) {
-                for (int j = 0; j < head_dim; ++j) {
-                    head_queries[i][j] = queries[i][head * head_dim + j];
-                    head_keys[i][j] = keys[i][head * head_dim + j];
-                    head_values[i][j] = values[i][head * head_dim + j];
+                for (int j = 0; j < d_model; ++j) {
+                    queries[i][j] = input[i][j];
+                    keys[i][j] = input[i][j];
+                    values[i][j] = input[i][j];
                 }
             }
 
-            std::vector<std::vector<float>> attention_scores = calculate_attention_scores(head_queries, head_keys);
-            std::vector<std::vector<float>> softmax_scores = softmax(attention_scores);
+            for (int head = 0; head < num_heads; ++head) {
+                std::vector<std::vector<float>> head_queries(seq_len, std::vector<float>(d_model / num_heads));
+                std::vector<std::vector<float>> head_keys(seq_len, std::vector<float>(d_model / num_heads));
+                std::vector<std::vector<float>> head_values(seq_len, std::vector<float>(d_model / num_heads));
 
-            for (int i = 0; i < seq_len; ++i) {
-                for (int j = 0; j < head_dim; ++j) {
-                    float weighted_sum = 0.0;
-                    for (int k = 0; k < seq_len; ++k) {
-                        weighted_sum += softmax_scores[i][k] * head_values[k][j];
+                for (int i = 0; i < seq_len; ++i) {
+                    for (int j = 0; j < d_model / num_heads; ++j) {
+                        head_queries[i][j] = 0;
+                        head_keys[i][j] = 0;
+                        head_values[i][j] = 0;
+                        for (int k = 0; k < d_model; ++k) {
+                            head_queries[i][j] += queries[i][k] * attention_weights[layer][head][k * (d_model / num_heads) + j];
+                            head_keys[i][j] += keys[i][k] * attention_weights[layer][head][k * (d_model / num_heads) + j];
+                            head_values[i][j] += values[i][k] * attention_weights[layer][head][k * (d_model / num_heads) + j];
+                        }
+                        head_queries[i][j] += attention_biases[layer][head * (d_model / num_heads) + j];
+                        head_keys[i][j] += attention_biases[layer][head * (d_model / num_heads) + j];
+                        head_values[i][j] += attention_biases[layer][head * (d_model / num_heads) + j];
                     }
-                    output[i][head * head_dim + j] = weighted_sum;
+                }
+
+                std::vector<std::vector<float>> attention_scores = calculate_attention_scores(head_queries, head_keys);
+                std::vector<std::vector<float>> softmax_scores = softmax(attention_scores);
+
+                for (int i = 0; i < seq_len; ++i) {
+                    for (int j = 0; j < d_model / num_heads; ++j) {
+                        float weighted_sum = 0.0;
+                        for (int k = 0; k < seq_len; ++k) {
+                            weighted_sum += softmax_scores[i][k] * head_values[k][j];
+                        }
+                        output[i][head * (d_model / num_heads) + j] = weighted_sum;
+                    }
                 }
             }
         }
@@ -84,14 +141,20 @@ private:
         return output;
     }
 
-    // Helper function to apply feed-forward network
+    // Helper function to apply feed-forward network with weights and biases
     std::vector<std::vector<float>> feed_forward_network(const std::vector<std::vector<float>>& input) {
         int seq_len = input.size();
         std::vector<std::vector<float>> output(seq_len, std::vector<float>(d_model));
 
-        for (int i = 0; i < seq_len; ++i) {
-            for (int j = 0; j < d_model; ++j) {
-                output[i][j] = input[i][j] * 2.0; // Simple linear transformation
+        for (int layer = 0; layer < num_layers; ++layer) {
+            for (int i = 0; i < seq_len; ++i) {
+                for (int j = 0; j < d_model; ++j) {
+                    output[i][j] = 0;
+                    for (int k = 0; k < d_model; ++k) {
+                        output[i][j] += input[i][k] * ff_weights[layer][k][j];
+                    }
+                    output[i][j] += ff_biases[layer][j];
+                }
             }
         }
 
@@ -100,14 +163,16 @@ private:
 
 public:
     TransformerModel(int d_model, int num_heads, int num_layers)
-        : d_model(d_model), num_heads(num_heads), num_layers(num_layers) {}
+        : d_model(d_model), num_heads(num_heads), num_layers(num_layers) {
+        initialize_parameters();
+    }
 
     std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& input) {
         std::vector<std::vector<float>> output = input;
 
         for (int layer = 0; layer < num_layers; ++layer) {
             // Apply multi-head attention
-            output = multi_head_attention(output, output, output);
+            output = multi_head_attention(output);
 
             // Apply feed-forward network
             output = feed_forward_network(output);
@@ -157,6 +222,27 @@ public:
         }
 
         return loss_gradient;
+    }
+
+    // Update model parameters
+    void update_parameters(const std::vector<std::vector<float>>& input_gradients, float learning_rate) {
+        for (int layer = 0; layer < num_layers; ++layer) {
+            for (int head = 0; head < num_heads; ++head) {
+                for (int i = 0; i < d_model; ++i) {
+                    for (int j = 0; j < d_model / num_heads; ++j) {
+                        attention_weights[layer][head][i * (d_model / num_heads) + j] -= learning_rate * input_gradients[i][head * (d_model / num_heads) + j];
+                    }
+                }
+            }
+
+            for (int i = 0; i < d_model; ++i) {
+                attention_biases[layer][i] -= learning_rate * input_gradients[i][i];
+                ff_biases[layer][i] -= learning_rate * input_gradients[i][i];
+                for (int j = 0; j < d_model; ++j) {
+                    ff_weights[layer][i][j] -= learning_rate * input_gradients[i][j];
+                }
+            }
+        }
     }
 
 private:
@@ -263,14 +349,8 @@ int main() {
             // Backward pass
             std::vector<std::vector<float>> input_gradients = model.backward(loss_gradient);
 
-            // Update model parameters (simplified for demonstration)
-            for (int i = 0; i < seq_len; ++i) {
-                for (int j = 0; j < d_model; ++j) {
-                    // In a real implementation, you would update the model's weights and biases here
-                    // For this example, we'll just simulate updating the input
-                    inputs[batch][i][j] -= learning_rate * input_gradients[i][j];
-                }
-            }
+            // Update model parameters
+            model.update_parameters(input_gradients, learning_rate);
         }
 
         // Print average loss for this epoch
@@ -279,4 +359,4 @@ int main() {
     }
 
     return 0;
-} 
+}
