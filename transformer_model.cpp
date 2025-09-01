@@ -9,15 +9,15 @@ private:
     int num_heads; // Number of attention heads
     int num_layers; // Number of transformer layers
 
-    // Attention weights and biases
     std::vector<std::vector<std::vector<float>>> attention_weights;
     std::vector<std::vector<float>> attention_biases;
 
-    // Feed-forward network weights and biases
     std::vector<std::vector<std::vector<float>>> ff_weights;
     std::vector<std::vector<float>> ff_biases;
 
-    // Helper function to initialize weights and biases
+    std::vector<std::vector<std::vector<float>>> layer_inputs;
+    std::vector<std::vector<std::vector<float>>> attention_outputs;
+
     void initialize_parameters() {
         std::random_device rd;
         std::mt19937 gen(rd());
@@ -46,7 +46,6 @@ private:
         }
     }
 
-    // Helper function to calculate attention scores
     std::vector<std::vector<float>> calculate_attention_scores(const std::vector<std::vector<float>>& queries,
                                                                const std::vector<std::vector<float>>& keys) {
         int seq_len = queries.size();
@@ -65,7 +64,6 @@ private:
         return attention_scores;
     }
 
-    // Helper function to apply softmax to attention scores
     std::vector<std::vector<float>> softmax(const std::vector<std::vector<float>>& attention_scores) {
         int seq_len = attention_scores.size();
         std::vector<std::vector<float>> softmax_scores(seq_len, std::vector<float>(seq_len));
@@ -84,7 +82,6 @@ private:
         return softmax_scores;
     }
 
-    // Helper function to apply multi-head attention with weights and biases
     std::vector<std::vector<float>> multi_head_attention(const std::vector<std::vector<float>>& input) {
         int seq_len = input.size();
         std::vector<std::vector<float>> output(seq_len, std::vector<float>(d_model));
@@ -141,7 +138,6 @@ private:
         return output;
     }
 
-    // Helper function to apply feed-forward network with weights and biases
     std::vector<std::vector<float>> feed_forward_network(const std::vector<std::vector<float>>& input) {
         int seq_len = input.size();
         std::vector<std::vector<float>> output(seq_len, std::vector<float>(d_model));
@@ -169,11 +165,25 @@ public:
 
     std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& input) {
         std::vector<std::vector<float>> output = input;
+        
+        // Clear any previous cached activations
+        layer_inputs.clear();
+        attention_outputs.clear();
+        
+        // Resize caches to match the number of layers
+        layer_inputs.resize(num_layers);
+        attention_outputs.resize(num_layers);
 
         for (int layer = 0; layer < num_layers; ++layer) {
-            // Apply multi-head attention
+            // Store input to this layer for backward pass
+            layer_inputs[layer] = output;
+            
+            // Apply attention
             output = multi_head_attention(output);
-
+            
+            // Store attention output for backward pass
+            attention_outputs[layer] = output;
+            
             // Apply feed-forward network
             output = feed_forward_network(output);
         }
@@ -182,17 +192,23 @@ public:
     }
 
     std::vector<std::vector<float>> backward(const std::vector<std::vector<float>>& output_gradients) {
-        std::vector<std::vector<float>> input_gradients = output_gradients;
-
+        // Initialize gradients with the output gradients
+        std::vector<std::vector<float>> layer_gradients = output_gradients;
+        
+        // Backpropagate through each layer in reverse order
         for (int layer = num_layers - 1; layer >= 0; --layer) {
-            // Apply feed-forward network backward
-            input_gradients = feed_forward_network_backward(input_gradients);
-
-            // Apply multi-head attention backward
-            input_gradients = multi_head_attention_backward(input_gradients, input_gradients, input_gradients);
+            // Backpropagate through feed-forward network
+            layer_gradients = feed_forward_network_backward(layer_gradients);
+            
+            // Backpropagate through multi-head attention using cached activations
+            layer_gradients = multi_head_attention_backward(
+                layer_gradients,
+                layer_inputs[layer],  // Use cached inputs as queries
+                layer_inputs[layer]   // Use cached inputs as keys
+            );
         }
-
-        return input_gradients;
+        
+        return layer_gradients;
     }
 
     float compute_loss(const std::vector<std::vector<float>>& predictions, const std::vector<std::vector<float>>& targets) {
@@ -224,7 +240,6 @@ public:
         return loss_gradient;
     }
 
-    // Update model parameters
     void update_parameters(const std::vector<std::vector<float>>& input_gradients, float learning_rate) {
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int head = 0; head < num_heads; ++head) {

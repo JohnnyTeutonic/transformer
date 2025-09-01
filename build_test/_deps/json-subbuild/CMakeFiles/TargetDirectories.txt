@@ -1,0 +1,3 @@
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-subbuild/CMakeFiles/json-populate.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-subbuild/CMakeFiles/edit_cache.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-subbuild/CMakeFiles/rebuild_cache.dir
