@@ -95,7 +95,17 @@ TransformerLayer::TransformerLayer(const TransformerConfig& config_, size_t idx)
         config.use_gqa, config.num_kv_heads, config.max_seq_length, config.use_fp16);
 
     attention_ln = std::make_unique<LayerNorm>(config.hidden_size);
-    feed_forward = std::make_unique<FeedForward>(config.hidden_size, config.intermediate_size);
+    
+    // Conditionally initialize FeedForward or Mixture of Experts layer
+    if (config.moe.enabled) {
+        moe_layer = std::make_unique<MixtureOfExperts>(
+            config.moe.num_experts, config.moe.top_k, config.hidden_size, config.intermediate_size, config.moe.aux_loss_coefficient);
+        feed_forward = nullptr;
+    } else {
+        feed_forward = std::make_unique<FeedForward>(config.hidden_size, config.intermediate_size);
+        moe_layer = nullptr;
+    }
+
     ffn_ln = std::make_unique<LayerNorm>(config.hidden_size);
 
     // Initialize dropout layers
@@ -256,8 +266,13 @@ Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
     GradientCheckpoint::cache_activation(ffn_key, norm1);
     std::cout << "Cached normalized input for feed forward: " << norm1.rows() << "x"
                   << norm1.cols() << std::endl;
-    // Feed forward
-    Matrix ff_output = feed_forward->forward(norm1);
+    // Feed forward through MoE or FFN
+    Matrix ff_output;
+    if (moe_layer) {
+        ff_output = moe_layer->forward(norm1);
+    } else {
+        ff_output = feed_forward->forward(norm1);
+    }
     
     // Debug feed forward output
     float min_ff = std::numeric_limits<float>::infinity();
@@ -337,7 +352,13 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
             throw std::runtime_error("FFN dropout gradient columns must match input columns");
         }
 
-        Matrix ffn_grad = feed_forward->backward(ff_dropout_grad, ffn_normalized);
+        Matrix ffn_grad;
+        if (moe_layer) {
+            ffn_grad = moe_layer->backward(ff_dropout_grad);
+        } else {
+            ffn_grad = feed_forward->backward(ff_dropout_grad, ffn_normalized);
+        }
+        
         if (ffn_grad.cols() != input.cols()) {
             throw std::runtime_error("FFN gradient columns must match input columns");
         }
@@ -388,6 +409,13 @@ Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input
         std::cerr << "Error in TransformerLayer::backward: " << e.what() << std::endl;
         throw;
     }
+}
+
+float TransformerLayer::getAuxLoss() const {
+    if (moe_layer) {
+        return moe_layer->get_aux_loss();
+    }
+    return 0.0f;
 }
 
 // Transformer implementation
@@ -636,8 +664,18 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
             if (auto* attention = layer->getAttention()) {
                 update_attention_parameters(attention, learning_rate, config);
             }
-            if (auto* ffn = layer->getFeedForward()) {
-                update_ffn_parameters(ffn, learning_rate, config);
+            if (auto* moe = layer->getMixtureOfExperts()) {
+                // Update experts
+                for (auto* expert : moe->get_experts()) {
+                    update_ffn_parameters(expert, learning_rate, config);
+                }
+                // Update router
+                auto& router_params = moe->get_router().parameters();
+                auto& router_grads = moe->get_router().gradients();
+                update_parameter_with_clip(router_params.weights, router_grads.weights_grad, learning_rate, config);
+
+            } else if (auto* ffn = layer->getFeedForward()) {
+                 update_ffn_parameters(ffn, learning_rate, config);
             }
         }
         
@@ -655,6 +693,12 @@ void Transformer::clear_gradients() {
         for (auto& layer : layers) {
             if (auto* attention = layer->getAttention()) {
                 attention->param_gradients() = MultiHeadAttention::Gradients();
+            }
+            if (auto* moe = layer->getMixtureOfExperts()) {
+                for (auto* expert : moe->get_experts()) {
+                    expert->param_gradients() = FeedForward::Gradients();
+                }
+                moe->get_router().gradients().weights_grad.initialize_constant(0.0f);
             }
             if (auto* ffn = layer->getFeedForward()) {
                 ffn->param_gradients() = FeedForward::Gradients();
@@ -855,12 +899,14 @@ void Transformer::initialize_weights() {
                 auto& params = ff->parameters();
                 
                 // FF1 (expansion) and FF2 (projection) weights
-                init_weights(params.ff1_weights, config.hidden_size, config.intermediate_size);
-                init_weights(params.ff2_weights, config.intermediate_size, config.hidden_size);
+                init_weights(params.gate_proj_weights, config.hidden_size, config.intermediate_size);
+                init_weights(params.up_proj_weights, config.hidden_size, config.intermediate_size);
+                init_weights(params.down_proj_weights, config.intermediate_size, config.hidden_size);
                 
                 // Initialize FF biases to small positive values for ReLU
-                params.ff1_bias.initialize_constant(0.01f);
-                params.ff2_bias.initialize_constant(0.01f);
+                params.gate_proj_bias.initialize_constant(0.01f);
+                params.up_proj_bias.initialize_constant(0.01f);
+                params.down_proj_bias.initialize_constant(0.01f);
             }
             
             // Initialize layer norm parameters
@@ -2265,6 +2311,32 @@ Matrix Transformer::create_target_distribution(const std::vector<int>& target_to
     }
     
     return distribution;
+}
+
+float Transformer::train_step(const std::vector<int>& inputs, const std::vector<int>& targets, float learning_rate) {
+    // Forward pass
+    Matrix logits = forward(inputs, "", *tokenizer_);
+
+    // Compute loss
+    Matrix target_distribution = create_target_distribution(targets, tokenizer_->vocab_size());
+    float loss = Utils::compute_loss(logits, target_distribution);
+
+    // Backward pass
+    backward(logits, target_distribution, learning_rate);
+    update_parameters(learning_rate);
+
+    return loss;
+}
+
+void Transformer::set_training(bool training) {
+    is_training = training;
+    // Set training mode for all components that need it
+    for (auto& layer : layers) {
+        layer->training = training;
+    }
+    if (lm_head) {
+        lm_head->set_training(training);
+    }
 }
 
 

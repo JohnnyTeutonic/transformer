@@ -136,7 +136,8 @@ void test_model_predictions(Transformer& transformer, std::shared_ptr<TiktokenTo
         
         // Get model prediction
         transformer.set_training(false);  // Set to evaluation mode
-        Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
+        TransformerOutput fwd_output = transformer.forward(Matrix::from_vector(test_tokens), Matrix()); // No targets for inference
+        Matrix logits = fwd_output.logits;
 
         // Show the top predictions
         std::cout << "\nTop Predictions:\n";
@@ -404,22 +405,20 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
 
-                    // Forward pass with context
-                    Matrix logits = transformer.forward(context_tokens, full_context, *tokenizer);
-
-                    // Create target distribution
-                    Matrix target_distribution = Utils::create_batch_target_distribution(
-                        {target_tokens}, *tokenizer, tokenizer->vocab_size(), 1
+                    // Perform a training step
+                    float sample_loss = transformer.train_step(
+                        Matrix::from_vector(context_tokens), 
+                        Matrix::from_vector(target_tokens), 
+                        current_lr, 
+                        config
                     );
-
-                    // Compute loss and backward pass
-                    float sample_loss = Utils::compute_batch_loss(logits, target_distribution, *tokenizer);
                     iteration_loss += sample_loss;
-                    transformer.backward(logits, target_distribution, current_lr);
                 }
 
                 // Average loss over samples in this iteration
-                iteration_loss /= samples_this_iteration;
+                if (samples_this_iteration > 0) {
+                    iteration_loss /= samples_this_iteration;
+                }
                 epoch_loss += iteration_loss;
 
                 // Increment global step
@@ -580,7 +579,8 @@ int main(int argc, char* argv[]) {
         
         // Get model prediction
         transformer.set_training(false);  // Set to evaluation mode
-        Matrix logits = transformer.forward(test_tokens, "", *tokenizer);  // Already includes LM head projection
+        TransformerOutput fwd_output = transformer.forward(Matrix::from_vector(test_tokens), Matrix()); // No targets for inference
+        Matrix logits = fwd_output.logits;
 
         // Show the top predictions
         std::cout << "\nTop Predictions:\n";

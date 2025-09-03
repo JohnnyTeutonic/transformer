@@ -144,6 +144,15 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
             num_kv_heads = attention.value("num_kv_heads", num_kv_heads);
         }
 
+        // Load MoE parameters
+        if (j.contains("moe")) {
+            const auto& moe_json = j["moe"];
+            moe.enabled = moe_json.value("enabled", moe.enabled);
+            moe.num_experts = moe_json.value("num_experts", moe.num_experts);
+            moe.top_k = moe_json.value("top_k", moe.top_k);
+            moe.aux_loss_coefficient = moe_json.value("aux_loss_coefficient", moe.aux_loss_coefficient);
+        }
+
         // Load optimization parameters
         if (j.contains("optimization")) {
             const auto& opt = j["optimization"];

@@ -238,6 +238,15 @@ set(CORE_SOURCES
     src/training/training_state_manager.cpp
     src/training/training_monitor.cpp
     src/phrase_analysis.cpp
+    src/serialization.cpp
+    src/tensor.cpp
+    src/text_analysis.cpp
+    src/quantization.cpp
+    src/router.cpp
+    src/moe.cpp
+    src/optimizer/adam.cpp
+    src/optimizer.cpp
+    src/p2p_network.cpp
 )
 
 # Neural network components
@@ -259,7 +268,6 @@ endif()
 # Training and utilities
 set(UTIL_SOURCES
     src/cache.cpp
-    src/quantization.cpp
     src/optimizer.cpp
 )
 
@@ -442,6 +450,9 @@ if(CUDAToolkit_FOUND)
         src/cuda/gqa_kernels.cu
         src/cuda/beam_search_ops.cu
         src/cuda/tokenizer_kernels.cu
+        src/cuda/swiglu_kernel.cu
+        src/cuda/router_kernel.cu
+        src/cuda/moe_kernel.cu
     )
 
     set_target_properties(cuda_kernels PROPERTIES
@@ -480,9 +491,27 @@ if(CUDAToolkit_FOUND)
 endif()
 
 # Add SOURCES to the library instead
-target_sources(transformer_lib 
-    PRIVATE 
-    ${SOURCES}
+target_sources(transformer_lib PRIVATE
+    src/transformer.cpp
+    src/attention.cpp
+    src/feed_forward.cpp
+    src/layer_norm.cpp
+    src/dropout.cpp
+    src/p2p_network.cpp
+    src/serialization.cpp
+    src/router.cpp
+    src/moe.cpp
+    src/components.cpp
+    src/utils.cpp
+    src/config.cpp
+    src/main.cpp
+    src/multi_head_attention.cpp
+    src/embedding.cpp
+    src/positional_encoding.cpp
+    src/logger.cpp
+    src/tiktoken_tokenizer.cpp
+    src/cuda/matrix_ops.cu
+    src/cuda/swiglu_kernel.cu
 )
 
 find_package(nlohmann_json 3.2.0 REQUIRED)
@@ -524,3 +553,6 @@ if(CUDAToolkit_FOUND)
         LANGUAGE CUDA
     )
 endif()
+
+find_package(OpenSSL REQUIRED)
+target_link_libraries(transformer_lib PRIVATE ${OpenSSL_LIBRARIES})

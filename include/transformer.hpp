@@ -26,6 +26,7 @@
 #include "memory_pool.hpp"
 #include "phrase_types.hpp"
 #include "tiktoken_tokenizer.hpp"
+#include "moe.hpp"
 
 // Forward declarations
 class TransformerLayer;
@@ -73,8 +74,9 @@ class TransformerLayer {
   private:
     std::unique_ptr<MultiHeadAttention> self_attention;  ///< Multi-head self-attention mechanism
     std::unique_ptr<LayerNorm> attention_ln;            ///< Layer normalization for attention output
+    std::unique_ptr<FeedForward> feed_forward; // For non-MoE case
+    std::unique_ptr<MixtureOfExperts> moe_layer; // For MoE case
     std::unique_ptr<LayerNorm> ffn_ln;                 ///< Layer normalization for feed-forward output
-    std::unique_ptr<FeedForward> feed_forward;         ///< Feed-forward neural network
     std::unique_ptr<Dropout> attention_dropout;        ///< Dropout for attention
     std::unique_ptr<Dropout> ffn_dropout;             ///< Dropout for feed-forward
     KVCache kv_cache;                                ///< Cache for key-value pairs in attention
@@ -111,8 +113,8 @@ class TransformerLayer {
         if (self_attention) {
             self_attention->reset_state();
         }
-        if (feed_forward) {
-            feed_forward->reset_state();
+        if (moe_layer) {
+            moe_layer->reset_state();
         }
         if (attention_dropout) {
             attention_dropout->reset_mask();
@@ -133,7 +135,7 @@ class TransformerLayer {
     void save(std::ostream& os) const {
         self_attention->save(os);
         attention_ln->save(os);
-        feed_forward->save(os);
+        moe_layer->save(os);
         ffn_ln->save(os);
     }
 
@@ -149,6 +151,7 @@ class TransformerLayer {
 
     void load(std::istream& is) {
         self_attention = MultiHeadAttention::load(is, config);
+        moe_layer = MixtureOfExperts::load(is, config);
     }
     Matrix backward(const Matrix& grad_output, const Matrix& input,
                     const Matrix& target_distribution = Matrix());
@@ -156,10 +159,10 @@ class TransformerLayer {
     std::vector<std::reference_wrapper<Matrix>> get_weights() {
         std::vector<std::reference_wrapper<Matrix>> weights;
         auto attention_weights = self_attention->get_weights();
-        auto ff_weights = feed_forward->get_weights();
+        auto moe_weights = moe_layer->get_weights();
 
         weights.insert(weights.end(), attention_weights.begin(), attention_weights.end());
-        weights.insert(weights.end(), ff_weights.begin(), ff_weights.end());
+        weights.insert(weights.end(), moe_weights.begin(), moe_weights.end());
 
         return weights;
     }
@@ -174,7 +177,7 @@ class TransformerLayer {
     }
 
     FeedForward* getFeedForward() {
-        return feed_forward.get();
+        return moe_layer.get();
     }
     LayerNorm* getLayerNorm() {
         return attention_ln.get();
@@ -189,8 +192,8 @@ class TransformerLayer {
         if (other.attention_ln) {
             attention_ln = std::make_unique<LayerNorm>(*other.attention_ln);
         }
-        if (other.feed_forward) {
-            feed_forward = std::make_unique<FeedForward>(*other.feed_forward);
+        if (other.moe_layer) {
+            moe_layer = std::make_unique<MixtureOfExperts>(*other.moe_layer);
         }
         if (other.ffn_ln) {
             ffn_ln = std::make_unique<LayerNorm>(*other.ffn_ln);
@@ -208,8 +211,8 @@ class TransformerLayer {
             if (other.attention_ln) {
                 attention_ln = std::make_unique<LayerNorm>(*other.attention_ln);
             }
-            if (other.feed_forward) {
-                feed_forward = std::make_unique<FeedForward>(*other.feed_forward);
+            if (other.moe_layer) {
+                moe_layer = std::make_unique<MixtureOfExperts>(*other.moe_layer);
             }
             if (other.ffn_ln) {
                 ffn_ln = std::make_unique<LayerNorm>(*other.ffn_ln);
@@ -222,8 +225,8 @@ class TransformerLayer {
         if (self_attention) {
             self_attention->update_parameters(learning_rate);
         }
-        if (feed_forward) {
-            feed_forward->update_parameters(learning_rate);
+        if (moe_layer) {
+            moe_layer->update_parameters(learning_rate);
         }
         if (attention_ln) {
             attention_ln->update_parameters(learning_rate);
@@ -238,25 +241,17 @@ class TransformerLayer {
             self_attention->set_tokenizer(tokenizer);
         }
     }
+
+    float getAuxLoss() const;
 };
 
-/**
- * @brief Main Transformer model implementing the standard Transformer architecture.
- * 
- * The Transformer consists of:
- * - Token embedding layer
- * - Positional encoding
- * - Multiple transformer layers
- * - Final layer normalization
- * - Language model head for token prediction
- * 
- * Supports both training and inference modes, with features like:
- * - Key-Value caching for efficient inference
- * - CUDA acceleration
- * - Half-precision (FP16) computation
- * - Gradient checkpointing
- * - Various optimization algorithms
- */
+// Struct to hold the output of the Transformer's forward pass
+struct TransformerOutput {
+    Matrix logits;
+    float aux_loss = 0.0f;
+};
+
+// Main Transformer class
 class Transformer {
 private:
     // Change from reference to value to avoid const issues
@@ -786,6 +781,18 @@ public:
     
     // Add new backward method for batch training
     void backward(std::vector<Matrix>& outputs, const Matrix& target_distribution, float learning_rate);
+
+    // Backward pass
+    void backward(const Matrix& inputs, const Matrix& targets, const Matrix& logits);
+
+    // Update parameters
+    void update_parameters(float learning_rate, const TransformerConfig& config);
+
+    // Full training step
+    float train_step(const Matrix& inputs, const Matrix& targets, float learning_rate, const TransformerConfig& config);
+
+    // Generate text
+    std::vector<int> generate(const std::vector<int>& context, size_t max_new_tokens);
 
     const Matrix& get_hidden_states() const {
         return hidden_states;

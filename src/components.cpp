@@ -236,6 +236,13 @@ void Matrix::apply_softmax() {
     }
 }
 
+void Matrix::apply_swish() {
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < data_.size(); i++) {
+        data_[i] = data_[i] * (1.0f / (1.0f + std::exp(-data_[i])));
+    }
+}
+
 void Matrix::add_bias(const Vector& bias) {
     if (bias.size() != cols_) {
         throw std::invalid_argument("Bias size must match matrix columns");
@@ -262,6 +269,18 @@ void Matrix::fill(float value) {
         throw std::runtime_error("Cannot fill empty matrix");
     }
     std::fill(data_.begin(), data_.end(), value);
+}
+
+Vector Matrix::column_sum() const {
+    Vector result(cols_, 0.0f);
+    for (size_t j = 0; j < cols_; ++j) {
+        float sum = 0.0f;
+        for (size_t i = 0; i < rows_; ++i) {
+            sum += (*this)(i, j);
+        }
+        result[j] = sum;
+    }
+    return result;
 }
 
 Matrix& Matrix::operator+=(const Matrix& other) {

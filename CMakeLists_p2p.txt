@@ -1,0 +1,123 @@
+# P2P Training Network Extension for Transformer C++
+# Add this to your existing CMakeLists.txt or include it
+
+# P2P Network Library
+add_library(p2p_network STATIC
+    src/p2p_network.cpp
+    src/p2p_training_coordinator.cpp
+)
+
+target_include_directories(p2p_network PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(p2p_network PUBLIC
+    transformer_lib
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+# Platform-specific networking libraries
+if(WIN32)
+    target_link_libraries(p2p_network PRIVATE ws2_32)
+else()
+    # Unix-like systems (Linux, macOS)
+    find_package(Threads REQUIRED)
+    target_link_libraries(p2p_network PRIVATE Threads::Threads)
+endif()
+
+# Optional: Add OpenSSL for cryptographic functions
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    target_link_libraries(p2p_network PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(p2p_network PRIVATE HAVE_OPENSSL)
+    message(STATUS "OpenSSL found - enabling cryptographic features")
+else()
+    message(STATUS "OpenSSL not found - using simplified crypto")
+endif()
+
+# P2P Training Examples
+add_executable(p2p_training_example
+    examples/p2p_training_example.cpp
+)
+
+add_executable(p2p_real_world_example
+    examples/p2p_real_world_example.cpp
+)
+
+target_link_libraries(p2p_training_example
+    p2p_network
+    transformer_lib
+    cuda_kernels
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+target_link_libraries(p2p_real_world_example
+    p2p_network
+    transformer_lib
+    cuda_kernels
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+# Set C++ standard
+set_property(TARGET p2p_network PROPERTY CXX_STANDARD 17)
+set_property(TARGET p2p_training_example PROPERTY CXX_STANDARD 17)
+set_property(TARGET p2p_real_world_example PROPERTY CXX_STANDARD 17)
+
+# Compiler-specific optimizations
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(p2p_network PRIVATE -O3 -march=native -mtune=native)
+    target_compile_options(p2p_training_example PRIVATE -O3 -march=native -mtune=native)
+    target_compile_options(p2p_real_world_example PRIVATE -O3 -march=native -mtune=native)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(p2p_network PRIVATE /O2 /arch:AVX2)
+    target_compile_options(p2p_training_example PRIVATE /O2 /arch:AVX2)
+    target_compile_options(p2p_real_world_example PRIVATE /O2 /arch:AVX2)
+endif()
+
+# Add custom target for easy building
+add_custom_target(p2p_all
+    DEPENDS p2p_network p2p_training_example p2p_real_world_example
+    COMMENT "Building P2P training network components"
+)
+
+# Installation rules
+install(TARGETS p2p_network p2p_training_example p2p_real_world_example
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+
+install(FILES
+    include/p2p_network.hpp
+    DESTINATION include
+)
+
+# Print build information
+message(STATUS "P2P Training Network Configuration:")
+message(STATUS "  - P2P Network Library: p2p_network")
+message(STATUS "  - Interactive Example: p2p_training_example")
+message(STATUS "  - Real-World Example: p2p_real_world_example")
+message(STATUS "  - Threading support: ${CMAKE_THREAD_LIBS_INIT}")
+if(OpenSSL_FOUND)
+    message(STATUS "  - Cryptographic support: OpenSSL ${OPENSSL_VERSION}")
+else()
+    message(STATUS "  - Cryptographic support: Simplified (no OpenSSL)")
+endif()
+
+# Usage instructions
+message(STATUS "")
+message(STATUS "To build P2P components:")
+message(STATUS "  make p2p_all")
+message(STATUS "")
+message(STATUS "Interactive P2P Demo:")
+message(STATUS "  # Start bootstrap node:")
+message(STATUS "  ./p2p_training_example --port 8888")
+message(STATUS "  # Start worker nodes:")
+message(STATUS "  ./p2p_training_example --port 8889 --bootstrap 127.0.0.1:8888")
+message(STATUS "")
+message(STATUS "Production P2P Training:")
+message(STATUS "  # Bootstrap with real data:")
+message(STATUS "  ./p2p_real_world_example --mode bootstrap --port 8888 --data-path ./data/")
+message(STATUS "  # Worker nodes:")
+message(STATUS "  ./p2p_real_world_example --mode worker --bootstrap 127.0.0.1:8888 --data-path ./data/")
+message(STATUS "")

@@ -395,3 +395,63 @@ std::unique_ptr<DistributedTransformer> create_distributed_transformer(
     
     return std::make_unique<DistributedTransformer>(config, tokenizer, argc, argv);
 }
+
+std::map<std::string, Matrix> DistributedTransformer::get_all_parameters() {
+    std::map<std::string, Matrix> all_params;
+    
+    // 1. Token Embeddings
+    all_params["token_embeddings"] = base_transformer_->get_token_embeddings()->get_weights();
+
+    // 2. Transformer Layers
+    for (size_t i = 0; i < base_transformer_->get_layers().size(); ++i) {
+        auto& layer = base_transformer_->get_layers()[i];
+        std::string prefix = "layer_" + std::to_string(i);
+
+        // Self-Attention
+        auto& attn_params = layer->getAttention()->parameters();
+        all_params[prefix + "_attn_query"] = attn_params.query_weights;
+        all_params[prefix + "_attn_key"] = attn_params.key_weights;
+        all_params[prefix + "_attn_value"] = attn_params.value_weights;
+        all_params[prefix + "_attn_output"] = attn_params.output_weights;
+
+        // FFN or MoE
+        if (layer->getFeedForward()) {
+            auto& ffn_params = layer->getFeedForward()->parameters();
+            all_params[prefix + "_ffn_gate"] = ffn_params.gate_proj_weights;
+            all_params[prefix + "_ffn_up"] = ffn_params.up_proj_weights;
+            all_params[prefix + "_ffn_down"] = ffn_params.down_proj_weights;
+        } else if (layer->getMixtureOfExperts()) {
+            // ... (Add MoE parameter collection) ...
+        }
+    }
+    
+    return all_params;
+}
+
+void DistributedTransformer::set_all_parameters(const std::map<std::string, Matrix>& all_parameters) {
+    // 1. Token Embeddings
+    base_transformer_->get_token_embeddings()->get_weights() = all_parameters.at("token_embeddings");
+
+    // 2. Transformer Layers
+    for (size_t i = 0; i < base_transformer_->get_layers().size(); ++i) {
+        auto& layer = base_transformer_->get_layers()[i];
+        std::string prefix = "layer_" + std::to_string(i);
+
+        // Self-Attention
+        auto& attn_params = layer->getAttention()->parameters();
+        attn_params.query_weights = all_parameters.at(prefix + "_attn_query");
+        attn_params.key_weights = all_parameters.at(prefix + "_attn_key");
+        attn_params.value_weights = all_parameters.at(prefix + "_attn_value");
+        attn_params.output_weights = all_parameters.at(prefix + "_attn_output");
+
+        // FFN or MoE
+        if (layer->getFeedForward()) {
+            auto& ffn_params = layer->getFeedForward()->parameters();
+            ffn_params.gate_proj_weights = all_parameters.at(prefix + "_ffn_gate");
+            ffn_params.up_proj_weights = all_parameters.at(prefix + "_ffn_up");
+            ffn_params.down_proj_weights = all_parameters.at(prefix + "_ffn_down");
+        } else if (layer->getMixtureOfExperts()) {
+            // ... (Add MoE parameter setting) ...
+        }
+    }
+}

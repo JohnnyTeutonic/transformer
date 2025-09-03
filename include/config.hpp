@@ -127,40 +127,13 @@ struct TransformerConfig {
     float beta2 = 0.999f;
     float epsilon = 1e-8f;
 
-    struct TrainingConfig {
-        // Number of samples to process in each training iteration
-        // Note: This is not true batch processing, but rather controls
-        // how many samples we process sequentially before updating parameters
-        size_t samples_per_iteration = 16;  // renamed from batch_size
-        size_t num_epochs = 3;
-        float dropout_rate = 0.1f;
-        float weight_decay = 0.01f;
-        
-        struct CrossValidationConfig {
-            size_t num_folds = 2;
-            size_t validation_frequency = 1;
-            float early_stopping_threshold = 1.5f;
-            size_t early_stopping_patience = 2;
-            size_t num_epochs = 10;
-        } cross_validation;
-        
-        // Learning rate parameters
-        struct LearningRateConfig {
-            float initial_lr = 1e-4f;
-            float peak_lr = 2e-3f;
-            size_t warmup_steps = 15;
-            float decay_factor = 0.98f;
-            size_t decay_steps = 250;
-            float min_lr = 1e-4f;
-        } learning_rate;
-
-        // Hyperparameter tuning
-        struct TuningConfig {
-            size_t num_trials = 10;
-            size_t evaluation_steps = 50;
-            bool enabled = true;
-        } tuning;
-    } training;
+    struct MoEConfig {
+        bool enabled = false;
+        size_t num_experts = 8;
+        size_t top_k = 2;
+        float aux_loss_coefficient = 0.01f;
+    };
+    MoEConfig moe;
 
     // Add method to update vocab size
     void update_vocab_size(size_t new_vocab_size) {

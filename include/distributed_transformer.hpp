@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <map>
 
 #ifdef CUDA_AVAILABLE
 #include <cuda_runtime.h>
@@ -186,6 +187,10 @@ public:
     bool is_distributed_ready() const {
         return mpi_initialized_ && world_size_ > 1;
     }
+
+    // Methods for state synchronization
+    std::map<std::string, Matrix> get_all_parameters();
+    void set_all_parameters(const std::map<std::string, Matrix>& all_parameters);
 
 private:
     /**
