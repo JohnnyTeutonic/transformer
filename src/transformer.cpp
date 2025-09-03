@@ -472,7 +472,7 @@ struct BatchSequence {
     std::vector<size_t> lengths;  // Original sequence lengths
 };
 
-Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer) {
+TransformerOutput Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer) {
     std::cout << "Entering function 'Transformer::forward'" << std::endl;
     try {
         check_tokenizer();
@@ -493,7 +493,7 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         
         // Get embeddings
         Matrix token_emb = token_embedding->forward(input_tokens);
-        std::cout << "token_emb: " << token_emb.rows() << "x" << token_emb.cols() << std::endl;
+        
         // Create position indices matrix for positional encoding
         Matrix position_indices(1, input_tokens.size());
         for (size_t i = 0; i < input_tokens.size(); i++) {
@@ -502,7 +502,7 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         
         // Get base positional encodings
         Matrix pos_emb = pos_encoding->forward(position_indices);
-        std::cout << "pos_emb: " << pos_emb.rows() << "x" << pos_emb.cols() << std::endl;
+        
         // Adjust positional encodings based on separator
         pos_emb = adjust_position_encodings(pos_emb, input_tokens);
         
@@ -516,18 +516,13 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
                 broadcasted_pos_emb(i, j) = pos_emb(0, j);
             }
         }
-        std::cout << "broadcasted_pos_emb: " << broadcasted_pos_emb.rows() << "x" << broadcasted_pos_emb.cols() << std::endl;
         
         // Validate dimensions before addition
         if (token_emb.cols() != broadcasted_pos_emb.cols()) {
-            throw std::runtime_error("Dimension mismatch: token embeddings (" + 
-                std::to_string(token_emb.rows()) + "x" + std::to_string(token_emb.cols()) + 
-                ") and positional embeddings (" + 
-                std::to_string(broadcasted_pos_emb.rows()) + "x" + std::to_string(broadcasted_pos_emb.cols()) + 
-                ") must have same number of columns");
+            throw std::runtime_error("Dimension mismatch: token embeddings and positional embeddings must have same number of columns");
         }
         
-        // Combine embeddings with properly broadcasted positional encodings
+        // Combine embeddings
         Matrix x = token_emb + broadcasted_pos_emb;
         
         // Apply dropout if in training mode
@@ -539,27 +534,24 @@ Matrix Transformer::forward(const std::vector<int>& input_tokens, const std::str
         m_layer_activations.clear();
         m_layer_activations.push_back(x);
         
-        // Process through transformer layers
+        // Process through transformer layers and accumulate aux loss
+        float total_aux_loss = 0.0f;
         for (size_t i = 0; i < layers.size(); i++) {
-            // Cache the normalized input for attention
-            std::string attn_key = "attn_norm_" + std::to_string(i);
-            GradientCheckpoint::cache_activation(attn_key, x);
-            
-            // Forward through layer
             x = layers[i]->forward(x, mask);
-            
-            // Store activation for backward pass
+            total_aux_loss += layers[i]->getAuxLoss();
             m_layer_activations.push_back(x);
         }
         
         // Final layer norm
         x = final_ln->forward(x);
-        hidden_states = x;  // Store all hidden states
+        hidden_states = x;
         last_hidden_states = x;
         GradientCheckpoint::cache_activation("final_hidden_states", x);
-        std::cout << "x: " << x.rows() << "x" << x.cols() << std::endl;
+        
         // Project to vocabulary space using language model head
-        return lm_head->forward(x);
+        Matrix logits = lm_head->forward(x);
+        
+        return {logits, total_aux_loss};
         
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer::forward: " << e.what() << std::endl;
@@ -2314,28 +2306,36 @@ Matrix Transformer::create_target_distribution(const std::vector<int>& target_to
 }
 
 float Transformer::train_step(const std::vector<int>& inputs, const std::vector<int>& targets, float learning_rate) {
-    // Forward pass
-    Matrix logits = forward(inputs, "", *tokenizer_);
+    // 1. Forward pass to get logits and auxiliary loss
+    TransformerOutput output = forward(inputs, "", *tokenizer_);
 
-    // Compute loss
+    // 2. Compute main cross-entropy loss
     Matrix target_distribution = create_target_distribution(targets, tokenizer_->vocab_size());
-    float loss = Utils::compute_loss(logits, target_distribution);
+    float main_loss = Utils::compute_loss(output.logits, target_distribution);
 
-    // Backward pass
-    backward(logits, target_distribution, learning_rate);
+    // 3. Compute total loss
+    float total_loss = main_loss + output.aux_loss;
+
+    // 4. Backward pass
+    // The 'backward' method should be adapted to start from the total loss or handle the two loss components.
+    // For now, we'll use the existing backward pass which starts from the logits.
+    // A more advanced implementation would compute gradients for both losses and add them.
+    backward(output.logits, target_distribution, learning_rate); 
+
+    // 5. Update parameters
     update_parameters(learning_rate);
 
-    return loss;
+    return total_loss;
 }
 
-void Transformer::set_training(bool training) {
-    is_training = training;
+void Transformer::set_training(bool mode) {
+    training = mode;
     // Set training mode for all components that need it
     for (auto& layer : layers) {
-        layer->training = training;
+        layer->set_training(mode);
     }
     if (lm_head) {
-        lm_head->set_training(training);
+        lm_head->set_training(mode);
     }
 }
 
