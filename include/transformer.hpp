@@ -126,6 +126,21 @@ class TransformerLayer {
 
     void set_training(bool mode) {
         training = mode;
+        if (self_attention) {
+            // Attention doesn't have a specific training mode flag, but dropout does
+        }
+        if (moe_layer) {
+            moe_layer->set_training(mode);
+        }
+        if (feed_forward) {
+            // FeedForward itself doesn't have a training mode, but its dropout does
+        }
+        if (attention_dropout) {
+            attention_dropout->set_training(mode);
+        }
+        if (ffn_dropout) {
+            ffn_dropout->set_training(mode);
+        }
     }
 
     /**
@@ -696,7 +711,7 @@ public:
      * @param use_cache Whether to use key-value caching for inference
      * @return Output logits for each position
      */
-    Matrix forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer);
+    TransformerOutput forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer);
 
     /**
      * @brief Performs backward pass and updates model parameters
@@ -789,7 +804,7 @@ public:
     void update_parameters(float learning_rate, const TransformerConfig& config);
 
     // Full training step
-    float train_step(const Matrix& inputs, const Matrix& targets, float learning_rate, const TransformerConfig& config);
+    float train_step(const std::vector<int>& inputs, const std::vector<int>& targets, float learning_rate);
 
     // Generate text
     std::vector<int> generate(const std::vector<int>& context, size_t max_new_tokens);

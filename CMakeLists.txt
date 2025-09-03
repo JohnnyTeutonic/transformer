@@ -30,6 +30,9 @@ include(FetchContent)
 # Find required packages
 find_package(CUDAToolkit)
 
+# Find OpenSSL for P2P networking
+find_package(OpenSSL REQUIRED)
+
 # Find or fetch MPI for distributed training
 find_package(MPI QUIET)
 
@@ -247,6 +250,7 @@ set(CORE_SOURCES
     src/optimizer/adam.cpp
     src/optimizer.cpp
     src/p2p_network.cpp
+    src/p2p_training_coordinator.cpp
 )
 
 # Neural network components
@@ -340,6 +344,7 @@ target_link_libraries(transformer
     PRIVATE
     transformer_lib
     nlohmann_json::nlohmann_json
+    ${OpenSSL_LIBRARIES}
 )
 
 # Create distributed training example if MPI is available
@@ -490,30 +495,6 @@ if(CUDAToolkit_FOUND)
     )
 endif()
 
-# Add SOURCES to the library instead
-target_sources(transformer_lib PRIVATE
-    src/transformer.cpp
-    src/attention.cpp
-    src/feed_forward.cpp
-    src/layer_norm.cpp
-    src/dropout.cpp
-    src/p2p_network.cpp
-    src/serialization.cpp
-    src/router.cpp
-    src/moe.cpp
-    src/components.cpp
-    src/utils.cpp
-    src/config.cpp
-    src/main.cpp
-    src/multi_head_attention.cpp
-    src/embedding.cpp
-    src/positional_encoding.cpp
-    src/logger.cpp
-    src/tiktoken_tokenizer.cpp
-    src/cuda/matrix_ops.cu
-    src/cuda/swiglu_kernel.cu
-)
-
 find_package(nlohmann_json 3.2.0 REQUIRED)
 target_link_libraries(transformer_lib PRIVATE nlohmann_json::nlohmann_json)
 
@@ -553,6 +534,3 @@ if(CUDAToolkit_FOUND)
         LANGUAGE CUDA
     )
 endif()
-
-find_package(OpenSSL REQUIRED)
-target_link_libraries(transformer_lib PRIVATE ${OpenSSL_LIBRARIES})
