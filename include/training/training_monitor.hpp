@@ -2,7 +2,9 @@
 #include "loss_tracker.hpp"
 #include "gradient_manager.hpp"
 #include "training_metrics.hpp"
+#include "loss_visualizer.hpp"
 #include <string>
+#include <memory>
 
 class TrainingMonitor {
 public:
@@ -10,12 +12,15 @@ public:
     static constexpr size_t MAX_NAN_OCCURRENCES = 5;
     static constexpr size_t MAX_EPOCHS = 1000;
 
+    TrainingMonitor() : visualizer(std::make_unique<LossVisualizer>("loss.log")) {}
+
     void log_metrics(const TrainingMetrics& metrics);
     bool should_stop_training();
 
 private:
     LossTracker loss_tracker;
     GradientManager gradient_manager;
+    std::unique_ptr<LossVisualizer> visualizer;
     size_t nan_counter = 0;
     size_t current_epoch = 0;
 

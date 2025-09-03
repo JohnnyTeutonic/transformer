@@ -12,10 +12,10 @@ struct BeamSearchConfig {
     size_t beam_size = 4;
     size_t beams_per_group = 4;
     size_t num_groups = 3;
-    float length_penalty = 1.0f;
-    float temperature = 1.0f;
-    float top_p = 0.9f;
-    size_t max_length = 128;
+    float length_penalty = 1.5f;
+    float temperature = 2.5f;
+    float top_p = 0.98f;
+    size_t max_length = 4;
     float initial_temperature = 3.0f;
     float initial_noise_scale = 0.8f;
     float diversity_strength = 4.0f;
@@ -25,23 +25,29 @@ struct BeamSearchConfig {
 
 struct TokenizerConfig {
     bool use_subword = true;
-    size_t vocab_size = 32000;
-    std::string model_path = "model/tokenizer.model";
-    std::vector<std::string> special_tokens = {"<pad>", "", " ", "</s>", "<mask>"};
+    std::string model_path;
+    std::vector<std::string> special_tokens;
 };
 
 struct TokenPredictionConfig {
     float temperature = 1.0f;
-    size_t top_k = 5;
+    int top_k = 5;
     float top_p = 0.9f;
     float frequency_penalty = 0.1f;
     float presence_penalty = 0.0f;
     float min_token_prob = 0.05f;
-    struct {
+    
+    struct CategoryBonus {
         float verb = 0.2f;
         float adjective = 0.2f;
         float noun = 0.3f;
     } category_bonus;
+};
+
+struct PathConfig {
+    std::string save_directory;
+    std::string model_name;
+    size_t checkpoint_frequency;
 };
 
 /**
@@ -57,76 +63,98 @@ struct TokenPredictionConfig {
  * - Generation and beam search settings
  */
 struct TransformerConfig {
-    // Architecture parameters
-    size_t vocab_size;
-    size_t hidden_size;
-    size_t num_heads;
+    // Model parameters
     size_t num_layers;
-    size_t head_dim;
+    size_t num_heads;
+    size_t hidden_size;
     size_t intermediate_size;
+    size_t head_dim;
+    size_t max_seq_length;
+    size_t vocab_size = 0;  // Initialize to 0 to detect if not properly set
+
+    // Training parameters
     size_t batch_size;
     size_t num_epochs;
-    size_t max_seq_length = 2048;
-    
-    // Learning rate parameters
-    float initial_lr = 1e-4f;
-    float peak_lr = 1e-3f;
-    size_t warmup_steps = 100;
-    float decay_factor = 0.98f;
-    
-    // Training parameters
+    float initial_lr;
     float dropout_rate;
     float weight_decay;
-    size_t early_stopping_patience = 3;
-    float early_stopping_threshold = 1.5f;
-    float gradient_clip_threshold = 5.0f;
-    float layer_norm_epsilon = 1e-5f;
     
-    // Memory and optimization
+    // Early stopping parameters
+    size_t early_stopping_patience;
+    float early_stopping_threshold;
+    
+    // Cross validation parameters
+    size_t num_folds = 5;
+    
+    // Learning rate parameters
+    float peak_lr;
+    size_t warmup_steps;
+    float decay_factor;
+    
+    // Optimization parameters
+    float gradient_clip_threshold;
+    float layer_norm_epsilon;
+    size_t gradient_accumulation_steps;
+    bool use_gradient_checkpointing;
+    bool use_fp16;
     size_t memory_pool_size;
-    size_t gradient_accumulation_steps = 4;
-    bool use_gradient_checkpointing = false;
-    bool use_fp16 = false;
-    bool use_momentum = false;
-    bool use_adam = true;
-    
-    // Attention settings
-    bool use_flash_attention = false;
-    bool use_rope = true;
-    bool use_sliding_window = false;
-    size_t window_size = 512;
-    bool use_gqa = false;
-    size_t num_kv_heads;
-    
-    // Paths and checkpointing
-    struct {
-        std::string save_directory = "checkpoints";
-        std::string model_name = "transformer";
-        size_t checkpoint_frequency = 1000;
-    } paths;
-    
-    // Component configurations
+
+    // Attention parameters
+    bool use_flash_attention;
+    bool use_rope;
+    bool use_sliding_window;
+    size_t window_size;
+    bool use_gqa;
+    size_t num_kv_heads;  // Add number of key-value heads for GQA
+
+    // Paths
+    PathConfig paths;
+
+    // Component configs
     TokenizerConfig tokenizer;
     BeamSearchConfig beam_search;
     TokenPredictionConfig token_prediction;
-    
+
     // Checkpoint loading
     bool load_from_checkpoint = false;
-    std::string checkpoint_to_load = "";
+    std::string checkpoint_to_load;
+
+    // Optimizer settings
+    bool use_momentum = false;
+    bool use_adam = false;
+    float momentum = 0.9f;
+    float beta1 = 0.9f;
+    float beta2 = 0.999f;
+    float epsilon = 1e-8f;
+
+    struct MoEConfig {
+        bool enabled = false;
+        size_t num_experts = 8;
+        size_t top_k = 2;
+        float aux_loss_coefficient = 0.01f;
+    };
+    MoEConfig moe;
+
+    // Add method to update vocab size
+    void update_vocab_size(size_t new_vocab_size) {
+        if (new_vocab_size == 0) {
+            throw std::runtime_error("Cannot set vocabulary size to 0");
+        }
+        vocab_size = new_vocab_size;
+    }
 
     /**
      * @brief Constructs a transformer configuration with default values.
-     * @param vocab_size Size of the vocabulary (default: 32000)
      * @param max_seq_length Maximum sequence length (default: 512)
      * @param hidden_size Dimension of hidden states (default: 768)
      * @param num_layers Number of transformer layers (default: 12)
      * @param num_heads Number of attention heads (default: 12)
-     * @param batch_size Training batch size (default: 32)
+     * @param samples_per_iteration Number of samples to process per iteration (default: 32)
      * @param num_epochs Number of training epochs (default: 10)
      */
-    TransformerConfig(size_t vocab_size = 32000, size_t max_seq_length = 512,
-                      size_t hidden_size = 768, size_t num_layers = 12, size_t num_heads = 12,
-                      size_t batch_size = 32, size_t num_epochs = 10);
+    TransformerConfig(size_t max_seq_length = 512,
+                     size_t hidden_size = 768, size_t num_layers = 12, size_t num_heads = 12,
+                     size_t samples_per_iteration = 32, size_t num_epochs = 10);
 
     /**
      * @brief Compares two configurations for inequality.
@@ -138,7 +166,7 @@ struct TransformerConfig {
     /**
      * @brief Loads configuration from a JSON file.
      */
-    void load_from_json(const std::string& config_path);
+    void load_from_json(const std::string& path);
 };
 
 // JSON serialization declarations

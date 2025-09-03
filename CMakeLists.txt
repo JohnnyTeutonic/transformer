@@ -30,6 +30,132 @@ include(FetchContent)
 # Find required packages
 find_package(CUDAToolkit)
 
+# Find or fetch MPI for distributed training
+find_package(MPI QUIET)
+
+if(NOT MPI_FOUND)
+    message(STATUS "MPI not found locally - creating minimal MPI stub for single-node training")
+    
+    # Create minimal MPI stub for development/testing
+    set(MPI_STUB_DIR ${CMAKE_BINARY_DIR}/mpi_stub)
+    file(MAKE_DIRECTORY ${MPI_STUB_DIR}/include)
+    
+    # Create minimal mpi.h stub
+    file(WRITE ${MPI_STUB_DIR}/include/mpi.h "
+#pragma once
+#include <cstddef>
+#include <cstring>
+
+// MPI Constants
+#define MPI_COMM_WORLD 0
+#define MPI_SUCCESS 0
+#define MPI_THREAD_MULTIPLE 3
+#define MPI_FLOAT 1
+#define MPI_INT 2
+#define MPI_UNSIGNED_LONG 3
+#define MPI_BYTE 4
+#define MPI_SUM 1
+
+// MPI Types
+typedef int MPI_Comm;
+typedef int MPI_Datatype;
+typedef int MPI_Op;
+
+// MPI Functions (single-node stubs)
+inline int MPI_Init(int* argc, char*** argv) { return MPI_SUCCESS; }
+inline int MPI_Init_thread(int* argc, char*** argv, int required, int* provided) { 
+    if (provided) *provided = MPI_THREAD_MULTIPLE; 
+    return MPI_SUCCESS; 
+}
+inline int MPI_Finalize() { return MPI_SUCCESS; }
+inline int MPI_Initialized(int* flag) { *flag = 1; return MPI_SUCCESS; }
+inline int MPI_Finalized(int* flag) { *flag = 0; return MPI_SUCCESS; }
+inline int MPI_Comm_rank(MPI_Comm comm, int* rank) { *rank = 0; return MPI_SUCCESS; }
+inline int MPI_Comm_size(MPI_Comm comm, int* size) { *size = 1; return MPI_SUCCESS; }
+inline int MPI_Barrier(MPI_Comm comm) { return MPI_SUCCESS; }
+inline int MPI_Bcast(void* buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm) { return MPI_SUCCESS; }
+inline int MPI_Allreduce(const void* sendbuf, void* recvbuf, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm) {
+    // Single rank: just copy data
+    if (sendbuf != recvbuf) {
+        size_t bytes = count * sizeof(float); // Assume float for simplicity
+        memcpy(recvbuf, sendbuf, bytes);
+    }
+    return MPI_SUCCESS;
+}
+")
+    
+    # Set MPI variables for our stub
+    set(MPI_CXX_FOUND TRUE)
+    set(MPI_CXX_INCLUDE_DIRS ${MPI_STUB_DIR}/include)
+    set(MPI_CXX_LIBRARIES "")  # No libraries needed for stub
+    
+    message(STATUS "MPI stub created for single-node development")
+    message(WARNING "Using MPI stub - install real MPI for multi-node distributed training")
+endif()
+
+if(MPI_FOUND OR MPI_CXX_FOUND)
+    message(STATUS "MPI available - enabling distributed training support")
+    add_definitions(-DMPI_AVAILABLE)
+    
+    # Find or fetch NCCL for GPU communication (if CUDA available)
+    if(CUDAToolkit_FOUND)
+        find_path(NCCL_INCLUDE_DIR nccl.h HINTS ${CUDA_TOOLKIT_ROOT_DIR}/include)
+        find_library(NCCL_LIBRARY nccl HINTS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib)
+        
+        if(NOT NCCL_INCLUDE_DIR OR NOT NCCL_LIBRARY)
+            message(STATUS "NCCL not found locally - creating NCCL stub for development")
+            
+            # Create NCCL stub directory
+            set(NCCL_STUB_DIR ${CMAKE_BINARY_DIR}/nccl_stub)
+            file(MAKE_DIRECTORY ${NCCL_STUB_DIR}/include)
+            
+            # Create minimal nccl.h stub
+            file(WRITE ${NCCL_STUB_DIR}/include/nccl.h "
+#pragma once
+#include <cuda_runtime.h>
+
+// NCCL Types
+typedef struct ncclComm* ncclComm_t;
+typedef enum { ncclSuccess = 0 } ncclResult_t;
+typedef enum { ncclSum = 0 } ncclRedOp_t;
+typedef enum { ncclFloat = 0 } ncclDataType_t;
+typedef struct { char internal[128]; } ncclUniqueId;
+
+// NCCL Functions (stubs that fall back to CUDA memcpy)
+inline ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) { return ncclSuccess; }
+inline ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) { 
+    *comm = (ncclComm_t)1; // Dummy handle
+    return ncclSuccess; 
+}
+inline ncclResult_t ncclCommDestroy(ncclComm_t comm) { return ncclSuccess; }
+inline ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, 
+                                 ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
+    // Single GPU: just copy data
+    if (sendbuff != recvbuff) {
+        cudaMemcpyAsync(recvbuff, sendbuff, count * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    }
+    return ncclSuccess;
+}
+inline const char* ncclGetErrorString(ncclResult_t result) { return \"ncclSuccess\"; }
+")
+            
+            # Set NCCL variables for stub
+            set(NCCL_INCLUDE_DIR ${NCCL_STUB_DIR}/include)
+            set(NCCL_LIBRARY "")  # No library needed for stub
+            
+            message(STATUS "NCCL stub created for single-GPU development")
+            message(WARNING "Using NCCL stub - install real NCCL for multi-GPU distributed training")
+        endif()
+        
+        if(NCCL_INCLUDE_DIR)
+            message(STATUS "NCCL available - enabling GPU-to-GPU communication")
+            add_definitions(-DNCCL_AVAILABLE)
+        endif()
+    endif()
+else()
+    message(STATUS "MPI not available - building without distributed training support")
+endif()
+
 # Set CUDA availability flag
 if(CUDAToolkit_FOUND)
     message(STATUS "CUDA found - enabling CUDA support")
@@ -98,13 +224,13 @@ set(CORE_SOURCES
     src/gqa.cpp
     src/beam_search.cpp
     src/config.cpp
-    src/tokenizer.cpp
     src/tiktoken_tokenizer.cpp
     src/matrix.cpp
     src/data_augmentation.cpp
     src/lm_head.cpp
     src/hyperparameter_tuner.cpp
     src/count_vocabulary.cpp
+    src/scope_logger.cpp
     # Add training components
     src/training/loss_tracker.cpp
     src/training/gradient_manager.cpp
@@ -112,6 +238,15 @@ set(CORE_SOURCES
     src/training/training_state_manager.cpp
     src/training/training_monitor.cpp
     src/phrase_analysis.cpp
+    src/serialization.cpp
+    src/tensor.cpp
+    src/text_analysis.cpp
+    src/quantization.cpp
+    src/router.cpp
+    src/moe.cpp
+    src/optimizer/adam.cpp
+    src/optimizer.cpp
+    src/p2p_network.cpp
 )
 
 # Neural network components
@@ -123,10 +258,16 @@ set(NN_SOURCES
     src/embeddings.cpp
 )
 
+# Distributed training components (conditional)
+if(MPI_FOUND)
+    set(DISTRIBUTED_SOURCES
+        src/distributed_transformer.cpp
+    )
+endif()
+
 # Training and utilities
 set(UTIL_SOURCES
     src/cache.cpp
-    src/quantization.cpp
     src/optimizer.cpp
 )
 
@@ -152,6 +293,12 @@ set(HEADERS
     include/tensor.hpp
 )
 
+# Add the debug header to the includes
+set(HEADERS
+    ${HEADERS}
+    include/debug.hpp
+)
+
 # Add CUDA compilation flags
 if(CUDAToolkit_FOUND)
     set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_60)
@@ -165,6 +312,7 @@ add_library(transformer_lib
     ${UTIL_SOURCES}
     ${LM_SOURCES}
     ${OPTIMIZER_SOURCES}
+    ${DISTRIBUTED_SOURCES}
     ${SOURCES}
 )
 
@@ -193,6 +341,26 @@ target_link_libraries(transformer
     transformer_lib
     nlohmann_json::nlohmann_json
 )
+
+# Create distributed training example if MPI is available
+if(MPI_FOUND OR MPI_CXX_FOUND)
+    add_executable(distributed_training_example examples/distributed_training_example.cpp)
+    target_link_libraries(distributed_training_example
+        PRIVATE
+        transformer_lib
+        nlohmann_json::nlohmann_json
+    )
+    
+    # Set properties for MPI executable (only if system MPI)
+    if(MPI_FOUND)
+        set_target_properties(distributed_training_example PROPERTIES
+            COMPILE_FLAGS "${MPI_COMPILE_FLAGS}"
+            LINK_FLAGS "${MPI_LINK_FLAGS}"
+        )
+    endif()
+    
+    message(STATUS "Distributed training example will be built")
+endif()
 
 if(CUDAToolkit_FOUND)
     target_link_libraries(transformer_lib
@@ -248,6 +416,25 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(transformer_lib PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
+# Link MPI if available
+if(MPI_FOUND)
+    # System MPI
+    target_link_libraries(transformer_lib PUBLIC MPI::MPI_CXX)
+    target_include_directories(transformer_lib PUBLIC ${MPI_INCLUDE_PATH})
+elseif(MPI_CXX_FOUND)
+    # Fetched MPI
+    target_include_directories(transformer_lib PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+    target_link_libraries(transformer_lib PUBLIC ${MPI_CXX_LIBRARIES})
+endif()
+
+# Link NCCL if available
+if(NCCL_INCLUDE_DIR)
+    target_include_directories(transformer_lib PUBLIC ${NCCL_INCLUDE_DIR})
+    if(NCCL_LIBRARY)
+        target_link_libraries(transformer_lib PUBLIC ${NCCL_LIBRARY})
+    endif()
+endif()
+
 # Add CUDA kernels library only if CUDA is found
 if(CUDAToolkit_FOUND)
     add_library(cuda_kernels STATIC
@@ -263,6 +450,9 @@ if(CUDAToolkit_FOUND)
         src/cuda/gqa_kernels.cu
         src/cuda/beam_search_ops.cu
         src/cuda/tokenizer_kernels.cu
+        src/cuda/swiglu_kernel.cu
+        src/cuda/router_kernel.cu
+        src/cuda/moe_kernel.cu
     )
 
     set_target_properties(cuda_kernels PROPERTIES
@@ -277,6 +467,12 @@ if(CUDAToolkit_FOUND)
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/third_party
     )
+    
+    # Add nlohmann_json include directory for CUDA kernels
+    target_include_directories(cuda_kernels
+        PRIVATE
+        $<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>
+    )
 
     # Link CUDA libraries to cuda_kernels
     target_link_libraries(cuda_kernels
@@ -284,6 +480,7 @@ if(CUDAToolkit_FOUND)
         CUDA::cudart
         CUDA::cublas
         CUDA::curand
+        nlohmann_json::nlohmann_json
     )
 
     # Link cuda_kernels to transformer_lib
@@ -294,9 +491,27 @@ if(CUDAToolkit_FOUND)
 endif()
 
 # Add SOURCES to the library instead
-target_sources(transformer_lib 
-    PRIVATE 
-    ${SOURCES}
+target_sources(transformer_lib PRIVATE
+    src/transformer.cpp
+    src/attention.cpp
+    src/feed_forward.cpp
+    src/layer_norm.cpp
+    src/dropout.cpp
+    src/p2p_network.cpp
+    src/serialization.cpp
+    src/router.cpp
+    src/moe.cpp
+    src/components.cpp
+    src/utils.cpp
+    src/config.cpp
+    src/main.cpp
+    src/multi_head_attention.cpp
+    src/embedding.cpp
+    src/positional_encoding.cpp
+    src/logger.cpp
+    src/tiktoken_tokenizer.cpp
+    src/cuda/matrix_ops.cu
+    src/cuda/swiglu_kernel.cu
 )
 
 find_package(nlohmann_json 3.2.0 REQUIRED)
@@ -338,3 +553,6 @@ if(CUDAToolkit_FOUND)
         LANGUAGE CUDA
     )
 endif()
+
+find_package(OpenSSL REQUIRED)
+target_link_libraries(transformer_lib PRIVATE ${OpenSSL_LIBRARIES})

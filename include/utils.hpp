@@ -1,7 +1,8 @@
 #pragma once
+#include "tiktoken_tokenizer.hpp"
 #include "matrix.hpp"
-#include "tokenizer.hpp"
 #include "transformer.hpp"
+#include "phrase_types.hpp"
 #include <string>
 #include <utility>
 #include <vector>
@@ -10,12 +11,81 @@
 #include <random>
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <unordered_map>
 
 // Token category structure
 struct TokenCategories {
     std::unordered_set<std::string> verb_tokens;
     std::unordered_set<std::string> adjective_tokens;
     std::unordered_set<std::string> noun_tokens;
+};
+
+struct TrainingExample {
+    std::string input;
+    std::string output;
+    PhraseType type;
+
+    // Add conversion operator to pair
+    operator std::pair<std::string, std::string>() const {
+        return {input, output};
+    }
+
+    // Add constructor from pair
+    TrainingExample(const std::pair<std::string, std::string>& pair) 
+        : input(pair.first), output(pair.second), type(PhraseType::GENERAL) {}
+
+    // Default constructor
+    TrainingExample() = default;
+
+    // Regular constructor
+    TrainingExample(std::string input_, std::string output_, PhraseType type_)
+        : input(std::move(input_)), output(std::move(output_)), type(type_) {}
+};
+
+struct ContextualTrainingExample {
+    std::vector<std::string> context_window;  // Previous phrases for context
+    std::string input;
+    std::string output;
+    PhraseType type;
+    size_t context_size;  // Size of context window
+
+    ContextualTrainingExample(std::vector<std::string> context, 
+                            std::string input_, 
+                            std::string output_,
+                            PhraseType type_,
+                            size_t ctx_size = 3)
+        : context_window(std::move(context))
+        , input(std::move(input_))
+        , output(std::move(output_))
+        , type(type_)
+        , context_size(ctx_size) {}
+
+    // Get full context including current input
+    std::string get_full_context() const {
+        std::string full_context;
+        for (const auto& ctx : context_window) {
+            full_context += ctx + " ";
+        }
+        full_context += input;
+        return full_context;
+    }
+
+    // Add conversion operators
+    operator std::pair<std::string, std::string>() const {
+        return {input, output};
+    }
+
+    operator TrainingExample() const {
+        return TrainingExample(input, output, type);
+    }
+};
+
+struct ValidationMetrics {
+    float loss;
+    float accuracy;
+    std::unordered_map<PhraseType, float> type_specific_accuracy;
+    std::unordered_map<PhraseType, float> type_specific_loss;
 };
 
 class Utils {
@@ -44,37 +114,80 @@ private:
         std::mt19937& gen
     );
 
+    // Add new private methods for data handling
+    static PhraseType detect_phrase_type(const std::string& input, const std::string& output, char delimiter);
+    static float get_sampling_weight(const std::string& category, 
+                                   const std::unordered_map<std::string, size_t>& counts);
+    static std::vector<TrainingExample> balance_dataset(
+        const std::unordered_map<PhraseType, std::vector<TrainingExample>>& categorized_data);
+
 public:
-    static float adjust_learning_rate(float current_lr, float loss_ratio, size_t step);
+    /**
+     * @brief Find the index of the maximum value in a Matrix row or Vector
+     * @param row The Matrix row or Vector to find the maximum value in
+     * @return The index of the maximum value
+     */
+    static size_t argmax(const Matrix& row) {
+        if (row.rows() != 1) {
+            throw std::runtime_error("argmax expects a single row matrix");
+        }
+        return std::distance(
+            row.data(),
+            std::max_element(row.data(), row.data() + row.cols())
+        );
+    }
+
+    /**
+     * @brief Find the index of the maximum value in a Vector
+     * @param vec The Vector to find the maximum value in
+     * @return The index of the maximum value
+     */
+    static size_t argmax(const Vector& vec) {
+        return std::distance(
+            vec.data(),
+            std::max_element(vec.data(), vec.data() + vec.size())
+        );
+    }
+
     static bool validate_input_sequence(const std::vector<int>& tokens, size_t vocab_size,
                                         size_t max_seq_length = 512);
     static void print_matrix(const Matrix& m, const std::string& name, size_t max_rows = 5,
                              size_t max_cols = 5);
     static void print_top_predictions(
         const Matrix& logits,
-        const Tokenizer& tokenizer,
+        const TiktokenTokenizer& tokenizer,
         Transformer& transformer,
         int k
     );
-    static std::vector<std::pair<std::string, std::string>> create_training_data();
+
+    // Add new function to save predictions to CSV
+    static void save_predictions_to_csv(
+        const Matrix& logits,
+        const TiktokenTokenizer& tokenizer,
+        const std::string& input_text,
+        const std::string& csv_path = "predictions.csv",
+        int top_k = 10
+    );
+
+    static std::vector<ContextualTrainingExample> create_training_data();
     static void
     analyze_token_mappings(const std::vector<std::pair<std::string, std::string>>& training_data,
-                           const Tokenizer& tokenizer);
-    static std::vector<std::pair<std::string, std::string>> load_validation_data();
-    static float
-    evaluate_validation(Transformer& transformer, const Tokenizer& tokenizer,
-                        const std::vector<std::pair<std::string, std::string>>& validation_data);
+                           const TiktokenTokenizer& tokenizer);
+    static std::vector<ContextualTrainingExample> load_validation_data();
+    static ValidationMetrics evaluate_validation(
+        Transformer& transformer,
+        const TiktokenTokenizer& tokenizer,
+        const std::vector<ContextualTrainingExample>& validation_data
+    );
     static TransformerConfig load_config(const std::string& config_path);
     static Matrix
     create_batch_target_distribution(const std::vector<std::vector<int>>& target_tokens,
-                                     const Tokenizer& tokenizer, size_t vocab_size,
+                                     const TiktokenTokenizer& tokenizer, size_t vocab_size,
                                      size_t input_max_seq_len);
-    static float compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const Tokenizer& tokenizer);
-    static void apply_sampling_parameters(std::vector<float>& logits, float temperature,
-                                          float top_p);
-    static std::vector<std::string>& get_vocabulary(const Tokenizer& tokenizer);
-    static std::vector<std::pair<std::string, float>> get_multi_token_predictions(
-        const Matrix& logits, const Tokenizer& tokenizer, int beam_width);
+    static float compute_batch_loss(const Matrix& logits, const Matrix& target_distribution, const TiktokenTokenizer& tokenizer);
+    static std::vector<std::string>& get_vocabulary(const TiktokenTokenizer& tokenizer);
+    static std::vector<std::pair<std::string, std::string>> get_multi_token_predictions(
+        const Matrix& logits, const TiktokenTokenizer& tokenizer, int beam_width);
     
     // Token category analysis functions
     static TokenCategories analyze_token_categories(const std::vector<std::pair<std::string, std::string>>& training_data);
@@ -87,11 +200,11 @@ public:
     create_cross_validation_folds(const std::vector<std::pair<std::string, std::string>>& data, 
                                 size_t num_folds);
 
-    static float perform_cross_validation(Transformer& transformer, 
-                                        const Tokenizer& tokenizer,
-                                        const std::vector<std::pair<std::string, std::string>>& data,
-                                        size_t num_folds, 
-                                        float early_stopping_threshold);
+    static float perform_cross_validation(
+        Transformer& transformer,
+        const TiktokenTokenizer& tokenizer,
+        const std::vector<std::pair<std::string, std::string>>& train_data
+    );
 
     // Add inline utility functions for gradient computation
     static inline float compute_grad_norm(const Matrix& grad) {
@@ -117,13 +230,13 @@ public:
 
         const size_t batch_size = output.rows();
         const size_t vocab_size = output.cols();
+        const float epsilon = 1e-5f;  // Increased from 1e-10f for better stability
         float total_loss = 0.0f;
 
         #pragma omp parallel for reduction(+:total_loss)
         for (size_t i = 0; i < batch_size; ++i) {
             for (size_t j = 0; j < vocab_size; ++j) {
                 if (target_distribution(i, j) > 0.0f) {
-                    const float epsilon = 1e-10f;
                     float pred = std::clamp(output(i, j), epsilon, 1.0f - epsilon);
                     total_loss -= target_distribution(i, j) * std::log(pred);
                 }
@@ -140,34 +253,43 @@ public:
 
         const size_t batch_size = output.rows();
         const size_t vocab_size = output.cols();
+        const float epsilon = 1e-5f;  // Increased epsilon for stability
         Matrix gradient(batch_size, vocab_size);
 
-        // For each example in the batch
+        // Pre-compute max values for numerical stability
+        std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
         #pragma omp parallel for
         for (size_t i = 0; i < batch_size; ++i) {
-            // First compute softmax probabilities
-            float max_logit = -std::numeric_limits<float>::infinity();
             for (size_t j = 0; j < vocab_size; ++j) {
-                max_logit = std::max(max_logit, output(i, j));
+                max_logits[i] = std::max(max_logits[i], output(i, j));
             }
+        }
 
-            std::vector<float> probs(vocab_size);
+        // Pre-compute denominator terms
+        std::vector<float> denominators(batch_size, 0.0f);
+        #pragma omp parallel for
+        for (size_t i = 0; i < batch_size; ++i) {
             float sum_exp = 0.0f;
             for (size_t j = 0; j < vocab_size; ++j) {
-                probs[j] = std::exp(output(i, j) - max_logit);
-                sum_exp += probs[j];
+                float shifted_logit = output(i, j) - max_logits[i];
+                sum_exp += std::exp(shifted_logit);
             }
+            denominators[i] = std::max(sum_exp, epsilon);
+        }
 
-            // Normalize to get probabilities
-            const float eps = 1e-10f;
-            sum_exp = std::max(sum_exp, eps);
+        // Compute final gradients
+        #pragma omp parallel for collapse(2)
+        for (size_t i = 0; i < batch_size; ++i) {
             for (size_t j = 0; j < vocab_size; ++j) {
-                probs[j] /= sum_exp;
-            }
-
-            // Compute gradients: softmax derivative * cross-entropy derivative
-            for (size_t j = 0; j < vocab_size; ++j) {
-                gradient(i, j) = probs[j] - target_distribution(i, j);
+                float shifted_logit = output(i, j) - max_logits[i];
+                float softmax_output = std::exp(shifted_logit) / denominators[i];
+                
+                // Stabilized gradient computation
+                gradient(i, j) = std::clamp(
+                    softmax_output - target_distribution(i, j),
+                    -1.0f,  // Prevent extreme gradients
+                    1.0f
+                );
             }
         }
 
@@ -221,5 +343,15 @@ public:
         prediction_counter = 0;
     }
 
-    static void generate_predictions(Transformer& transformer, const std::string& input_text, Tokenizer* tokenizer);
+    static void generate_predictions(
+        Transformer& transformer,
+        const std::string& input_text,
+        std::shared_ptr<TiktokenTokenizer> tokenizer
+    );
+
+    // Debugging utilities
+    static void analyze_gradients(const Matrix& gradients, const std::string& label);
+    static void analyze_loss_progression(const std::vector<float>& losses, size_t window_size);
+    static void debug_token_processing(const std::string& input, const std::vector<int>& tokens, 
+                                     const TiktokenTokenizer& tokenizer);
 };

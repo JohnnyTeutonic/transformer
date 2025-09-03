@@ -6,54 +6,26 @@
 #include <string>
 
 TokenEmbedding::TokenEmbedding(size_t vocab_size, size_t embedding_dim)
-    : weights_(vocab_size, embedding_dim), weights_grad_(vocab_size, embedding_dim),
-      vocab_size_(vocab_size), embedding_dim_(embedding_dim) {
-    // Use a smaller scale for embeddings to prevent any token from dominating
-    float scale = std::sqrt(1.0f / embedding_dim_);  // Changed scaling factor
+    : vocab_size_(vocab_size), embedding_dim_(embedding_dim) {
     
-    // Use truncated normal distribution to prevent extreme values
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<float> dist(0.0f, scale);
-    
-    // Initialize weights with truncated normal distribution
-    for (size_t i = 0; i < weights_.rows(); i++) {
-        for (size_t j = 0; j < weights_.cols(); j++) {
-            float val;
-            do {
-                val = dist(gen);
-            } while (std::abs(val) > 2.0f * scale);  // Truncate at 2 standard deviations
-            weights_(i, j) = val;
-        }
+    // Validate parameters
+    if (vocab_size == 0) {
+        throw std::runtime_error("TokenEmbedding: Vocabulary size cannot be 0");
     }
-    weights_grad_.fill(0.0f);
+    if (embedding_dim == 0) {
+        throw std::runtime_error("TokenEmbedding: Embedding dimension cannot be 0");
+    }
 
-    // Validate initialization
-    float min_val = std::numeric_limits<float>::infinity();
-    float max_val = -std::numeric_limits<float>::infinity();
-    float mean_val = 0.0f;
-    size_t nonzero = 0;
-    
-    for (size_t i = 0; i < weights_.rows(); i++) {
-        for (size_t j = 0; j < weights_.cols(); j++) {
-            float val = weights_(i, j);
-            min_val = std::min(min_val, val);
-            max_val = std::max(max_val, val);
-            mean_val += val;
-            if (std::abs(val) > 1e-6) nonzero++;
-        }
-    }
-    mean_val /= (weights_.rows() * weights_.cols());
-    
-    std::cout << "Embedding initialization statistics:\n"
-              << "- Scale factor: " << scale << "\n"
-              << "- Range: [" << min_val << ", " << max_val << "]\n"
-              << "- Mean: " << mean_val << "\n"
-              << "- Nonzero: " << nonzero << "/" << (weights_.rows() * weights_.cols()) << "\n";
+    std::cout << "Initializing TokenEmbedding with:"
+              << "\n- Vocabulary size: " << vocab_size
+              << "\n- Embedding dimension: " << embedding_dim << std::endl;
 
-    if (nonzero == 0) {
-        throw std::runtime_error("Embedding weights initialization failed - all values are zero");
-    }
+    // Initialize embedding matrix
+    weights_ = Matrix(vocab_size, embedding_dim);
+    
+    // Initialize weights using Xavier/Glorot initialization
+    float scale = std::sqrt(2.0f / (vocab_size + embedding_dim));
+    weights_.initialize_random(scale);
 }
 
 Matrix TokenEmbedding::forward(const std::vector<int>& tokens) {

@@ -7,6 +7,7 @@
 #include "../include/cuda/matrix_ops.cuh"
 #include "../include/cuda/memory_manager.cuh"
 #endif
+#include "../include/scope_logger.hpp"
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -18,121 +19,131 @@
 #endif
 
 FeedForward::FeedForward(size_t hidden_size, size_t intermediate_size, float dropout)
-    : dropout_prob(dropout), intermediate_cache(1, intermediate_size) {
-    
+    : dropout_prob(dropout) {
+    SCOPE_LOG();
     // Initialize matrices with correct dimensions
-    params_.ff1_weights = Matrix(hidden_size, intermediate_size);
-    params_.ff2_weights = Matrix(intermediate_size, hidden_size);
-    params_.ff1_bias = FloatVector(intermediate_size);
-    params_.ff2_bias = FloatVector(hidden_size);
+    params_.gate_proj_weights = Matrix(hidden_size, intermediate_size);
+    params_.up_proj_weights = Matrix(hidden_size, intermediate_size);
+    params_.down_proj_weights = Matrix(intermediate_size, hidden_size);
+
+    params_.gate_proj_bias = FloatVector(intermediate_size);
+    params_.up_proj_bias = FloatVector(intermediate_size);
+    params_.down_proj_bias = FloatVector(hidden_size);
     
     // Initialize gradients with same dimensions
-    grads_.ff1_grad = Matrix(hidden_size, intermediate_size);
-    grads_.ff2_grad = Matrix(intermediate_size, hidden_size);
-    grads_.ff1_bias_grad = FloatVector(intermediate_size);
-    grads_.ff2_bias_grad = FloatVector(hidden_size);
+    grads_.gate_proj_grad = Matrix(hidden_size, intermediate_size);
+    grads_.up_proj_grad = Matrix(hidden_size, intermediate_size);
+    grads_.down_proj_grad = Matrix(intermediate_size, hidden_size);
+
+    grads_.gate_proj_bias_grad = FloatVector(intermediate_size);
+    grads_.up_proj_bias_grad = FloatVector(intermediate_size);
+    grads_.down_proj_bias_grad = FloatVector(hidden_size);
 
     // Initialize weights with Xavier/Glorot initialization
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
-    float w1_limit = std::sqrt(6.0f / (hidden_size + intermediate_size));
-    float w2_limit = std::sqrt(6.0f / (intermediate_size + hidden_size));
-
-    std::uniform_real_distribution<float> w1_dis(-w1_limit, w1_limit);
-    std::uniform_real_distribution<float> w2_dis(-w2_limit, w2_limit);
-
-    // Initialize weights
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff1_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff1_weights.cols(); ++j) {
-            params_.ff1_weights(i, j) = w1_dis(gen);
-        }
-    }
-
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff2_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff2_weights.cols(); ++j) {
-            params_.ff2_weights(i, j) = w2_dis(gen);
-        }
-    }
-
-    // Initialize biases to zero
-    #pragma omp parallel for
-    for (size_t i = 0; i < params_.ff1_bias.size(); ++i)
-        params_.ff1_bias[i] = 0.0f;
-    #pragma omp parallel for
-    for (size_t i = 0; i < params_.ff2_bias.size(); ++i)
-        params_.ff2_bias[i] = 0.0f;
+    initialize_weights();
 
     // Initialize gradients to zero
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < grads_.ff1_grad.rows(); ++i) {
-        for (size_t j = 0; j < grads_.ff1_grad.cols(); ++j) {
-            grads_.ff1_grad(i, j) = 0.0f;
-        }
-    }
-
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < grads_.ff2_grad.rows(); ++i) {
-        for (size_t j = 0; j < grads_.ff2_grad.cols(); ++j) {
-            grads_.ff2_grad(i, j) = 0.0f;
-        }
-    }
-
-    #pragma omp parallel for
-    for (size_t i = 0; i < grads_.ff1_bias_grad.size(); ++i)
-        grads_.ff1_bias_grad[i] = 0.0f;
-    #pragma omp parallel for
-    for (size_t i = 0; i < grads_.ff2_bias_grad.size(); ++i)
-        grads_.ff2_bias_grad[i] = 0.0f;
+    grads_.gate_proj_grad.initialize_constant(0.0f);
+    grads_.up_proj_grad.initialize_constant(0.0f);
+    grads_.down_proj_grad.initialize_constant(0.0f);
+    grads_.gate_proj_bias_grad.initialize_constant(0.0f);
+    grads_.up_proj_bias_grad.initialize_constant(0.0f);
+    grads_.down_proj_bias_grad.initialize_constant(0.0f);
 }
 
+// Helper for Swish activation
+inline float sigmoid(float x) {
+    return 1.0f / (1.0f + std::exp(-x));
+}
+
+inline float swish(float x) {
+    return x * sigmoid(x);
+}
+
+inline float swish_derivative(float x) {
+    float sig_x = sigmoid(x);
+    return sig_x + x * sig_x * (1.0f - sig_x);
+}
+
+
 Matrix FeedForward::forward(const Matrix& input) {
+    SCOPE_LOG();
     try {
-        std::cout << "\n=== FeedForward::forward START ===" << std::endl;
-        std::cout << "Input dims: " << input.rows() << "x" << input.cols() << std::endl;
-        std::cout << "FF1 weights dims: " << params_.ff1_weights.rows() << "x" << params_.ff1_weights.cols() << std::endl;
-        std::cout << "FF2 weights dims: " << params_.ff2_weights.rows() << "x" << params_.ff2_weights.cols() << std::endl;
-        std::cout << "FF1 bias size: " << params_.ff1_bias.size() << std::endl;
-        std::cout << "FF2 bias size: " << params_.ff2_bias.size() << std::endl;
+#ifdef USE_CUDA
+        // Convert input to CudaMatrix
+        cuda::CudaMatrix d_input(input);
 
-        // First layer
-        Matrix intermediate = matmul(input, params_.ff1_weights);
-        std::cout << "After FF1 dims: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
-
-        for (size_t i = 0; i < intermediate.rows(); ++i) {
-            for (size_t j = 0; j < intermediate.cols(); ++j) {
-                intermediate(i, j) += params_.ff1_bias[j];
-            }
+        // Ensure model parameters are on the GPU
+        if (!params_gpu_) {
+            params_gpu_ = std::make_unique<CudaParameters>();
+            params_gpu_->gate_proj_weights = cuda::CudaMatrix(params_.gate_proj_weights);
+            params_gpu_->up_proj_weights = cuda::CudaMatrix(params_.up_proj_weights);
+            params_gpu_->down_proj_weights = cuda::CudaMatrix(params_.down_proj_weights);
         }
-
-        // Apply ReLU
-        for (size_t i = 0; i < intermediate.rows(); ++i) {
-            for (size_t j = 0; j < intermediate.cols(); ++j) {
-                intermediate(i, j) = std::max(0.0f, intermediate(i, j));
-            }
-        }
-        std::cout << "After ReLU dims: " << intermediate.rows() << "x" << intermediate.cols() << std::endl;
-
-        // Cache intermediate values
-        intermediate_cache = intermediate;
-        input_cache_ = input;
-        std::cout << "Cached intermediate dims: " << intermediate_cache.rows() << "x" << intermediate_cache.cols() << std::endl;
-        std::cout << "Cached input dims: " << input_cache_.rows() << "x" << input_cache_.cols() << std::endl;
-
-        // Second layer
-        Matrix output = matmul(intermediate, params_.ff2_weights);
-        std::cout << "Final output dims: " << output.rows() << "x" << output.cols() << std::endl;
         
-        for (size_t i = 0; i < output.rows(); ++i) {
-            for (size_t j = 0; j < output.cols(); ++j) {
-                output(i, j) += params_.ff2_bias[j];
+        // Allocate intermediate and output buffers on GPU
+        cuda::CudaMatrix d_gated_linear_output(input.rows(), params_gpu_->gate_proj_weights.cols());
+        cuda::CudaMatrix d_up_proj_output(input.rows(), params_gpu_->up_proj_weights.cols());
+        cuda::CudaMatrix d_output(input.rows(), params_gpu_->down_proj_weights.cols());
+
+        // Launch SwiGLU forward kernel
+        cuda::kernels::swiglu_forward_kernel_launcher(
+            d_input,
+            params_gpu_->gate_proj_weights,
+            params_gpu_->up_proj_weights,
+            params_gpu_->down_proj_weights,
+            d_gated_linear_output,
+            d_up_proj_output,
+            d_output
+        );
+
+        // Cache intermediate results for backward pass
+        gated_linear_output_cache_gpu_ = std::move(d_gated_linear_output);
+        up_proj_output_cache_gpu_ = std::move(d_up_proj_output);
+        input_cache_gpu_ = std::move(d_input);
+        
+        // Copy result back to CPU
+        return d_output.to_matrix();
+#else
+        // CPU implementation
+        input_cache_ = input;
+
+        // Gate and Up projections
+        Matrix gate = matmul(input, params_.gate_proj_weights);
+        gate.add_bias(params_.gate_proj_bias);
+
+        Matrix up = matmul(input, params_.up_proj_weights);
+        up.add_bias(params_.up_proj_bias);
+
+        // Swish activation on the gate
+        Matrix gate_swish = gate;
+        #pragma omp parallel for collapse(2)
+        for (size_t i = 0; i < gate_swish.rows(); ++i) {
+            for (size_t j = 0; j < gate_swish.cols(); ++j) {
+                gate_swish(i, j) = swish(gate_swish(i, j));
             }
         }
+        
+        // Element-wise multiplication
+        Matrix gated = gate_swish; // Re-use memory
+        #pragma omp parallel for collapse(2)
+        for (size_t i = 0; i < gated.rows(); ++i) {
+            for (size_t j = 0; j < gated.cols(); ++j) {
+                gated(i, j) *= up(i, j);
+            }
+        }
+        
+        // Cache for backward pass
+        intermediate_cache_ = gated;
+        gate_cache_ = gate;
+        up_cache_ = up;
 
-        std::cout << "=== FeedForward::forward END ===\n" << std::endl;
+        // Down projection
+        Matrix output = matmul(gated, params_.down_proj_weights);
+        output.add_bias(params_.down_proj_bias);
+
         return output;
+#endif
 
     } catch (const std::exception& e) {
         throw std::runtime_error("FeedForward forward failed: " + std::string(e.what()));
@@ -140,21 +151,21 @@ Matrix FeedForward::forward(const Matrix& input) {
 }
 
 void FeedForward::save(std::ostream& os) const {
-    size_t hidden_size = params_.ff2_weights.cols();
-    size_t intermediate_size = params_.ff1_weights.cols();
+    size_t hidden_size = params_.down_proj_weights.cols();
+    size_t intermediate_size = params_.gate_proj_weights.cols();
     
     os.write(reinterpret_cast<const char*>(&hidden_size), sizeof(hidden_size));
     os.write(reinterpret_cast<const char*>(&intermediate_size), sizeof(intermediate_size));
     
     // Save weights
-    os.write(reinterpret_cast<const char*>(params_.ff1_weights.data()), 
-             params_.ff1_weights.rows() * params_.ff1_weights.cols() * sizeof(float));
-    os.write(reinterpret_cast<const char*>(params_.ff2_weights.data()), 
-             params_.ff2_weights.rows() * params_.ff2_weights.cols() * sizeof(float));
+    params_.gate_proj_weights.save(os);
+    params_.up_proj_weights.save(os);
+    params_.down_proj_weights.save(os);
     
     // Save biases
-    os.write(reinterpret_cast<const char*>(params_.ff1_bias.data()), params_.ff1_bias.size() * sizeof(float));
-    os.write(reinterpret_cast<const char*>(params_.ff2_bias.data()), params_.ff2_bias.size() * sizeof(float));
+    os.write(reinterpret_cast<const char*>(params_.gate_proj_bias.data()), params_.gate_proj_bias.size() * sizeof(float));
+    os.write(reinterpret_cast<const char*>(params_.up_proj_bias.data()), params_.up_proj_bias.size() * sizeof(float));
+    os.write(reinterpret_cast<const char*>(params_.down_proj_bias.data()), params_.down_proj_bias.size() * sizeof(float));
 }
 
 std::unique_ptr<FeedForward> FeedForward::load(std::istream& is) {
@@ -165,57 +176,109 @@ std::unique_ptr<FeedForward> FeedForward::load(std::istream& is) {
     auto ffn = std::make_unique<FeedForward>(hidden_size, intermediate_size);
     
     // Load weights
-    is.read(reinterpret_cast<char*>(ffn->params_.ff1_weights.data()),
-            ffn->params_.ff1_weights.rows() * ffn->params_.ff1_weights.cols() * sizeof(float));
-    is.read(reinterpret_cast<char*>(ffn->params_.ff2_weights.data()),
-            ffn->params_.ff2_weights.rows() * ffn->params_.ff2_weights.cols() * sizeof(float));
+    ffn->params_.gate_proj_weights = Matrix::load(is);
+    ffn->params_.up_proj_weights = Matrix::load(is);
+    ffn->params_.down_proj_weights = Matrix::load(is);
     
     // Load biases
-    is.read(reinterpret_cast<char*>(ffn->params_.ff1_bias.data()), ffn->params_.ff1_bias.size() * sizeof(float));
-    is.read(reinterpret_cast<char*>(ffn->params_.ff2_bias.data()), ffn->params_.ff2_bias.size() * sizeof(float));
+    is.read(reinterpret_cast<char*>(ffn->params_.gate_proj_bias.data()), ffn->params_.gate_proj_bias.size() * sizeof(float));
+    is.read(reinterpret_cast<char*>(ffn->params_.up_proj_bias.data()), ffn->params_.up_proj_bias.size() * sizeof(float));
+    is.read(reinterpret_cast<char*>(ffn->params_.down_proj_bias.data()), ffn->params_.down_proj_bias.size() * sizeof(float));
     
     return ffn;
 }
 
-Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
+Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& original_input) {
+    SCOPE_LOG();
     try {
-        std::cout << "\n=== FeedForward::backward START ===" << std::endl;
-        std::cout << "grad_output dims: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
-        std::cout << "input dims: " << input.rows() << "x" << input.cols() << std::endl;
-        std::cout << "ff2_weights dims: " << params_.ff2_weights.rows() << "x" << params_.ff2_weights.cols() << std::endl;
-        std::cout << "ff1_weights dims: " << params_.ff1_weights.rows() << "x" << params_.ff1_weights.cols() << std::endl;
-        std::cout << "intermediate_cache dims: " << intermediate_cache.rows() << "x" << intermediate_cache.cols() << std::endl;
-        std::cout << "input_cache_ dims: " << input_cache_.rows() << "x" << input_cache_.cols() << std::endl;
+#ifdef USE_CUDA
+        // Convert grad_output to CudaMatrix
+        cuda::CudaMatrix d_grad_output(grad_output);
 
-        Matrix w2_transpose = params_.ff2_weights.transpose();
-        std::cout << "w2_transpose dims: " << w2_transpose.rows() << "x" << w2_transpose.cols() << std::endl;
+        // Allocate gradient buffers on GPU
+        cuda::CudaMatrix d_grad_input(original_input.rows(), original_input.cols());
+        if (!grads_gpu_) {
+            grads_gpu_ = std::make_unique<CudaGradients>();
+            grads_gpu_->gate_proj_weights_grad = cuda::CudaMatrix(grads_.gate_proj_weights_grad.rows(), grads_.gate_proj_weights_grad.cols());
+            grads_gpu_->up_proj_weights_grad = cuda::CudaMatrix(grads_.up_proj_weights_grad.rows(), grads_.up_proj_weights_grad.cols());
+            grads_gpu_->down_proj_weights_grad = cuda::CudaMatrix(grads_.down_proj_weights_grad.rows(), grads_.down_proj_weights_grad.cols());
+        }
 
-        Matrix d_intermediate = matmul(grad_output, w2_transpose);
-        std::cout << "d_intermediate dims: " << d_intermediate.rows() << "x" << d_intermediate.cols() << std::endl;
 
-        // Apply ReLU gradient
-        for (size_t i = 0; i < intermediate_cache.rows(); ++i) {
-            for (size_t j = 0; j < intermediate_cache.cols(); ++j) {
-                if (intermediate_cache(i, j) <= 0) {
-                    d_intermediate(i, j) = 0;
-                }
+        // Launch SwiGLU backward kernel
+        cuda::kernels::swiglu_backward_kernel_launcher(
+            d_grad_output,
+            input_cache_gpu_,
+            params_gpu_->gate_proj_weights,
+            params_gpu_->up_proj_weights,
+            params_gpu_->down_proj_weights,
+            gated_linear_output_cache_gpu_,
+            up_proj_output_cache_gpu_,
+            d_grad_input,
+            grads_gpu_->gate_proj_weights_grad,
+            grads_gpu_->up_proj_weights_grad,
+            grads_gpu_->down_proj_weights_grad
+        );
+
+        // Copy gradients back to CPU
+        grads_.gate_proj_weights_grad = grads_gpu_->gate_proj_weights_grad.to_matrix();
+        grads_.up_proj_weights_grad = grads_gpu_->up_proj_weights_grad.to_matrix();
+        grads_.down_proj_weights_grad = grads_gpu_->down_proj_weights_grad.to_matrix();
+        
+        return d_grad_input.to_matrix();
+#else
+        // CPU implementation
+        // Step 1: Gradient w.r.t. the down projection
+        grads_.down_proj_grad = matmul(intermediate_cache_.transpose(), grad_output);
+        grads_.down_proj_bias_grad = grad_output.column_sum();
+
+        // Step 2: Backpropagate through the down projection
+        Matrix d_gated = matmul(grad_output, params_.down_proj_weights.transpose());
+
+        // Step 3: Backpropagate through the element-wise multiplication
+        // d_up = d_gated * swish(gate)
+        // d_gate_swish = d_gated * up
+        Matrix d_up = d_gated;
+        Matrix gate_swish = gate_cache_;
+        gate_swish.apply_swish(); // swish(gate)
+
+        #pragma omp parallel for collapse(2)
+        for(size_t i=0; i<d_up.rows(); ++i){
+            for(size_t j=0; j<d_up.cols(); ++j){
+                d_up(i,j) *= gate_swish(i,j);
             }
         }
 
-        Matrix w1_transpose = params_.ff1_weights.transpose();
-        std::cout << "w1_transpose dims: " << w1_transpose.rows() << "x" << w1_transpose.cols() << std::endl;
+        Matrix d_gate_swish = d_gated;
+        #pragma omp parallel for collapse(2)
+        for(size_t i=0; i<d_gate_swish.rows(); ++i){
+            for(size_t j=0; j<d_gate_swish.cols(); ++j){
+                d_gate_swish(i,j) *= up_cache_(i,j);
+            }
+        }
 
-        Matrix d_input = matmul(d_intermediate, w1_transpose);
-        std::cout << "d_input dims: " << d_input.rows() << "x" << d_input.cols() << std::endl;
+        // Step 4: Backpropagate through the Swish activation
+        Matrix d_gate = d_gate_swish;
+        #pragma omp parallel for collapse(2)
+        for(size_t i=0; i<d_gate.rows(); ++i){
+            for(size_t j=0; j<d_gate.cols(); ++j){
+                d_gate(i,j) *= swish_derivative(gate_cache_(i,j));
+            }
+        }
 
-        // Update gradients
-        grads_.ff1_grad = matmul(input.transpose(), d_intermediate);
-        grads_.ff2_grad = matmul(intermediate_cache.transpose(), grad_output);
-        std::cout << "ff1_grad dims: " << grads_.ff1_grad.rows() << "x" << grads_.ff1_grad.cols() << std::endl;
-        std::cout << "ff2_grad dims: " << grads_.ff2_grad.rows() << "x" << grads_.ff2_grad.cols() << std::endl;
+        // Step 5: Gradients for up and gate projections
+        grads_.up_proj_grad = matmul(input_cache_.transpose(), d_up);
+        grads_.up_proj_bias_grad = d_up.column_sum();
 
-        std::cout << "=== FeedForward::backward END ===\n" << std::endl;
+        grads_.gate_proj_grad = matmul(input_cache_.transpose(), d_gate);
+        grads_.gate_proj_bias_grad = d_gate.column_sum();
+
+        // Step 6: Gradient with respect to the input
+        Matrix d_input = matmul(d_gate, params_.gate_proj_weights.transpose());
+        d_input += matmul(d_up, params_.up_proj_weights.transpose());
+
         return d_input;
+#endif
 
     } catch (const std::exception& e) {
         std::cerr << "\nError in FeedForward::backward: " << e.what() << std::endl;
@@ -223,103 +286,46 @@ Matrix FeedForward::backward(const Matrix& grad_output, const Matrix& input) {
     }
 }
 
-void FeedForward::update_parameters(const Matrix& grad, float learning_rate) {
-    const float max_grad_norm = 5.0f;  // Match global clipping threshold
+void FeedForward::update_parameters(float learning_rate) {
+    SCOPE_LOG();
+    // Update gate projection
+    params_.gate_proj_weights -= learning_rate * grads_.gate_proj_grad;
+    for(size_t i=0; i<params_.gate_proj_bias.size(); ++i) params_.gate_proj_bias[i] -= learning_rate * grads_.gate_proj_bias_grad[i];
     
-    // Compute gradient norms
-    float grad_norm_ff1 = 0.0f;
-    #pragma omp parallel for reduction(+:grad_norm_ff1)
-    for (size_t i = 0; i < grads_.ff1_grad.size(); ++i) {
-        grad_norm_ff1 += grads_.ff1_grad.data()[i] * grads_.ff1_grad.data()[i];
-    }
-    grad_norm_ff1 = std::sqrt(grad_norm_ff1);
+    // Update up projection
+    params_.up_proj_weights -= learning_rate * grads_.up_proj_grad;
+    for(size_t i=0; i<params_.up_proj_bias.size(); ++i) params_.up_proj_bias[i] -= learning_rate * grads_.up_proj_bias_grad[i];
+
+    // Update down projection
+    params_.down_proj_weights -= learning_rate * grads_.down_proj_grad;
+    for(size_t i=0; i<params_.down_proj_bias.size(); ++i) params_.down_proj_bias[i] -= learning_rate * grads_.down_proj_bias_grad[i];
     
-    float grad_norm_ff2 = 0.0f;
-    #pragma omp parallel for reduction(+:grad_norm_ff2)
-    for (size_t i = 0; i < grads_.ff2_grad.size(); ++i) {
-        grad_norm_ff2 += grads_.ff2_grad.data()[i] * grads_.ff2_grad.data()[i];
-    }
-    grad_norm_ff2 = std::sqrt(grad_norm_ff2);
-    
-    // Compute scaling factors
-    float scale_ff1 = std::min(max_grad_norm / (grad_norm_ff1 + 1e-6f), 1.0f);
-    float scale_ff2 = std::min(max_grad_norm / (grad_norm_ff2 + 1e-6f), 1.0f);
-    
-    // Debug output
-    std::cout << "FF Gradient norms - FF1: " << grad_norm_ff1 << ", FF2: " << grad_norm_ff2 << std::endl;
-    std::cout << "FF Scaling factors - FF1: " << scale_ff1 << ", FF2: " << scale_ff2 << std::endl;
-    std::cout << "Learning rate: " << learning_rate << std::endl;
-    
-    // Update first layer weights with clipping
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff1_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff1_weights.cols(); ++j) {
-            float clipped_grad = grads_.ff1_grad(i, j) * scale_ff1;
-            params_.ff1_weights(i, j) -= clipped_grad * learning_rate;
-        }
-    }
-    
-    // Update first layer bias with clipping
-    #pragma omp parallel for
-    for (size_t i = 0; i < params_.ff1_bias.size(); ++i) {
-        float clipped_grad = grads_.ff1_bias_grad[i] * scale_ff1;
-        params_.ff1_bias[i] -= clipped_grad * learning_rate;
-    }
-    
-    // Update second layer weights with clipping
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff2_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff2_weights.cols(); ++j) {
-            float clipped_grad = grads_.ff2_grad(i, j) * scale_ff2;
-            params_.ff2_weights(i, j) -= clipped_grad * learning_rate;
-        }
-    }
-    
-    // Update second layer bias with clipping
-    #pragma omp parallel for
-    for (size_t i = 0; i < params_.ff2_bias.size(); ++i) {
-        float clipped_grad = grads_.ff2_bias_grad[i] * scale_ff2;
-        params_.ff2_bias[i] -= clipped_grad * learning_rate;
-    }
-    
-    // Zero out gradients after update
-    grads_.ff1_grad.fill(0.0f);
-    grads_.ff2_grad.fill(0.0f);
-    std::fill(grads_.ff1_bias_grad.begin(), grads_.ff1_bias_grad.end(), 0.0f);
-    std::fill(grads_.ff2_bias_grad.begin(), grads_.ff2_bias_grad.end(), 0.0f);
+    // Reset gradients
+    grads_.gate_proj_grad.initialize_constant(0.0f);
+    grads_.gate_proj_bias_grad.initialize_constant(0.0f);
+    grads_.up_proj_grad.initialize_constant(0.0f);
+    grads_.up_proj_bias_grad.initialize_constant(0.0f);
+    grads_.down_proj_grad.initialize_constant(0.0f);
+    grads_.down_proj_bias_grad.initialize_constant(0.0f);
 }
 
 void FeedForward::initialize_weights() {
     // Get dimensions
-    size_t hidden_size = params_.ff1_weights.rows();
-    size_t intermediate_size = params_.ff1_weights.cols();
+    size_t hidden_size = params_.gate_proj_weights.rows();
+    size_t intermediate_size = params_.gate_proj_weights.cols();
 
-    // Initialize first layer weights with Xavier/Glorot initialization
-    float limit1 = std::sqrt(6.0f / (hidden_size + intermediate_size));
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff1_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff1_weights.cols(); ++j) {
-            params_.ff1_weights(i, j) = (static_cast<float>(rand()) / RAND_MAX * 2.0f - 1.0f) * limit1;
-        }
-    }
+    // Initialize with Xavier/Glorot initialization
+    float gate_limit = std::sqrt(6.0f / (hidden_size + intermediate_size));
+    params_.gate_proj_weights.initialize_random(gate_limit);
+    
+    float up_limit = std::sqrt(6.0f / (hidden_size + intermediate_size));
+    params_.up_proj_weights.initialize_random(up_limit);
 
-    // Initialize second layer weights
-    float limit2 = std::sqrt(6.0f / (intermediate_size + hidden_size));
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < params_.ff2_weights.rows(); ++i) {
-        for (size_t j = 0; j < params_.ff2_weights.cols(); ++j) {
-            params_.ff2_weights(i, j) = (static_cast<float>(rand()) / RAND_MAX * 2.0f - 1.0f) * limit2;
-        }
-    }
+    float down_limit = std::sqrt(6.0f / (intermediate_size + hidden_size));
+    params_.down_proj_weights.initialize_random(down_limit);
 
     // Initialize biases to small positive values
-    #pragma omp parallel for
-    for (size_t i = 0; i < params_.ff1_bias.size(); ++i) {
-        params_.ff1_bias[i] = 0.01f;
-    }
-
-    #pragma omp parallel for
-    for (size_t i = 0; i < params_.ff2_bias.size(); ++i) {
-        params_.ff2_bias[i] = 0.01f;
-    }
+    params_.gate_proj_bias.initialize_constant(0.01f);
+    params_.up_proj_bias.initialize_constant(0.01f);
+    params_.down_proj_bias.initialize_constant(0.01f);
 }

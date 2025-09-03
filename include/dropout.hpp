@@ -14,52 +14,52 @@
  */
 class Dropout {
   private:
-    float dropout_rate;           ///< Probability of dropping a unit
-    mutable std::mt19937 gen{std::random_device{}()}; ///< Random number generator
-    mutable Matrix dropout_mask;  ///< Binary mask for dropped units
-    mutable bool mask_initialized = false; ///< Whether mask has been initialized
+    float dropout_prob;
+    Matrix dropout_mask;
+    std::mt19937 gen{std::random_device{}()};
+    bool training = true;
 
   public:
     /**
      * @brief Constructs a dropout layer.
-     * @param rate Probability of dropping each unit (between 0 and 1)
+     * @param prob Probability of dropping each unit (between 0 and 1)
      */
-    explicit Dropout(float rate) : dropout_rate(rate) {}
+    explicit Dropout(float prob) : dropout_prob(prob) {}
 
     /**
      * @brief Performs the forward pass with dropout.
      * 
-     * During training, randomly drops units with probability dropout_rate and
-     * scales remaining units by 1/(1-dropout_rate). During inference, performs
+     * During training, randomly drops units with probability dropout_prob and
+     * scales remaining units by 1/(1-dropout_prob). During inference, performs
      * no dropout and no scaling.
      * 
      * @param input Input matrix to apply dropout to
-     * @param training Whether in training mode (true) or inference mode (false)
      * @return Matrix with dropout applied
      * @throws std::runtime_error if dimensions mismatch between input and mask
      */
-    Matrix forward(const Matrix& input, bool training) const {
-        if (!training || dropout_rate == 0.0f) {
+    Matrix forward(Matrix& input) {
+        if (!training || dropout_prob == 0.0f) {
             return input;
         }
 
-        dropout_mask = Matrix(input.rows(), input.cols());
-        std::bernoulli_distribution d(1.0f - dropout_rate);
+        // Create dropout mask with same dimensions as input
+        dropout_mask = Matrix(input.rows(), input.cols(), 1.0f);
+        std::bernoulli_distribution dist(1.0f - dropout_prob);
 
-        for (size_t i = 0; i < dropout_mask.size(); ++i) {
-            dropout_mask.data()[i] = d(gen) / (1.0f - dropout_rate);
+        // Apply dropout mask
+        for (size_t i = 0; i < dropout_mask.size(); i++) {
+            if (!dist(gen)) {
+                dropout_mask.data()[i] = 0.0f;
+            }
         }
 
-        mask_initialized = true;
-
-        if (input.rows() != dropout_mask.rows() || input.cols() != dropout_mask.cols()) {
-            throw std::runtime_error(
-                "Dropout mask dimensions (" + std::to_string(dropout_mask.rows()) + "," +
-                std::to_string(dropout_mask.cols()) + ") don't match input dimensions (" +
-                std::to_string(input.rows()) + "," + std::to_string(input.cols()) + ")");
+        // Scale output by dropout probability
+        Matrix output = input;
+        for (size_t i = 0; i < output.size(); i++) {
+            output.data()[i] *= dropout_mask.data()[i] / (1.0f - dropout_prob);
         }
 
-        return input.hadamard(dropout_mask);
+        return output;
     }
 
     /**
@@ -73,7 +73,7 @@ class Dropout {
      * @throws std::runtime_error if mask not initialized or dimensions mismatch
      */
     Matrix backward(const Matrix& grad_output) const {
-        if (!mask_initialized) {
+        if (!training) {
             throw std::runtime_error(
                 "Dropout mask not initialized. Forward pass must be called before backward pass");
         }
@@ -96,6 +96,10 @@ class Dropout {
      */
     std::pair<size_t, size_t> get_mask_dimensions() const {
         return {dropout_mask.rows(), dropout_mask.cols()};
+    }
+
+    void set_training(bool mode) {
+        training = mode;
     }
 
     void reset_mask() {

@@ -25,28 +25,56 @@ class FeedForward {
   public:
     // Make Gradients public
     struct Gradients {
-        Matrix ff1_grad;         // Gradient for first layer weights
-        Matrix ff2_grad;         // Gradient for second layer weights
-        FloatVector ff1_bias_grad;  // Gradient for first layer bias
-        FloatVector ff2_bias_grad;  // Gradient for second layer bias
+        Matrix gate_proj_grad;
+        Matrix up_proj_grad;
+        Matrix down_proj_grad;
+        FloatVector gate_proj_bias_grad;
+        FloatVector up_proj_bias_grad;
+        FloatVector down_proj_bias_grad;
     };
+
+#ifdef USE_CUDA
+    // Structs for GPU data
+    struct CudaParameters {
+        cuda::CudaMatrix gate_proj_weights;
+        cuda::CudaMatrix up_proj_weights;
+        cuda::CudaMatrix down_proj_weights;
+    };
+
+    struct CudaGradients {
+        cuda::CudaMatrix gate_proj_weights_grad;
+        cuda::CudaMatrix up_proj_weights_grad;
+        cuda::CudaMatrix down_proj_weights_grad;
+    };
+#endif
 
   private:
     // Parameter structure to hold all weights and biases
     struct Parameters {
-        Matrix ff1_weights;
-        Matrix ff2_weights;
-        FloatVector ff1_bias;
-        FloatVector ff2_bias;
+        Matrix gate_proj_weights; // W in SwiGLU
+        Matrix up_proj_weights;   // V in SwiGLU
+        Matrix down_proj_weights; // W2 in SwiGLU
+        FloatVector gate_proj_bias;
+        FloatVector up_proj_bias;
+        FloatVector down_proj_bias;
     };
 
     Parameters params_;
     Gradients grads_;
 
-    // Cache for intermediate values
-    Matrix intermediate_cache;    ///< Cache for intermediate activations during forward pass
-    Matrix input_cache_;         ///< Cache for input during backward pass
-    Matrix dropout_mask_;        ///< Dropout mask for training
+    // CPU caches
+    Matrix input_cache_;
+    Matrix gated_linear_output_cache_;
+    Matrix up_proj_output_cache_;
+
+#ifdef USE_CUDA
+    // GPU caches and parameters
+    std::unique_ptr<CudaParameters> params_gpu_;
+    std::unique_ptr<CudaGradients> grads_gpu_;
+    cuda::CudaMatrix input_cache_gpu_;
+    cuda::CudaMatrix gated_linear_output_cache_gpu_;
+    cuda::CudaMatrix up_proj_output_cache_gpu_;
+#endif
     
     float dropout_prob;           ///< Dropout probability during training
     bool training_ = true;        ///< Training mode control
@@ -61,7 +89,7 @@ class FeedForward {
      * @param hidden_size Size of the intermediate (hidden) layer
      * @param dropout Dropout probability during training
      */
-    FeedForward(size_t input_size, size_t hidden_size, float dropout = 0.1f);
+    FeedForward(size_t hidden_size, size_t intermediate_size, float dropout = 0.1f);
 
     /**
      * @brief Performs the forward pass through the feed-forward network.
@@ -117,9 +145,9 @@ class FeedForward {
     // Update copy constructor to use Parameters/Gradients
     FeedForward(const FeedForward& other)
         : params_(other.params_), grads_(other.grads_),
-          intermediate_cache(other.intermediate_cache),
           input_cache_(other.input_cache_),
-          dropout_mask_(other.dropout_mask_),
+          gated_linear_output_cache_(other.gated_linear_output_cache_),
+          up_proj_output_cache_(other.up_proj_output_cache_),
           dropout_prob(other.dropout_prob),
           training_(other.training_) {}
 
@@ -128,9 +156,9 @@ class FeedForward {
         if (this != &other) {
             params_ = other.params_;
             grads_ = other.grads_;
-            intermediate_cache = other.intermediate_cache;
             input_cache_ = other.input_cache_;
-            dropout_mask_ = other.dropout_mask_;
+            gated_linear_output_cache_ = other.gated_linear_output_cache_;
+            up_proj_output_cache_ = other.up_proj_output_cache_;
             dropout_prob = other.dropout_prob;
             training_ = other.training_;
         }
@@ -142,7 +170,7 @@ class FeedForward {
     bool is_training() const { return training_; }
 
     // Parameter updates
-    void update_parameters(const Matrix& grad, float learning_rate);
+    void update_parameters(float learning_rate);
 
     /**
      * @brief Initialize the feed forward layer weights and biases
@@ -153,9 +181,9 @@ class FeedForward {
 
     void reset_state() {
         // Clear any cached intermediate computations
-        intermediate_cache = Matrix();
         input_cache_ = Matrix();
-        dropout_mask_ = Matrix();
+        gated_linear_output_cache_ = Matrix();
+        up_proj_output_cache_ = Matrix();
     }
 
     // Add Transformer as friend

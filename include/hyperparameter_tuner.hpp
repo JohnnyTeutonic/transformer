@@ -2,18 +2,19 @@
 
 #include "transformer.hpp"
 #include "utils.hpp"
+#include "tiktoken_tokenizer.hpp"
 #include <vector>
 #include <random>
 #include <memory>
 
 // Structure to hold hyperparameter ranges
 struct HyperparameterRanges {
-    // Architecture ranges
-    std::vector<size_t> num_layers_range{2, 4, 6, 8};
-    std::vector<size_t> num_heads_range{4, 8, 12, 16};
-    std::vector<size_t> hidden_size_range{256, 512, 768, 1024};
-    std::vector<size_t> intermediate_size_range{512, 1024, 2048, 4096};
-    std::vector<size_t> head_dim_range{32, 64, 96, 128};
+    // Architecture ranges - ensure valid combinations
+    std::vector<size_t> num_heads_range{8, 16};  // Only powers of 2
+    std::vector<size_t> head_dim_range{64, 128};  // Only powers of 2
+    // hidden_size will be computed as num_heads * head_dim
+    std::vector<size_t> num_layers_range{4, 8, 12};
+    std::vector<size_t> intermediate_size_range{2048, 4096};  // 2x or 4x hidden_size
     
     // Learning rate parameters
     std::vector<float> initial_lr_range{1e-5f, 5e-5f, 1e-4f, 5e-4f};
@@ -77,74 +78,63 @@ struct TuningResult {
     size_t early_stops;
     std::vector<float> fold_scores;
     
-    // For sorting results - inline implementation
     bool operator<(const TuningResult& other) const {
-        // Primary sort by mean validation loss
         if (mean_validation_loss != other.mean_validation_loss) {
             return mean_validation_loss < other.mean_validation_loss;
         }
-        // Secondary sort by validation loss standard deviation
         if (validation_loss_std != other.validation_loss_std) {
             return validation_loss_std < other.validation_loss_std;
         }
-        // Tertiary sort by number of early stops (fewer is better)
         return early_stops < other.early_stops;
     }
 };
 
 class HyperparameterTuner {
 public:
-    HyperparameterTuner(const HyperparameterRanges& ranges, 
-                        size_t num_trials = 50,
-                        size_t num_folds = 5,
-                        unsigned int random_seed = 42);
-    
-    // Main tuning function
-    std::vector<TuningResult> tune(const std::vector<std::pair<std::string, std::string>>& training_data,
-                                  const Tokenizer& tokenizer);
-    
-    // Get best configuration
+    HyperparameterTuner(const HyperparameterRanges& ranges,
+                        const TransformerConfig& config,
+                        std::shared_ptr<TiktokenTokenizer> tokenizer,
+                        unsigned int seed = std::random_device{}());
+
+    std::vector<TuningResult> tune(
+        const std::vector<ContextualTrainingExample>& training_data,
+        const TiktokenTokenizer& tokenizer,
+        size_t num_trials = 10);
+
     HyperparameterConfig get_best_config() const;
-    
-    // Save/load results
     void save_results(const std::string& path) const;
-    void load_results(const std::string& path);
 
 private:
-    // Internal helper functions
     HyperparameterConfig sample_random_config();
-    TuningResult evaluate_config(const HyperparameterConfig& config,
-                               const std::vector<std::pair<std::string, std::string>>& data,
-                               const Tokenizer& tokenizer);
+    TuningResult evaluate_config(
+        const HyperparameterConfig& config,
+        const std::vector<std::pair<std::string, std::string>>& data,
+        const TiktokenTokenizer& tokenizer,
+        const TransformerConfig& transformer_config);
     
-    // Member variables
     HyperparameterRanges ranges_;
     size_t num_trials_;
     size_t num_folds_;
     std::mt19937 rng_;
     std::vector<TuningResult> results_;
+    TransformerConfig config_;
+    std::shared_ptr<TiktokenTokenizer> tokenizer_;
     
-    // Validation helpers
     bool validate_config(const HyperparameterConfig& config) const;
     void log_trial_progress(size_t current_trial, const TuningResult& result) const;
 };
 
-// Utility functions
 namespace HyperparameterUtils {
-    // Random sampling helpers with explicit declarations
     template<typename T>
     T sample_from_range(const std::vector<T>& range, std::mt19937& rng);
     
-    // Explicit declarations for the template function
     extern template float sample_from_range<float>(const std::vector<float>&, std::mt19937&);
     extern template size_t sample_from_range<size_t>(const std::vector<size_t>&, std::mt19937&);
     
-    // Validation helpers
     bool is_valid_architecture(const HyperparameterConfig& config);
     bool is_valid_learning_rate(const HyperparameterConfig& config);
     bool is_valid_training_params(const HyperparameterConfig& config);
     
-    // Logging helpers
     void log_config(const HyperparameterConfig& config);
     void log_result(const TuningResult& result);
 } 

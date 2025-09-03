@@ -221,6 +221,17 @@ class PositionalEncoding {
     Matrix forward(const Matrix& position_ids);
 
     /**
+     * @brief Performs backward pass for positional encoding
+     * @param grad_output Gradient from the next layer
+     * @param position_ids Position indices used in forward pass
+     */
+    void backward(const Matrix& grad_output, const Matrix& position_ids) {
+        // Positional encoding has no learnable parameters
+        // Just pass through the gradients
+        // This is a no-op since positional embeddings are fixed
+    }
+
+    /**
      * @brief Saves the encoding layer to a stream.
      * @param os Output stream to save to
      */

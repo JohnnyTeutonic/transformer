@@ -9,8 +9,22 @@ struct TrainingMetrics {
     size_t step;
     float loss_trend;
     const RunningStatistics& grad_stats;
+    float learning_rate;
 
     // Constructor
-    TrainingMetrics(float l, Matrix g, size_t e, size_t s, float lt, const RunningStatistics& gs)
-        : loss(l), gradients(std::move(g)), epoch(e), step(s), loss_trend(lt), grad_stats(gs) {}
+    TrainingMetrics(
+        float loss_,
+        const Matrix& gradients_,
+        size_t epoch_,
+        size_t step_,
+        float loss_trend_,
+        const RunningStatistics& grad_stats_,
+        float learning_rate_ = 0.0f
+    ) : loss(loss_),
+        gradients(gradients_),
+        epoch(epoch_),
+        step(step_),
+        loss_trend(loss_trend_),
+        grad_stats(grad_stats_),
+        learning_rate(learning_rate_) {}
 }; 

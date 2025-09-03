@@ -1,0 +1,17 @@
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/docs.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/transformer_lib.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/transformer.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/distributed_training_example.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/cuda_kernels.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/edit_cache.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/rebuild_cache.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/list_install_components.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/install.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/install/local.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/CMakeFiles/install/strip.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-build/CMakeFiles/edit_cache.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-build/CMakeFiles/rebuild_cache.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-build/CMakeFiles/list_install_components.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-build/CMakeFiles/install.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-build/CMakeFiles/install/local.dir
+/mnt/c/Users/jonat/OneDrive/Documents/cpp_scripts/transformer_cpp/build_test/_deps/json-build/CMakeFiles/install/strip.dir

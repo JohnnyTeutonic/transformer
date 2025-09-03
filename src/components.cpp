@@ -5,6 +5,11 @@
 #include <string>
 #include "../include/components.hpp"
 #include "../include/cuda/matrix_ops.cuh"
+#ifdef USE_CUDA
+#include "../include/cuda/cuda_utils.cuh"
+#include "../include/cuda/cuda_check.cuh"
+#endif
+
 // Constructor implementations
 Matrix::Matrix() : rows_(0), cols_(0), shape_(std::make_tuple(0, 0)) {}
 
@@ -231,14 +236,30 @@ void Matrix::apply_softmax() {
     }
 }
 
+void Matrix::apply_swish() {
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < data_.size(); i++) {
+        data_[i] = data_[i] * (1.0f / (1.0f + std::exp(-data_[i])));
+    }
+}
+
 void Matrix::add_bias(const Vector& bias) {
     if (bias.size() != cols_) {
         throw std::invalid_argument("Bias size must match matrix columns");
     }
-#pragma omp parallel for collapse(2)
+
+    #ifdef USE_CUDA
+    if (is_on_gpu_) {
+        cuda::add_bias(*this, bias);
+        return;
+    }
+    #endif
+
+    // CPU implementation
+    #pragma omp parallel for collapse(2)
     for (size_t i = 0; i < rows_; ++i) {
         for (size_t j = 0; j < cols_; ++j) {
-            (*this)(i, j) += bias[j];
+            data_[i * cols_ + j] += bias[j];
         }
     }
 }
@@ -248,6 +269,18 @@ void Matrix::fill(float value) {
         throw std::runtime_error("Cannot fill empty matrix");
     }
     std::fill(data_.begin(), data_.end(), value);
+}
+
+Vector Matrix::column_sum() const {
+    Vector result(cols_, 0.0f);
+    for (size_t j = 0; j < cols_; ++j) {
+        float sum = 0.0f;
+        for (size_t i = 0; i < rows_; ++i) {
+            sum += (*this)(i, j);
+        }
+        result[j] = sum;
+    }
+    return result;
 }
 
 Matrix& Matrix::operator+=(const Matrix& other) {

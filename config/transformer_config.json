@@ -1,14 +1,20 @@
 {
     "attention": {
-        "num_kv_heads": 1,
-        "use_flash_attention": false,
-        "use_gqa": true,
+        "num_kv_heads": 4,
+        "use_flash_attention": true,
+        "use_gqa": false,
         "use_rope": true,
         "use_sliding_window": true,
         "window_size": 16
     },
+    "moe": {
+        "enabled": true,
+        "num_experts": 8,
+        "top_k": 2,
+        "aux_loss_coefficient": 0.01
+    },
     "beam_search": {
-        "beam_size": 10,
+        "beam_size": 5,
         "beams_per_group": 4,
         "diversity_strength": 4.0,
         "initial_noise_scale": 0.8,
@@ -20,39 +26,32 @@
         "token_noise_scale": 0.1,
         "top_k": 100,
         "top_p": 0.98,
-        "use_beam_search": true
+        "use_beam_search": false
     },
     "checkpoint_to_load": "",
     "early_stopping": {
         "patience": 3,
         "threshold": 1.5
     },
-    "learning_rate": {
-        "decay_factor": 0.98,
-        "initial_lr": 0.0001,
-        "peak_lr": 0.001,
-        "warmup_steps": 100
-    },
     "load_from_checkpoint": false,
     "model": {
-        "head_dim": 32,
-        "hidden_size": 128,
-        "intermediate_size": 256,
-        "max_seq_length": 512,
-        "num_heads": 8,
-        "num_layers": 4,
-        "vocab_size": 2857
+        "head_dim": 64,
+        "hidden_size": 384,
+        "intermediate_size": 1024,
+        "max_seq_length": 128,
+        "num_heads": 12,
+        "num_layers": 8
     },
     "optimization": {
-        "gradient_accumulation_steps": 4,
+        "gradient_accumulation_steps": 8,
         "gradient_clip_threshold": 5.0,
         "layer_norm_epsilon": 1e-05,
-        "memory_pool_size": 1024,
+        "memory_pool_size": 16384,
         "use_fp16": true,
         "use_gradient_checkpointing": true
     },
     "paths": {
-        "checkpoint_frequency": 5,
+        "checkpoint_frequency": 2,
         "model_name": "transformer_model",
         "save_directory": "checkpoints"
     },
@@ -65,16 +64,16 @@
     },
     "token_prediction": {
         "category_bonus": {
-            "adjective": 0.2,
-            "noun": 0.3,
-            "verb": 0.2
+            "adjective": 0.4,
+            "noun": 0.5,
+            "verb": 0.3
         },
         "frequency_penalty": 0.1,
         "min_token_prob": 0.05,
-        "presence_penalty": 0.0,
-        "temperature": 1.0,
-        "top_k": 5,
-        "top_p": 0.9
+        "presence_penalty": 0.1,
+        "temperature": 1.8,
+        "top_k": 25,
+        "top_p": 0.75
     },
     "tokenizer": {
         "model_path": "model/tokenizer.model",
@@ -85,14 +84,33 @@
             "<pad>",
             "<mask>"
         ],
-        "use_subword": false,
-        "vocab_size": 2857
+        "use_subword": false
     },
     "training": {
-        "batch_size": 32,
-        "dropout_rate": 0.3,
+        "samples_per_iteration": 32,
+        "cross_validation": {
+            "enabled": true,
+            "early_stopping_patience": 3,
+            "early_stopping_threshold": 1.5,
+            "num_epochs": 4,
+            "num_folds": 2,
+            "validation_frequency": 2
+        },
+        "dropout_rate": 0.1,
+        "learning_rate": {
+            "decay_factor": 0.98,
+            "decay_steps": 200,
+            "initial_lr": 0.0001,
+            "min_lr": 0.000001,
+            "peak_lr": 0.0003,
+            "warmup_steps": 500
+        },
         "num_epochs": 10,
-        "weight_decay": 0.01
-    },
-    "vocab_size": 2857
+        "tuning": {
+            "enabled": false,
+            "evaluation_steps": 50,
+            "num_trials": 10
+        },
+        "weight_decay": 0.1
+    }
 }

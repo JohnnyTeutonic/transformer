@@ -10,6 +10,14 @@ void LossTracker::add_loss(float loss) {
             loss_history.pop_front();
         }
         update_statistics();
+        
+        // Update the visualizer with the new loss values
+        visualizer->add_loss(
+            loss,                // Raw loss value
+            recent_average,      // Smoothed loss (using recent window)
+            get_trend(),         // Trend (recent/overall ratio)
+            0.0f               // No gradient norm available here
+        );
     }
 }
 
@@ -42,12 +50,16 @@ void LossTracker::update_statistics() {
 }
 
 float LossTracker::compute_loss(const Tensor& predictions, const Tensor& targets) {
-    if (predictions.size() != targets.size()) {
-        throw std::runtime_error("Predictions and targets must have the same size");
+    const size_t pred_batch_size = predictions.rows();
+    const size_t target_batch_size = targets.rows();
+    const size_t vocab_size = predictions.cols();
+    
+    if (vocab_size != targets.cols()) {
+        throw std::runtime_error("Vocabulary size mismatch between predictions and targets");
     }
 
-    const size_t batch_size = predictions.rows();
-    const size_t vocab_size = predictions.cols();
+    // Use the minimum batch size if there's a mismatch
+    const size_t batch_size = std::min(pred_batch_size, target_batch_size);
     float total_loss = 0.0f;
 
     // Compute cross-entropy loss for each item in the batch
