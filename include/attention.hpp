@@ -132,7 +132,8 @@ class MultiHeadAttention {
     MultiHeadAttention(size_t hidden_size_, size_t num_heads_, size_t head_dim_,
                        float dropout_prob_, bool use_flash_, bool use_rope_,
                        bool use_sliding_window_, size_t window_size_, bool use_gqa_,
-                       size_t num_kv_heads_, size_t max_seq_length_, bool use_fp16);
+                       size_t num_kv_heads_, size_t max_seq_length_, bool use_fp16,
+                       bool use_fused_attention = true);
 
     /**
      * @brief Performs the forward pass of the attention mechanism.
@@ -441,6 +442,7 @@ class MultiHeadAttention {
     size_t num_kv_heads;     ///< Number of key/value heads for GQA
     size_t max_seq_length;   ///< Maximum sequence length supported
     bool use_fp16_;         ///< Whether to use FP16 computation
+    bool use_fused_attention_; ///< Whether to use fused attention kernels
 
     // Helper methods for attention computation
     void print_matrix_stats(const std::string& name, const Matrix& mat) const;
@@ -496,6 +498,11 @@ class MultiHeadAttention {
     Matrix combine_gradients(const Matrix& d_query, const Matrix& d_key, const Matrix& d_value);
     Matrix compute_attention(const Matrix& Q, const Matrix& K, const Matrix& V,
                            const AttentionMask& mask) const;
+
+#ifdef USE_CUDA
+    // Fused attention kernel method
+    Matrix forward_fused(const Matrix& input, const AttentionMask& mask);
+#endif
 
     // Helper method for safe matrix multiplication
     Matrix safe_matmul(const Matrix& A, const Matrix& B) {

@@ -6,6 +6,7 @@
 #include "../include/cuda/cuda_launch.cuh"
 #include "../include/cuda/attention_ops.cuh"
 #include "../include/cuda/matrix_ops.cuh"
+#include "../include/cuda/fused_attention_kernels.cuh"
 #endif
 #include "../include/gqa.hpp"
 #include "../include/performance_metrics.hpp"
@@ -59,12 +60,13 @@ void MultiHeadAttention::initialize_static_rope_cache(size_t max_seq_len, size_t
 MultiHeadAttention::MultiHeadAttention(size_t hidden_size_, size_t num_heads_, size_t head_dim_,
                                      float dropout_prob_, bool use_flash_, bool use_rope_,
                                      bool use_sliding_window_, size_t window_size_, bool use_gqa_,
-                                     size_t num_kv_heads_, size_t max_seq_length_, bool use_fp16)
+                                     size_t num_kv_heads_, size_t max_seq_length_, bool use_fp16,
+                                     bool use_fused_attention)
     : num_heads(num_heads_), head_dim(head_dim_), hidden_size(hidden_size_),
       dropout_prob(dropout_prob_), use_flash(use_flash_), use_rope(use_rope_),
       use_sliding_window(use_sliding_window_), window_size(window_size_),
       use_gqa(use_gqa_), num_kv_heads(num_kv_heads_), max_seq_length(max_seq_length_),
-      use_fp16_(use_fp16) {
+      use_fp16_(use_fp16), use_fused_attention_(use_fused_attention) {
 
     SCOPE_LOG();
     std::cout << "\n=== MultiHeadAttention::constructor START ===" << std::endl;
@@ -267,6 +269,13 @@ Matrix MultiHeadAttention::forward(const Matrix& input, const AttentionMask& mas
                                std::to_string(hidden_size) + ", got " + 
                                std::to_string(input.cols()));
     }
+
+#ifdef USE_CUDA
+    // Use fused attention kernel for better performance when available
+    if (use_fused_attention_ && !kv_cache) {
+        return forward_fused(input, mask);
+    }
+#endif
 
     // Project input to Q, K, V using matmul
     Matrix Q = matmul(input, params_.query_weights);
@@ -1308,4 +1317,67 @@ int AttentionMask::find_separator_position(const std::vector<int>& tokens) {
     }
     return -1;
 }
+
+#ifdef USE_CUDA
+Matrix MultiHeadAttention::forward_fused(const Matrix& input, const AttentionMask& mask) {
+    std::cout << "=== MultiHeadAttention::forward_fused START ===" << std::endl;
+    
+    size_t batch_size = input.rows();
+    size_t seq_len = input.rows();
+    
+    // Create combined QKV weights matrix
+    Matrix qkv_weights(hidden_size, 3 * hidden_size);
+    FloatVector qkv_bias(3 * hidden_size);
+    
+    // Combine Q, K, V weights and biases
+    for (size_t i = 0; i < hidden_size; ++i) {
+        for (size_t j = 0; j < hidden_size; ++j) {
+            qkv_weights(i, j) = params_.query_weights(i, j);                    // Q
+            qkv_weights(i, j + hidden_size) = params_.key_weights(i, j);        // K  
+            qkv_weights(i, j + 2 * hidden_size) = params_.value_weights(i, j);  // V
+        }
+        qkv_bias[i] = params_.query_bias[i];                    // Q bias
+        qkv_bias[i + hidden_size] = params_.key_bias[i];        // K bias
+        qkv_bias[i + 2 * hidden_size] = params_.value_bias[i];  // V bias
+    }
+    
+    // Prepare output matrix
+    Matrix output(batch_size, hidden_size);
+    
+    // Convert mask to float array (simplified - in practice would be more sophisticated)
+    std::vector<float> mask_data;
+    if (!mask.is_empty()) {
+        mask_data.resize(seq_len * seq_len);
+        for (size_t i = 0; i < seq_len; ++i) {
+            for (size_t j = 0; j < seq_len; ++j) {
+                mask_data[i * seq_len + j] = mask.is_masked(i, j) ? 0.0f : 1.0f;
+            }
+        }
+    }
+    
+    // Launch fused attention kernel
+    cuda::launch_fused_attention_kernel(
+        input.data(),                           // input
+        qkv_weights.data(),                     // qkv_weights  
+        qkv_bias.data(),                        // qkv_bias
+        params_.output_weights.data(),          // output_weights
+        output.data(),                          // output
+        mask_data.empty() ? nullptr : mask_data.data(),  // mask
+        1,                                      // batch_size (treating as single batch)
+        seq_len,                                // seq_len
+        hidden_size,                            // hidden_size
+        num_heads                               // num_heads
+    );
+    
+    // Add output bias
+    for (size_t i = 0; i < output.rows(); ++i) {
+        for (size_t j = 0; j < output.cols(); ++j) {
+            output(i, j) += params_.output_bias[j];
+        }
+    }
+    
+    std::cout << "=== MultiHeadAttention::forward_fused END ===" << std::endl;
+    return output;
+}
+#endif
 

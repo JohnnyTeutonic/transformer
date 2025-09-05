@@ -74,6 +74,8 @@ struct TransformerConfig {
 
     // Training parameters
     size_t batch_size;
+    size_t min_batch_size = 1;
+    size_t max_batch_size = 128;
     size_t num_epochs;
     float initial_lr;
     float dropout_rate;
