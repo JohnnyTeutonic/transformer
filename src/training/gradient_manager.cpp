@@ -1,4 +1,5 @@
 #include "../../include/training/gradient_manager.hpp"
+#include "../../include/gradient_compression.hpp"
 #include <numeric>
 
 void GradientManager::process_gradients(Matrix& gradients) {
@@ -69,4 +70,51 @@ void GradientManager::compute_running_statistics(const Matrix& gradients, float&
         variance += diff * diff;
     }
     variance /= n;
+}
+
+// Gradient compression methods for P2P training
+GradientCompressor::CompressedGradients GradientManager::compress_gradients_for_p2p(
+    const std::vector<Matrix>& gradients) {
+    
+    if (!gradient_compressor_) {
+        // Initialize compressor with adaptive settings
+        gradient_compressor_ = std::make_unique<GradientCompressor>(
+            0.9f,  // 90% sparsity ratio
+            8      // 8-bit quantization
+        );
+    }
+    
+    return gradient_compressor_->compress(gradients);
+}
+
+std::vector<Matrix> GradientManager::decompress_gradients_from_p2p(
+    const GradientCompressor::CompressedGradients& compressed) {
+    
+    if (!gradient_compressor_) {
+        throw std::runtime_error("Gradient compressor not initialized");
+    }
+    
+    return gradient_compressor_->decompress(compressed);
+}
+
+void GradientManager::update_compression_settings(float network_bandwidth_mbps, 
+                                                 float network_latency_ms) {
+    if (!gradient_compressor_) return;
+    
+    // Adapt compression based on network conditions
+    float network_efficiency = network_bandwidth_mbps / (network_latency_ms + 1.0f);
+    
+    if (network_efficiency < 10.0f) {
+        // Slow network: increase compression
+        gradient_compressor_->set_sparsity_ratio(0.95f);
+        gradient_compressor_->set_quantization_bits(4);
+    } else if (network_efficiency > 100.0f) {
+        // Fast network: reduce compression for better accuracy
+        gradient_compressor_->set_sparsity_ratio(0.8f);
+        gradient_compressor_->set_quantization_bits(8);
+    } else {
+        // Balanced settings
+        gradient_compressor_->set_sparsity_ratio(0.9f);
+        gradient_compressor_->set_quantization_bits(6);
+    }
 } 

@@ -92,7 +92,8 @@ TransformerLayer::TransformerLayer(const TransformerConfig& config_, size_t idx)
     self_attention = std::make_unique<MultiHeadAttention>(
         config.hidden_size, config.num_heads, config.head_dim, config.dropout_rate,
         config.use_flash_attention, config.use_rope, config.use_sliding_window, config.window_size,
-        config.use_gqa, config.num_kv_heads, config.max_seq_length, config.use_fp16);
+        config.use_gqa, config.num_kv_heads, config.max_seq_length, config.use_fp16,
+        true); // Enable fused attention kernels
 
     attention_ln = std::make_unique<LayerNorm>(config.hidden_size);
     

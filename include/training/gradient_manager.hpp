@@ -1,6 +1,8 @@
 #pragma once
 #include "../matrix.hpp"
+#include "../gradient_compression.hpp"
 #include <cmath>
+#include <memory>
 
 struct RunningStatistics {
     float mean = 0.0f;
@@ -21,12 +23,20 @@ public:
     bool explosion_detected() const { return explosion_count > EXPLOSION_THRESHOLD; }
     const RunningStatistics& get_statistics() const { return grad_stats; }
 
+    // P2P gradient compression methods
+    GradientCompressor::CompressedGradients compress_gradients_for_p2p(
+        const std::vector<Matrix>& gradients);
+    std::vector<Matrix> decompress_gradients_from_p2p(
+        const GradientCompressor::CompressedGradients& compressed);
+    void update_compression_settings(float network_bandwidth_mbps, float network_latency_ms);
+
     static constexpr float EXPLOSION_THRESHOLD = 5;
     static constexpr float MAX_GRAD_VALUE = 100.0f;
 
 private:
     RunningStatistics grad_stats;
     size_t explosion_count = 0;
+    std::unique_ptr<GradientCompressor> gradient_compressor_;
 
     void update_statistics(const Matrix& gradients);
     void clip_gradients(Matrix& gradients);
