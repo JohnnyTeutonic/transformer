@@ -4,11 +4,17 @@
 #include "../../include/cuda/cuda_check.cuh"
 #include "../../include/cuda/cuda_utils.cuh"
 #include <unordered_map>
+#include <string>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 // Forward declare all kernels
 __global__ void matrix_multiply_kernel(const float* A, const float* B, float* C, 
                                       int M, int N, int K);
 __global__ void gelu_forward_kernel(float* x, int size);
+__global__ void gelu_backward_kernel(float* grad_output, const float* input, int size);
+__global__ void add_bias_kernel(float* matrix, const float* bias, int rows, int cols);
 
 namespace cuda {
     // Add persistent streams
@@ -104,6 +110,12 @@ namespace cuda {
 
     void cleanup_cuda() {
         if (cublas_handle != nullptr) {
+            // Ensure all in-flight GPU work has completed before freeing any
+            // device memory or destroying streams/handles. Freeing buffers that
+            // are still referenced by pending kernels/copies corrupts the
+            // allocator and causes an access violation at teardown.
+            cudaDeviceSynchronize();
+
             memory_pool.cleanup();
             
             // Cleanup streams
@@ -115,6 +127,17 @@ namespace cuda {
             cublas_handle = nullptr;
             cuda_initialized = false;
         }
+    }
+
+    // Expose the shared cuBLAS handle so other translation units (e.g. the
+    // device-resident LM head projection in loss_kernels.cu) can reuse it
+    // instead of creating a second handle. Creating a second handle led to a
+    // crash during process teardown (cuBLAS atexit cleanup vs. context destroy).
+    cublasHandle_t get_cublas_handle() {
+        if (!cuda_initialized || cublas_handle == nullptr) {
+            initialize_cuda();
+        }
+        return cublas_handle;
     }
 
     // Helper to get next stream in round-robin fashion
@@ -147,6 +170,14 @@ namespace cuda {
                 std::to_string(C.rows()) + "x" + std::to_string(C.cols()));
         }
 
+        // ---- Optional phase profiling (set MATMUL_PROFILE=1) ----
+        static const bool s_prof = (std::getenv("MATMUL_PROFILE") != nullptr);
+        static long long s_calls = 0;
+        static double s_alloc = 0, s_launch = 0, s_sync = 0, s_free = 0;
+        static double s_bytes = 0;
+        using clk = std::chrono::steady_clock;
+        auto p0 = s_prof ? clk::now() : clk::time_point{};
+
         // Use memory pool instead of direct allocation
         float *d_A = memory_pool.allocate(A.rows() * A.cols());
         float *d_B = memory_pool.allocate(B.rows() * B.cols());
@@ -155,6 +186,8 @@ namespace cuda {
         size_t A_size = A.rows() * A.cols() * sizeof(float);
         size_t B_size = B.rows() * B.cols() * sizeof(float);
         size_t C_size = C.rows() * C.cols() * sizeof(float);
+
+        auto p1 = s_prof ? clk::now() : clk::time_point{};
 
         // Use persistent stream
         cudaStream_t stream = get_next_stream();
@@ -184,13 +217,34 @@ namespace cuda {
         }
 
         CUDA_CHECK(cudaMemcpyAsync(C.data(), d_C, C_size, cudaMemcpyDeviceToHost, stream));
+
+        auto p2 = s_prof ? clk::now() : clk::time_point{};
         
         // Only synchronize the specific stream
         cudaStreamSynchronize(stream);
 
+        auto p3 = s_prof ? clk::now() : clk::time_point{};
+
         memory_pool.free(d_A);
         memory_pool.free(d_B);
         memory_pool.free(d_C);
+
+        if (s_prof) {
+            auto p4 = clk::now();
+            auto us = [](clk::time_point a, clk::time_point b){
+                return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count(); };
+            s_alloc  += us(p0, p1);
+            s_launch += us(p1, p2);
+            s_sync   += us(p2, p3);
+            s_free   += us(p3, p4);
+            s_bytes  += (double)(A_size + B_size + C_size);
+            if (++s_calls % 200 == 0) {
+                printf("[MATMUL_PROFILE] calls=%lld avg(us): alloc=%.1f launch=%.1f sync=%.1f free=%.1f | avgMB=%.2f\n",
+                       s_calls, s_alloc/s_calls, s_launch/s_calls, s_sync/s_calls, s_free/s_calls,
+                       (s_bytes/s_calls)/1e6);
+                fflush(stdout);
+            }
+        }
     }
 
     void matmul_transposed(const Matrix& A, const Matrix& B, Matrix& C) {
@@ -279,6 +333,59 @@ namespace cuda {
         
         memory_pool.free(d_x);
     }
+
+    void gelu_backward(Matrix& grad_output, const Matrix& input) {
+        // GELU derivative: d/dx[x * Φ(x)] where Φ is CDF of standard normal (approximated)
+        // grad = grad_output * (Φ(x) + x * φ(x))
+        float* d_grad = memory_pool.allocate(grad_output.size());
+        float* d_input = memory_pool.allocate(input.size());
+        size_t size = grad_output.size() * sizeof(float);
+        
+        cudaStream_t stream = get_next_stream();
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_grad, grad_output.data(), size, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_input, input.data(), size, cudaMemcpyHostToDevice, stream));
+        
+        dim3 block(256);
+        dim3 grid((grad_output.size() + 255) / 256);
+        
+        gelu_backward_kernel<<<grid, block, 0, stream>>>(d_grad, d_input, grad_output.size());
+        
+        CUDA_CHECK(cudaMemcpyAsync(grad_output.data(), d_grad, size, cudaMemcpyDeviceToHost, stream));
+        
+        cudaStreamSynchronize(stream);
+        
+        memory_pool.free(d_grad);
+        memory_pool.free(d_input);
+    }
+
+    void add_bias(Matrix& matrix, const Vector& bias) {
+        // Add bias vector to each row of matrix
+        // matrix shape: [batch_size, features]
+        // bias shape: [features]
+        float* d_matrix = memory_pool.allocate(matrix.size());
+        float* d_bias = memory_pool.allocate(bias.size());
+        
+        size_t matrix_size = matrix.size() * sizeof(float);
+        size_t bias_size = bias.size() * sizeof(float);
+        
+        cudaStream_t stream = get_next_stream();
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_matrix, matrix.data(), matrix_size, cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_bias, bias.data(), bias_size, cudaMemcpyHostToDevice, stream));
+        
+        dim3 block(256);
+        dim3 grid((matrix.size() + 255) / 256);
+        
+        add_bias_kernel<<<grid, block, 0, stream>>>(d_matrix, d_bias, matrix.rows(), matrix.cols());
+        
+        CUDA_CHECK(cudaMemcpyAsync(matrix.data(), d_matrix, matrix_size, cudaMemcpyDeviceToHost, stream));
+        
+        cudaStreamSynchronize(stream);
+        
+        memory_pool.free(d_matrix);
+        memory_pool.free(d_bias);
+    }
 }
 
 // Kernel implementations
@@ -329,5 +436,113 @@ __global__ void gelu_forward_kernel(float* x, int size) {
         float val = x[idx];
         float cdf = 0.5f * (1.0f + tanhf(0.797884f * (val + 0.044715f * val * val * val)));
         x[idx] = val * cdf;
+    }
+}
+
+__global__ void gelu_backward_kernel(float* grad_output, const float* input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float x = input[idx];
+        // GELU(x) = x * Φ(x) where Φ is CDF of standard normal (approximated with tanh)
+        // GELU'(x) = Φ(x) + x * φ(x)
+        // Using tanh approximation: Φ(x) ≈ 0.5 * (1 + tanh(√(2/π) * (x + 0.044715 * x^3)))
+        float x_cubed = x * x * x;
+        float inner = 0.797884f * (x + 0.044715f * x_cubed);
+        float tanh_inner = tanhf(inner);
+        float cdf = 0.5f * (1.0f + tanh_inner);
+        
+        // Derivative of tanh approximation
+        float tanh_deriv = 1.0f - tanh_inner * tanh_inner;
+        float inner_deriv = 0.797884f * (1.0f + 0.134145f * x * x);
+        float pdf = 0.5f * tanh_deriv * inner_deriv;
+        
+        // GELU derivative
+        float gelu_grad = cdf + x * pdf;
+        
+        grad_output[idx] *= gelu_grad;
+    }
+}
+
+__global__ void add_bias_kernel(float* matrix, const float* bias, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < rows * cols) {
+        int col = idx % cols;
+        matrix[idx] += bias[col];
+    }
+}
+
+__global__ void softmax_kernel_rowwise(float* matrix, int rows, int cols) {
+    int row = blockIdx.x;
+    if (row >= rows) return;
+    
+    extern __shared__ float shared[];
+    float* row_data = shared;
+    
+    // Load row into shared memory and find max
+    float max_val = -INFINITY;
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+        float val = matrix[row * cols + j];
+        row_data[j] = val;
+        max_val = fmaxf(max_val, val);
+    }
+    
+    // Reduce to find global max across threads
+    __shared__ float shared_max;
+    if (threadIdx.x == 0) shared_max = -INFINITY;
+    __syncthreads();
+    atomicMax((int*)&shared_max, __float_as_int(max_val));
+    __syncthreads();
+    max_val = shared_max;
+    
+    // Compute exp and sum
+    float sum = 0.0f;
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+        float exp_val = expf(row_data[j] - max_val);
+        row_data[j] = exp_val;
+        sum += exp_val;
+    }
+    
+    // Reduce sum across threads
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) shared_sum = 0.0f;
+    __syncthreads();
+    atomicAdd(&shared_sum, sum);
+    __syncthreads();
+    sum = shared_sum;
+    
+    // Normalize and write back
+    float inv_sum = 1.0f / (sum + 1e-10f);
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+        matrix[row * cols + j] = row_data[j] * inv_sum;
+    }
+}
+
+namespace cuda {
+    void softmax(Matrix& matrix) {
+        if (!cuda_initialized) {
+            initialize_cuda();
+        }
+        
+        float* d_matrix = memory_pool.allocate(matrix.size());
+        size_t size = matrix.size() * sizeof(float);
+        
+        cudaStream_t stream = get_next_stream();
+        
+        CUDA_CHECK(cudaMemcpyAsync(d_matrix, matrix.data(), size, cudaMemcpyHostToDevice, stream));
+        
+        // Launch one block per row
+        int block_size = 256;
+        if (matrix.cols() < 256) block_size = 128;
+        if (matrix.cols() < 128) block_size = 64;
+        size_t shared_mem = matrix.cols() * sizeof(float);
+        
+        softmax_kernel_rowwise<<<matrix.rows(), block_size, shared_mem, stream>>>(
+            d_matrix, matrix.rows(), matrix.cols());
+        
+        CUDA_CHECK(cudaMemcpyAsync(matrix.data(), d_matrix, size, cudaMemcpyDeviceToHost, stream));
+        
+        cudaStreamSynchronize(stream);
+        
+        memory_pool.free(d_matrix);
     }
 }

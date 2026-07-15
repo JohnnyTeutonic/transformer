@@ -5,6 +5,7 @@
 #include "components.hpp"
 #include "tensor.hpp"
 #include "config.hpp"
+#include "lora.hpp"
 #include "tiktoken_tokenizer.hpp"
 #ifdef USE_CUDA
 #include "../include/cuda/cuda_utils.cuh"
@@ -146,6 +147,18 @@ class MultiHeadAttention {
                    const std::optional<KVCache>& kv_cache = std::nullopt);
 
     /**
+     * @brief Batched forward pass with explicit batch/sequence dimensions.
+     * Computes attention per-sequence: O(batch × seq²) instead of O((batch×seq)²)
+     * @param x Input tensor [batch_size * seq_len, hidden_size]
+     * @param mask Attention mask (block diagonal for batched sequences)
+     * @param batch_size Number of sequences in batch
+     * @param seq_len Length of each sequence
+     * @return Output tensor [batch_size * seq_len, hidden_size]
+     */
+    Matrix forward_batched(const Matrix& x, const AttentionMask& mask,
+                          size_t batch_size, size_t seq_len);
+
+    /**
      * @brief Performs the backward pass to compute gradients.
      * @param grad_output Gradient of the loss with respect to the output
      * @param input Original input tensor
@@ -266,6 +279,31 @@ class MultiHeadAttention {
         FloatVector value_bias_grad;    // Gradient for value bias
         FloatVector output_bias_grad;   // Gradient for output bias
     };
+    
+    // Adam optimizer state (first + second moments, shared step counter).
+    // Was first-moment-only SGD-momentum until 2026-07-13: with the LM head
+    // on Adam and the core on SGD@2e-4, the core stayed near init (the
+    // loss-6.0 plateau).
+    struct MomentumState {
+        Matrix query_m;
+        Matrix key_m;
+        Matrix value_m;
+        Matrix output_m;
+        Matrix query_v;
+        Matrix key_v;
+        Matrix value_v;
+        Matrix output_v;
+        FloatVector query_bias_m;
+        FloatVector key_bias_m;
+        FloatVector value_bias_m;
+        FloatVector output_bias_m;
+        FloatVector query_bias_v;
+        FloatVector key_bias_v;
+        FloatVector value_bias_v;
+        FloatVector output_bias_v;
+        size_t t = 0;
+        bool initialized = false;
+    };
 
     Parameters& parameters() { return params_; }
     Gradients& param_gradients() { return grads_; }
@@ -304,6 +342,12 @@ class MultiHeadAttention {
     const Matrix& get_key_weights() const { return params_.key_weights; }
     const Matrix& get_value_weights() const { return params_.value_weights; }
     const Matrix& get_output_weights() const { return params_.output_weights; }
+    
+    // GGUF export aliases
+    const Matrix& getQueryWeights() const { return params_.query_weights; }
+    const Matrix& getKeyWeights() const { return params_.key_weights; }
+    const Matrix& getValueWeights() const { return params_.value_weights; }
+    const Matrix& getOutputWeights() const { return params_.output_weights; }
 
     // Add the direct matrix version of forward
     Matrix forward(const Matrix& input, const Matrix& attention_mask);
@@ -428,6 +472,9 @@ class MultiHeadAttention {
   private:
     Parameters params_;
     Gradients grads_;
+    MomentumState momentum_;  // For stable training with momentum
+    // LoRA adapters (active only when lora::settings().enabled)
+    lora::LoRAAdapter lora_q_, lora_k_, lora_v_, lora_o_;
     
     // Configuration parameters
     size_t num_heads;         ///< Number of attention heads
@@ -450,13 +497,22 @@ class MultiHeadAttention {
     Vector softmax_with_temperature(const Vector& input, float temperature) const;
     void apply_stable_softmax(Matrix& x) const;
 
-    // Cache variables
+    // Cache variables for training (backward pass)
     Matrix cached_keys;              ///< Cached key projections
     Matrix cached_values;            ///< Cached value projections
     Matrix cached_attention_weights; ///< Cached attention scores
     Matrix cached_query_layer;       ///< Cached query layer output
     Matrix cached_key_layer;         ///< Cached key layer output
     Matrix cached_value_layer;       ///< Cached value layer output
+    Matrix cached_attn_output;       ///< Cached attention output BEFORE output projection (critical for backward!)
+
+    // Batched-forward geometry, cached for the exact backward pass.
+    // cached_batched_valid_ is true only when forward_batched populated the
+    // caches in its [batch*seq x hidden] layout; backward falls back to the
+    // legacy approximate path otherwise.
+    size_t cached_batch_size_ = 0;
+    size_t cached_seq_len_ = 0;
+    bool cached_batched_valid_ = false;
 
     // Static RoPE cache shared across all instances
     static Matrix cos_cached;
@@ -465,6 +521,11 @@ class MultiHeadAttention {
 
     // Private helper methods
     Vector apply_rope(const Vector& x, size_t position) const;
+
+    /// Apply RoPE rotation in-place to every row of a [batch*seq x hidden]
+    /// matrix (row r -> position r % seq_len). inverse=true applies the
+    /// transpose rotation (rotate by -theta), used in the backward pass.
+    void rotate_rows_rope(Matrix& m, size_t seq_len, bool inverse) const;
     Matrix flash_attention(const Matrix& Q, const Matrix& K, const Matrix& V,
                            const AttentionMask& mask) const;
     Matrix standard_attention(const Matrix& Q, const Matrix& K, const Matrix& V,

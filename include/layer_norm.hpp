@@ -1,6 +1,7 @@
 #pragma once
 #include "matrix.hpp"
-
+#include "lora.hpp"
+#include <cmath>
 
 /**
  * @brief Layer Normalization implementation for neural networks.
@@ -21,8 +22,11 @@ public:
      * @brief Constructs a layer normalization module.
      * @param hidden_size_ Size of the input features
      * @param eps_ Small constant for numerical stability (default: 1e-5)
+     * @param rms_ RMSNorm mode (LLaMA-compatible): no mean subtraction, no beta
      */
-    LayerNorm(size_t hidden_size_, float eps_ = 1e-5);
+    LayerNorm(size_t hidden_size_, float eps_ = 1e-5, bool rms_ = false);
+
+    bool is_rms() const { return rms_mode_; }
 
     /**
      * @brief Performs the forward pass of layer normalization.
@@ -98,7 +102,8 @@ public:
      * @param other LayerNorm instance to copy from
      */
     LayerNorm(const LayerNorm& other)
-        : hidden_size_(other.hidden_size_), eps_(other.eps_), params_(other.params_),
+        : hidden_size_(other.hidden_size_), eps_(other.eps_), rms_mode_(other.rms_mode_),
+          params_(other.params_),
           input_cache_(other.input_cache_), output_cache_(other.output_cache_),
           grads_(other.grads_) {}
 
@@ -111,6 +116,7 @@ public:
         if (this != &other) {
             hidden_size_ = other.hidden_size_;
             eps_ = other.eps_;
+            rms_mode_ = other.rms_mode_;
             params_ = other.params_;
             input_cache_ = other.input_cache_;
             output_cache_ = other.output_cache_;
@@ -134,6 +140,13 @@ public:
     // Const accessors
     const Matrix& get_gamma() const { return params_.gamma; }
     const Matrix& get_beta() const { return params_.beta; }
+    
+    // GGUF export accessor (returns gamma as Vector for 1D export)
+    Vector getGamma() const {
+        Vector v(hidden_size_);
+        std::copy(params_.gamma.data(), params_.gamma.data() + hidden_size_, v.data());
+        return v;
+    }
 
     // Parameter structure to hold gamma and beta
     struct Parameters {
@@ -146,6 +159,16 @@ public:
         Matrix gamma_grad;  // Gradient for gamma
         Matrix beta_grad;   // Gradient for beta
     };
+    
+    // Adam optimizer state (first + second moments; see attention.hpp note)
+    struct MomentumState {
+        Matrix gamma_m;
+        Matrix beta_m;
+        Matrix gamma_v;
+        Matrix beta_v;
+        size_t t = 0;
+        bool initialized = false;
+    };
 
     // Parameter accessors
     Parameters& parameters() { return params_; }
@@ -154,30 +177,62 @@ public:
     const Gradients& param_gradients() const { return grads_; }
 
     void update_parameters(float learning_rate) {
-        // Update gamma (scale parameter)
-        float* gamma_data = params_.gamma.data();
-        float* gamma_grad_data = grads_.gamma_grad.data();
-        for (size_t i = 0; i < hidden_size_; ++i) {
-            gamma_data[i] -= learning_rate * gamma_grad_data[i];
-            gamma_grad_data[i] = 0.0f;  // Reset gradient
-        }
+        // LoRA fine-tuning freezes everything except the adapters.
+        if (lora::settings().enabled) return;
+        // Adam (matches the LM head's optimizer; see attention.cpp note)
+        const float beta = 0.9f;
+        const float beta2 = 0.999f;
+        const float adam_eps = 1e-8f;
+        const float clip_threshold = 1.0f;
 
-        // Update beta (shift parameter)
-        float* beta_data = params_.beta.data();
-        float* beta_grad_data = grads_.beta_grad.data();
-        for (size_t i = 0; i < hidden_size_; ++i) {
-            beta_data[i] -= learning_rate * beta_grad_data[i];
-            beta_grad_data[i] = 0.0f;  // Reset gradient
+        // Initialize optimizer state on first call
+        if (!momentum_.initialized) {
+            momentum_.gamma_m = Matrix(1, hidden_size_, 0.0f);
+            momentum_.beta_m = Matrix(1, hidden_size_, 0.0f);
+            momentum_.gamma_v = Matrix(1, hidden_size_, 0.0f);
+            momentum_.beta_v = Matrix(1, hidden_size_, 0.0f);
+            momentum_.initialized = true;
         }
+        momentum_.t += 1;
+        const float bc1 = 1.0f - std::pow(beta, static_cast<float>(momentum_.t));
+        const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(momentum_.t));
+
+        auto adam_vec = [&](float* param, float* grad, float* m, float* v) {
+            float norm_sq = 0.0f;
+            for (size_t i = 0; i < hidden_size_; ++i) {
+                norm_sq += grad[i] * grad[i];
+            }
+            float norm = std::sqrt(norm_sq);
+            float scale = (norm > clip_threshold) ? (clip_threshold / (norm + 1e-8f)) : 1.0f;
+            for (size_t i = 0; i < hidden_size_; ++i) {
+                float g = grad[i] * scale;
+                m[i] = beta * m[i] + (1.0f - beta) * g;
+                v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
+                param[i] -= learning_rate * (m[i] / bc1) / (std::sqrt(v[i] / bc2) + adam_eps);
+                grad[i] = 0.0f;
+            }
+        };
+
+        adam_vec(params_.gamma.data(), grads_.gamma_grad.data(),
+                 momentum_.gamma_m.data(), momentum_.gamma_v.data());
+
+        // RMSNorm mode has no beta parameter - keep it frozen at zero
+        if (rms_mode_) {
+            return;
+        }
+        adam_vec(params_.beta.data(), grads_.beta_grad.data(),
+                 momentum_.beta_m.data(), momentum_.beta_v.data());
     }
 
 private:
     size_t hidden_size_;
     float eps_;
+    bool rms_mode_ = false;  // RMSNorm (LLaMA) mode: no mean subtraction, no beta
     Parameters params_;
     Matrix input_cache_;  // Stored for backward pass
     Matrix output_cache_; // Stored for backward pass
     Gradients grads_;
+    MomentumState momentum_;  // For stable training
 
     // Helper method to compute gradients
     Matrix compute_gradients(const Matrix& grad_output);

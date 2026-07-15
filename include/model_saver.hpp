@@ -76,10 +76,11 @@ class ModelSaver {
      * @param model_name Model identifier
      * @param epoch Current training epoch
      * @param loss Current loss value
+     * @param step Current training step (default 0)
      * @return true if checkpoint saved successfully
      */
     bool saveCheckpoint(const Transformer& transformer, const std::string& directory,
-                        const std::string& model_name, int epoch, float loss);
+                        const std::string& model_name, int epoch, float loss, int step = 0);
 
     /**
      * @brief Loads the most recent checkpoint.

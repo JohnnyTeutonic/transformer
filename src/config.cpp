@@ -1,8 +1,13 @@
 #include "../include/config.hpp"
+#include "../include/architecture.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
 #include <nlohmann/json.hpp>
+
+namespace transformer_runtime {
+bool llama_no_bias = false;
+}
 
 TransformerConfig::TransformerConfig(size_t max_seq_length_, size_t hidden_size_,
                                    size_t num_layers_, size_t num_heads_, size_t samples_per_iteration_,
@@ -13,11 +18,10 @@ TransformerConfig::TransformerConfig(size_t max_seq_length_, size_t hidden_size_
       head_dim(hidden_size_ / num_heads_),
       intermediate_size(4 * hidden_size_),
       max_seq_length(max_seq_length_),
-      num_kv_heads(num_heads_) {
+      num_kv_heads(num_heads_),
+      num_epochs(num_epochs_) {
     
-    // Initialize training config
-    training.samples_per_iteration = samples_per_iteration_;
-    training.num_epochs = num_epochs_;
+    // Note: samples_per_iteration removed from TransformerConfig
     
     if (hidden_size % num_heads != 0) {
         throw std::invalid_argument("Hidden size must be divisible by number of heads");
@@ -31,8 +35,7 @@ bool TransformerConfig::operator!=(const TransformerConfig& other) const {
            num_heads != other.num_heads ||
            head_dim != other.head_dim ||
            intermediate_size != other.intermediate_size ||
-           training.samples_per_iteration != other.training.samples_per_iteration ||
-           training.num_epochs != other.training.num_epochs ||
+           num_epochs != other.num_epochs ||
            dropout_rate != other.dropout_rate ||
            weight_decay != other.weight_decay ||
            use_gradient_checkpointing != other.use_gradient_checkpointing ||
@@ -83,53 +86,27 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
             
             // Debug output before loading
             std::cout << "\nBefore loading training config:" << std::endl;
-            std::cout << "- samples_per_iteration: " << training.samples_per_iteration << std::endl;
-            std::cout << "- num_epochs: " << training.num_epochs << std::endl;
-            std::cout << "- tuning.enabled: " << std::boolalpha << training.tuning.enabled << std::endl;
+            // Note: samples_per_iteration and training.tuning removed from TransformerConfig
+            std::cout << "- num_epochs: " << num_epochs << std::endl;
             
-            training.samples_per_iteration = training_json.value("samples_per_iteration", training.samples_per_iteration);
-            training.num_epochs = training_json.value("num_epochs", training.num_epochs);
-            training.dropout_rate = training_json.value("dropout_rate", training.dropout_rate);
-            training.weight_decay = training_json.value("weight_decay", training.weight_decay);
+            // training.samples_per_iteration = training_json.value("samples_per_iteration", training.samples_per_iteration);
+            num_epochs = training_json.value("num_epochs", num_epochs);
+            dropout_rate = training_json.value("dropout_rate", dropout_rate);
+            weight_decay = training_json.value("weight_decay", weight_decay);
 
-            // Load tuning configuration
-            if (training_json.contains("tuning")) {
-                const auto& tuning_json = training_json["tuning"];
-                std::cout << "\nFound tuning configuration in JSON:" << std::endl;
-                std::cout << "JSON tuning.enabled = " << std::boolalpha 
-                          << tuning_json.value("enabled", true) << std::endl;
-                
-                training.tuning.enabled = tuning_json.value("enabled", training.tuning.enabled);
-                training.tuning.num_trials = tuning_json.value("num_trials", training.tuning.num_trials);
-                training.tuning.evaluation_steps = tuning_json.value("evaluation_steps", training.tuning.evaluation_steps);
-                
-                std::cout << "\nAfter loading tuning config:" << std::endl;
-                std::cout << "- enabled: " << std::boolalpha << training.tuning.enabled << std::endl;
-                std::cout << "- num_trials: " << training.tuning.num_trials << std::endl;
-                std::cout << "- evaluation_steps: " << training.tuning.evaluation_steps << std::endl;
-            } else {
-                std::cout << "No tuning configuration found in JSON, using defaults" << std::endl;
-            }
+            // Note: Tuning configuration removed from TransformerConfig
+            // If needed, add tuning parameters to the top-level config
 
-            // Load cross validation configuration
-            if (training_json.contains("cross_validation")) {
-                const auto& cv = training_json["cross_validation"];
-                training.cross_validation.num_folds = cv.value("num_folds", training.cross_validation.num_folds);
-                training.cross_validation.validation_frequency = cv.value("validation_frequency", training.cross_validation.validation_frequency);
-                training.cross_validation.early_stopping_threshold = cv.value("early_stopping_threshold", training.cross_validation.early_stopping_threshold);
-                training.cross_validation.early_stopping_patience = cv.value("early_stopping_patience", training.cross_validation.early_stopping_patience);
-                training.cross_validation.num_epochs = cv.value("num_epochs", training.cross_validation.num_epochs);
-            }
+            // Note: Already handled in utils.cpp, cross_validation moved to top-level
 
-            // Load learning rate configuration
+            // Load learning rate configuration to top-level fields
             if (training_json.contains("learning_rate")) {
                 const auto& lr = training_json["learning_rate"];
-                training.learning_rate.initial_lr = lr.value("initial_lr", training.learning_rate.initial_lr);
-                training.learning_rate.peak_lr = lr.value("peak_lr", training.learning_rate.peak_lr);
-                training.learning_rate.warmup_steps = lr.value("warmup_steps", training.learning_rate.warmup_steps);
-                training.learning_rate.decay_factor = lr.value("decay_factor", training.learning_rate.decay_factor);
-                training.learning_rate.decay_steps = lr.value("decay_steps", training.learning_rate.decay_steps);
-                training.learning_rate.min_lr = lr.value("min_lr", training.learning_rate.min_lr);
+                initial_lr = lr.value("initial_lr", initial_lr);
+                peak_lr = lr.value("peak_lr", peak_lr);
+                warmup_steps = lr.value("warmup_steps", warmup_steps);
+                decay_factor = lr.value("decay_factor", decay_factor);
+                // Note: decay_steps and min_lr not in TransformerConfig, skip or add if needed
             }
         }
 
@@ -176,6 +153,27 @@ void TransformerConfig::load_from_json(const std::string& config_path) {
             paths.save_directory = p.value("save_directory", paths.save_directory);
             paths.model_name = p.value("model_name", paths.model_name);
             paths.checkpoint_frequency = p.value("checkpoint_frequency", paths.checkpoint_frequency);
+        }
+
+        // Post-training export ("gguf" | "safetensors" | "both" | "none")
+        if (j.contains("export")) {
+            const auto& e = j["export"];
+            export_format = e.value("format", export_format);
+            export_path = e.value("path", export_path);
+        }
+
+        // Declarative architecture block (family preset + overrides)
+        if (j.contains("architecture")) {
+            arch::ArchitectureSpec spec = arch::ArchitectureSpec::from_json(j["architecture"]);
+            spec.apply(*this);
+        }
+
+        // LoRA fine-tuning block
+        if (j.contains("lora")) {
+            const auto& l = j["lora"];
+            lora_enabled = l.value("enabled", lora_enabled);
+            lora_rank = l.value("rank", lora_rank);
+            lora_alpha = l.value("alpha", lora_alpha);
         }
 
         // Load tokenizer configuration

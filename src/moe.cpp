@@ -27,25 +27,56 @@ MixtureOfExperts::MixtureOfExperts(size_t num_experts, size_t top_k, size_t hidd
 
 Matrix MixtureOfExperts::forward(const Matrix& hidden_states) {
 #ifdef USE_CUDA
-    // The full MoE forward pass on the GPU is complex.
-    // It involves: Router -> Dispatch -> Expert Forward -> Combine.
-    // We have the router kernel. The dispatch/combine is a placeholder.
-    // For now, we'll perform the routing on GPU, then fallback to CPU for dispatch/combine.
-    
-    // 1. Perform routing on GPU
+    // Convert input to CudaMatrix
     cuda::CudaMatrix d_hidden_states(hidden_states);
-    // ... (logic to call router kernel) ...
-    
-    // 2. Copy routing results and hidden states to CPU for dispatch/combine
-    // Matrix top_k_indices = d_top_k_indices.to_matrix();
-    // Matrix top_k_weights = d_top_k_weights.to_matrix();
-    // ... rest of CPU logic ...
-    
-    // This hybrid approach is inefficient. Since the dispatch kernel is a placeholder,
-    // we will just keep the entire MoE forward pass on the CPU for now when USE_CUDA is defined.
-    // This avoids unnecessary data transfer and ensures correctness.
-#endif
 
+    // Ensure expert parameters are on GPU
+    if (experts_params_gpu_.empty()) {
+        experts_params_gpu_.reserve(num_experts_);
+        for (size_t i = 0; i < num_experts_; ++i) {
+            experts_params_gpu_.push_back(
+                std::make_unique<FeedForward::CudaParameters>(experts_[i]->get_cuda_params())
+            );
+        }
+    }
+
+    // Get routing decisions from the router (this should already be on GPU)
+    RouterOutput router_output = router_.forward(hidden_states);
+    
+    // Convert router outputs to CudaMatrix
+    cuda::CudaMatrix d_top_k_indices(router_output.top_k_indices);
+    cuda::CudaMatrix d_top_k_weights(router_output.top_k_weights);
+    
+    // Prepare output matrix
+    cuda::CudaMatrix d_final_output(hidden_states.rows(), hidden_size_);
+    
+    // Create vector of CudaParameters references
+    std::vector<FeedForward::CudaParameters> expert_params_refs;
+    expert_params_refs.reserve(num_experts_);
+    for (const auto& param_ptr : experts_params_gpu_) {
+        expert_params_refs.push_back(*param_ptr);
+    }
+    
+    // Launch the optimized MoE CUDA kernel
+    cuda::kernels::moe_forward_kernel_launcher(
+        d_hidden_states,
+        d_top_k_indices,
+        d_top_k_weights,
+        expert_params_refs,
+        static_cast<int>(num_experts_),
+        d_final_output
+    );
+    
+    // Calculate auxiliary loss (same as CPU version)
+    float aux_loss = 0.0f;
+    for (size_t i = 0; i < num_experts_; ++i) {
+        aux_loss += router_output.expert_token_fractions[i] * router_output.expert_token_fractions[i];
+    }
+    last_aux_loss_ = aux_loss * num_experts_ * aux_loss_coefficient_;
+    
+    // Convert result back to CPU
+    return d_final_output.to_matrix();
+#else
     // --- CPU Implementation ---
     input_cache_ = hidden_states;
     size_t batch_size = hidden_states.rows();
@@ -86,8 +117,8 @@ Matrix MixtureOfExperts::forward(const Matrix& hidden_states) {
 
         // 3. Pass token to its assigned top-k experts
         for (size_t k = 0; k < top_k_; ++k) {
-            size_t expert_index = static_cast<size_t>(top_k_indices(i, k));
-            float weight = top_k_weights(i, k);
+            size_t expert_index = static_cast<size_t>(top_k_indices_cache_(i, k));
+            float weight = top_k_weights_cache_(i, k);
 
             if (expert_index >= experts_.size()) {
                 throw std::runtime_error("Expert index out of bounds.");
@@ -107,6 +138,7 @@ Matrix MixtureOfExperts::forward(const Matrix& hidden_states) {
     }
 
     return final_output;
+#endif
 }
 
 Matrix MixtureOfExperts::backward(const Matrix& grad_output) {
@@ -154,4 +186,97 @@ Matrix MixtureOfExperts::backward(const Matrix& grad_output) {
     router_.backward(d_router_softmax);
 
     return d_input;
+}
+
+// Additional method implementations for TransformerLayer compatibility
+
+void MixtureOfExperts::set_training(bool mode) {
+    // Set training mode for all experts
+    for (auto& expert : experts_) {
+        expert->set_training(mode);
+    }
+    // Router doesn't have set_training method
+}
+
+void MixtureOfExperts::reset_state() {
+    // Clear caches
+    input_cache_ = Matrix();
+    top_k_indices_cache_ = Matrix();
+    top_k_weights_cache_ = Matrix();
+    expert_outputs_cache_.clear();
+    last_aux_loss_ = 0.0f;
+}
+
+void MixtureOfExperts::save(std::ostream& os) const {
+    // Save configuration
+    os.write(reinterpret_cast<const char*>(&num_experts_), sizeof(num_experts_));
+    os.write(reinterpret_cast<const char*>(&top_k_), sizeof(top_k_));
+    os.write(reinterpret_cast<const char*>(&hidden_size_), sizeof(hidden_size_));
+    os.write(reinterpret_cast<const char*>(&intermediate_size_), sizeof(intermediate_size_));
+    os.write(reinterpret_cast<const char*>(&aux_loss_coefficient_), sizeof(aux_loss_coefficient_));
+    
+    // Save each expert
+    for (const auto& expert : experts_) {
+        expert->save(os);
+    }
+    
+    // Router save not implemented yet
+    // router_.save(os);
+}
+
+std::unique_ptr<MixtureOfExperts> MixtureOfExperts::load(std::istream& is, const TransformerConfig& config) {
+    // Load configuration
+    size_t num_experts, top_k, hidden_size, intermediate_size;
+    float aux_loss_coefficient;
+    
+    is.read(reinterpret_cast<char*>(&num_experts), sizeof(num_experts));
+    is.read(reinterpret_cast<char*>(&top_k), sizeof(top_k));
+    is.read(reinterpret_cast<char*>(&hidden_size), sizeof(hidden_size));
+    is.read(reinterpret_cast<char*>(&intermediate_size), sizeof(intermediate_size));
+    is.read(reinterpret_cast<char*>(&aux_loss_coefficient), sizeof(aux_loss_coefficient));
+    
+    // Create MoE instance
+    auto moe = std::make_unique<MixtureOfExperts>(num_experts, top_k, hidden_size, intermediate_size, aux_loss_coefficient);
+    
+    // Load each expert
+    for (auto& expert : moe->experts_) {
+        expert = FeedForward::load(is);
+    }
+    
+    // Rebuild expert pointers
+    moe->experts_ptrs_.clear();
+    for (const auto& expert : moe->experts_) {
+        moe->experts_ptrs_.push_back(expert.get());
+    }
+    
+    // Router load not implemented yet
+    // moe->router_ = Router::load(is);
+    
+    return moe;
+}
+
+std::vector<std::reference_wrapper<Matrix>> MixtureOfExperts::get_weights() {
+    std::vector<std::reference_wrapper<Matrix>> weights;
+    
+    // Collect weights from all experts
+    for (auto* expert : experts_ptrs_) {
+        auto expert_weights = expert->get_weights();
+        weights.insert(weights.end(), expert_weights.begin(), expert_weights.end());
+    }
+    
+    // Router get_weights not implemented yet
+    // auto router_weights = router_.get_weights();
+    // weights.insert(weights.end(), router_weights.begin(), router_weights.end());
+    
+    return weights;
+}
+
+void MixtureOfExperts::update_parameters(float learning_rate) {
+    // Update all expert parameters
+    for (auto* expert : experts_ptrs_) {
+        expert->update_parameters(learning_rate);
+    }
+    
+    // Router update_parameters not implemented yet
+    // router_.update_parameters(learning_rate);
 }

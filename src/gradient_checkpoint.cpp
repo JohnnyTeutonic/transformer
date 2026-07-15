@@ -15,9 +15,10 @@ void GradientCheckpoint::save_activation(const Matrix& activation, size_t layer)
                                      std::to_string(layer));
         }
 
+// MSVC: loop vars must be signed int
 #pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < activation.rows(); ++i) {
-            for (size_t j = 0; j < activation.cols(); ++j) {
+        for (int i = 0; i < static_cast<int>(activation.rows()); ++i) {
+            for (int j = 0; j < static_cast<int>(activation.cols()); ++j) {
                 checkpoint(i, j) = activation(i, j);
             }
         }
@@ -41,7 +42,14 @@ void GradientCheckpoint::cache_activation(const std::string& key, const Matrix& 
             clear_cache();
         }
 
-        activation_cache[key] = Matrix(activation); // Deep copy
+        // EXPLICIT: Create a temporary Matrix, then move it in
+        // This avoids any potential issues with map's [] operator
+        Matrix temp(activation.rows(), activation.cols());
+        for (size_t i = 0; i < activation.size(); i++) {
+            temp.data()[i] = activation.data()[i];
+        }
+        
+        activation_cache[key] = std::move(temp);
 
         if (activation_cache[key].size() == 0) {
             throw std::runtime_error("Failed to allocate activation cache for key: " + key);

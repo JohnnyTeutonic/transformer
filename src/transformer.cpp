@@ -9,8 +9,17 @@
 #include "../include/half_precision.hpp"
 #include "../include/training/dynamic_loss_scaler.hpp"
 #include "../include/utils.hpp"
+#include "../include/gradient_diagnostics.hpp"
 #include <fstream>
 #include <iostream>
+#include <chrono>
+
+// Disable verbose logging for performance (define VERBOSE_TRAIN to enable)
+#ifdef VERBOSE_TRAIN
+#define TRAIN_LOG(x) std::cout << x << std::endl
+#else
+#define TRAIN_LOG(x) ((void)0)
+#endif
 #include <sstream>
 #include <omp.h>
 #include <set>
@@ -79,332 +88,104 @@ private:
     float min_lr_;  // Add minimum learning rate
 };
 
-// TransformerLayer implementation
-TransformerLayer::TransformerLayer(const TransformerConfig& config_, size_t idx)
-    : config(config_), layer_idx(idx) {
-    // Initialize components
-    std::cout << "Initializing TransformerLayer " << idx << " with GQA config:" << std::endl;
-    std::cout << "- use_gqa: " << (config.use_gqa ? "true" : "false") << std::endl;
-    std::cout << "- num_kv_heads: " << config.num_kv_heads << std::endl;
-    std::cout << "- hidden_size: " << config.hidden_size << std::endl;
-    std::cout << "- intermediate_size: " << config.intermediate_size << std::endl;
-
-    self_attention = std::make_unique<MultiHeadAttention>(
-        config.hidden_size, config.num_heads, config.head_dim, config.dropout_rate,
-        config.use_flash_attention, config.use_rope, config.use_sliding_window, config.window_size,
-        config.use_gqa, config.num_kv_heads, config.max_seq_length, config.use_fp16,
-        true); // Enable fused attention kernels
-
-    attention_ln = std::make_unique<LayerNorm>(config.hidden_size);
-    
-    // Conditionally initialize FeedForward or Mixture of Experts layer
-    if (config.moe.enabled) {
-        moe_layer = std::make_unique<MixtureOfExperts>(
-            config.moe.num_experts, config.moe.top_k, config.hidden_size, config.intermediate_size, config.moe.aux_loss_coefficient);
-        feed_forward = nullptr;
-    } else {
-        feed_forward = std::make_unique<FeedForward>(config.hidden_size, config.intermediate_size);
-        moe_layer = nullptr;
-    }
-
-    ffn_ln = std::make_unique<LayerNorm>(config.hidden_size);
-
-    // Initialize dropout layers
-    attention_dropout = std::make_unique<Dropout>(config.dropout_rate);
-    ffn_dropout = std::make_unique<Dropout>(config.dropout_rate);
-}
-
-Matrix TransformerLayer::forward(const Matrix& input, const AttentionMask& mask,
-                                 const std::optional<KVCache>& kv_cache) {
-    std::cout << "=== TransformerLayer::forward START ===" << std::endl;
-
-    // Layer norm before attention
-    Matrix normalized = attention_ln->forward(input);
-    
-    // Debug normalized output and validate statistics
-    float min_norm = std::numeric_limits<float>::infinity();
-    float max_norm = -std::numeric_limits<float>::infinity();
-    float sum_norm = 0.0f;
-    float sum_squared = 0.0f;
-    size_t nonzero_norm = 0;
-    const size_t total_elements = normalized.rows() * normalized.cols();
-    
-    #pragma omp parallel for collapse(2) reduction(min:min_norm) reduction(max:max_norm) \
-                             reduction(+:sum_norm,sum_squared,nonzero_norm)
-    for (size_t i = 0; i < normalized.rows(); i++) {
-        for (size_t j = 0; j < normalized.cols(); j++) {
-            float val = normalized(i, j);
-            min_norm = std::min(min_norm, val);
-            max_norm = std::max(max_norm, val);
-            sum_norm += val;
-            sum_squared += val * val;
-            if (std::abs(val) > 1e-6) nonzero_norm++;
-        }
-    }
-    
-    float mean = sum_norm / total_elements;
-    float variance = (sum_squared / total_elements) - (mean * mean);
-    
-    // Check for layer norm instability
-    const float STABILITY_THRESHOLD = 1e3;
-    if (std::abs(mean) > 1e-2 || std::abs(variance - 1.0) > 1e-1 || 
-        std::abs(min_norm) > STABILITY_THRESHOLD || std::abs(max_norm) > STABILITY_THRESHOLD) {
-        std::cerr << "WARNING: Layer normalization statistics outside expected ranges:\n"
-                  << "Mean: " << mean << " (expected close to 0)\n"
-                  << "Variance: " << variance << " (expected close to 1)\n"
-                  << "Min: " << min_norm << "\n"
-                  << "Max: " << max_norm << "\n";
-                  
-        // Clip extreme values if needed
-        if (std::abs(min_norm) > STABILITY_THRESHOLD || std::abs(max_norm) > STABILITY_THRESHOLD) {
-            for (size_t i = 0; i < normalized.rows(); i++) {
-                for (size_t j = 0; j < normalized.cols(); j++) {
-                    normalized(i, j) = std::max(-STABILITY_THRESHOLD, 
-                                              std::min(STABILITY_THRESHOLD, normalized(i, j)));
-                }
-            }
-            std::cerr << "Applied value clipping for stability\n";
-        }
-    }
-    
-    std::cout << "After attention layer norm:\n"
-              << "Min norm: " << min_norm << "\n"
-              << "Max norm: " << max_norm << "\n"
-              << "Mean norm: " << mean << "\n"
-              << "Variance: " << variance << "\n"
-              << "Nonzero norm: " << nonzero_norm << "/" << total_elements << "\n\n";
-
-    // Cache the normalized input for attention backward pass
-    std::string attn_key = "attn_norm_" + std::to_string(layer_idx);
-    GradientCheckpoint::cache_activation(attn_key, normalized);
-
-    // Self attention
-    Matrix attention_output = self_attention->forward(normalized, mask, kv_cache);
-    
-    // Debug attention output
-    float min_attn = std::numeric_limits<float>::infinity();
-    float max_attn = -std::numeric_limits<float>::infinity();
-    float sum_attn = 0.0f;
-    size_t nonzero_attn = 0;
-    
-    #pragma omp parallel for collapse(2) reduction(min:min_attn) reduction(max:max_attn) \
-                             reduction(+:sum_attn,nonzero_attn)
-    for (size_t i = 0; i < attention_output.rows(); i++) {
-        for (size_t j = 0; j < attention_output.cols(); j++) {
-            float val = attention_output(i, j);
-            min_attn = std::min(min_attn, val);
-            max_attn = std::max(max_attn, val);
-            sum_attn += val;
-            if (std::abs(val) > 1e-6) nonzero_attn++;
-        }
-    }
-    
-    std::cout << "After self attention:\n"
-              << "Min attn: " << min_attn << "\n"
-              << "Max attn: " << max_attn << "\n"
-              << "Mean attn: " << sum_attn / (attention_output.rows() * attention_output.cols()) << "\n"
-              << "Nonzero attn: " << nonzero_attn << "/" 
-              << (attention_output.rows() * attention_output.cols()) << "\n\n";
-    
-    // Apply attention dropout if in training mode
-    if (training && attention_dropout) {
-        attention_dropout->set_training(true);
-        attention_output = attention_dropout->forward(attention_output);
-    }
-    Matrix residual = attention_output + normalized;
-    
-    // Debug residual
-    float min_res = std::numeric_limits<float>::infinity();
-    float max_res = -std::numeric_limits<float>::infinity();
-    float sum_res = 0.0f;
-    size_t nonzero_res = 0;
-    
-    for (size_t i = 0; i < residual.rows(); i++) {
-        for (size_t j = 0; j < residual.cols(); j++) {
-            float val = residual(i, j);
-            min_res = std::min(min_res, val);
-            max_res = std::max(max_res, val);
-            sum_res += val;
-            if (std::abs(val) > 1e-6) nonzero_res++;
-        }
-    }
-    
-    std::cout << "After residual connection:\n"
-              << "Min res: " << min_res << "\n"
-              << "Max res: " << max_res << "\n"
-              << "Mean res: " << sum_res / (residual.rows() * residual.cols()) << "\n"
-              << "Nonzero res: " << nonzero_res << "/" 
-              << (residual.rows() * residual.cols()) << "\n\n";
-    
-    std::cout << "calculating attention ln" << std::endl;
-    Matrix norm1 = attention_ln->forward(residual);
-    
-    // Debug norm1
-    float min_norm1 = std::numeric_limits<float>::infinity();
-    float max_norm1 = -std::numeric_limits<float>::infinity();
-    float sum_norm1 = 0.0f;
-    size_t nonzero_norm1 = 0;
-    
-    for (size_t i = 0; i < norm1.rows(); i++) {
-        for (size_t j = 0; j < norm1.cols(); j++) {
-            float val = norm1(i, j);
-            min_norm1 = std::min(min_norm1, val);
-            max_norm1 = std::max(max_norm1, val);
-            sum_norm1 += val;
-            if (std::abs(val) > 1e-6) nonzero_norm1++;
-        }
-    }
-    
-    std::cout << "After second attention layer norm:\n"
-              << "Min norm1: " << min_norm1 << "\n"
-              << "Max norm1: " << max_norm1 << "\n"
-              << "Mean norm1: " << sum_norm1 / (norm1.rows() * norm1.cols()) << "\n"
-              << "Nonzero norm1: " << nonzero_norm1 << "/" 
-              << (norm1.rows() * norm1.cols()) << "\n\n";
-
-    // Cache the normalized input for feed forward backward pass
-    std::string ffn_key = "ffn_norm_" + std::to_string(layer_idx);
-    GradientCheckpoint::cache_activation(ffn_key, norm1);
-    std::cout << "Cached normalized input for feed forward: " << norm1.rows() << "x"
-                  << norm1.cols() << std::endl;
-    // Feed forward through MoE or FFN
-    Matrix ff_output;
-    if (moe_layer) {
-        ff_output = moe_layer->forward(norm1);
-    } else {
-        ff_output = feed_forward->forward(norm1);
-    }
-    
-    // Debug feed forward output
-    float min_ff = std::numeric_limits<float>::infinity();
-    float max_ff = -std::numeric_limits<float>::infinity();
-    float sum_ff = 0.0f;
-    size_t nonzero_ff = 0;
-    
-    for (size_t i = 0; i < ff_output.rows(); i++) {
-        for (size_t j = 0; j < ff_output.cols(); j++) {
-            float val = ff_output(i, j);
-            min_ff = std::min(min_ff, val);
-            max_ff = std::max(max_ff, val);
-            sum_ff += val;
-            if (std::abs(val) > 1e-6) nonzero_ff++;
-        }
-    }
-    
-    std::cout << "After feed forward:\n"
-              << "Min ff: " << min_ff << "\n"
-              << "Max ff: " << max_ff << "\n"
-              << "Mean ff: " << sum_ff / (ff_output.rows() * ff_output.cols()) << "\n"
-              << "Nonzero ff: " << nonzero_ff << "/" 
-              << (ff_output.rows() * ff_output.cols()) << "\n\n";
-    
-    // Apply feed forward dropout if in training mode
-    if (training && ffn_dropout) {
-        ffn_dropout->set_training(true);
-        ff_output = ffn_dropout->forward(ff_output);
-    }
-    residual = ff_output + norm1;
-    
-    // Debug final residual
-    float min_final = std::numeric_limits<float>::infinity();
-    float max_final = -std::numeric_limits<float>::infinity();
-    float sum_final = 0.0f;
-    size_t nonzero_final = 0;
-    
-    for (size_t i = 0; i < residual.rows(); i++) {
-        for (size_t j = 0; j < residual.cols(); j++) {
-            float val = residual(i, j);
-            min_final = std::min(min_final, val);
-            max_final = std::max(max_final, val);
-            sum_final += val;
-            if (std::abs(val) > 1e-6) nonzero_final++;
-        }
-    }
-    
-    std::cout << "After final residual:\n"
-              << "Min final: " << min_final << "\n"
-              << "Max final: " << max_final << "\n"
-              << "Mean final: " << sum_final / (residual.rows() * residual.cols()) << "\n"
-              << "Nonzero final: " << nonzero_final << "/" 
-              << (residual.rows() * residual.cols()) << "\n\n";
-    
-    std::cout << "Residual dimensions: " << residual.rows() << "x" << residual.cols() << std::endl;
-    return ffn_ln->forward(residual);
-}
+// TransformerLayer constructor is in transformer_layer.cpp - do not duplicate here!
+// Forward pass is in transformer_layer.cpp - do not duplicate here!
 
 Matrix TransformerLayer::backward(const Matrix& grad_output, const Matrix& input,
                                   const Matrix& target_distribution) {
-    std::cout << "=== TransformerLayer::backward START ===" << std::endl;
+    TRAIN_LOG("=== TransformerLayer::backward START ===");
+    GRAD_LOG_STAGE("TransformerLayer_backward_layer_" + std::to_string(layer_idx));
 
     try {
-        // Ensure dimensions match input
-        if (grad_output.cols() != input.cols()) {
-            throw std::runtime_error("Gradient output columns (" + std::to_string(grad_output.cols()) + 
-                                   ") must match input columns (" + std::to_string(input.cols()) + ")");
-        }
-
-        // Get the cached normalized input for feed forward
-        std::string ffn_key = "ffn_norm_" + std::to_string(layer_idx);
-        Matrix ffn_normalized = GradientCheckpoint::get_activation(ffn_key);
-
-        // Backward through feed forward network with dimension validation
-        Matrix ff_dropout_grad = training ? ffn_dropout->backward(grad_output) : grad_output;
-        if (ff_dropout_grad.cols() != input.cols()) {
-            throw std::runtime_error("FFN dropout gradient columns must match input columns");
-        }
-
-        Matrix ffn_grad;
-        if (moe_layer) {
-            ffn_grad = moe_layer->backward(ff_dropout_grad);
-        } else {
-            ffn_grad = feed_forward->backward(ff_dropout_grad, ffn_normalized);
+        // CORRECT FORWARD PASS WAS:
+        // normalized = attention_ln->forward(input);
+        // attention_output = self_attention->forward(normalized);
+        // residual = attention_output + input;
+        // ffn_normalized = ffn_ln->forward(residual);
+        // ffn_output = feed_forward->forward(ffn_normalized);
+        // output = ffn_output + residual;
+        
+        // BACKWARD PASS (in reverse):
+        
+        // Gradient flows back from output
+        // Second residual connection: output = ffn_output + residual
+        // So grad flows to BOTH ffn_output AND residual
+        Matrix grad_ffn_output = grad_output;  // Gradient for ffn_output
+        Matrix grad_residual = grad_output;     // Gradient for first residual
+        
+        // Backward through FFN dropout
+        if (training && ffn_dropout) {
+            grad_ffn_output = ffn_dropout->backward(grad_ffn_output);
         }
         
-        if (ffn_grad.cols() != input.cols()) {
-            throw std::runtime_error("FFN gradient columns must match input columns");
+        // Get cached FFN normalized input
+        std::string ffn_key = "ffn_norm_" + std::to_string(layer_idx);
+        Matrix ffn_normalized = GradientCheckpoint::get_activation(ffn_key);
+        
+        // Backward through feed forward network
+        const bool phase_timing = (std::getenv("TCPP_PHASE_TIMING") != nullptr);
+        auto tb0 = std::chrono::high_resolution_clock::now();
+        Matrix grad_ffn_normalized;
+        GRAD_LOG_MATRIX("ffn_grad_input", grad_ffn_output);
+        if (moe_layer) {
+            grad_ffn_normalized = moe_layer->backward(grad_ffn_output);
+        } else {
+            grad_ffn_normalized = feed_forward->backward(grad_ffn_output, ffn_normalized);
         }
-
-        // Backward through feed forward layer norm
-        Matrix ffn_ln_grad = ffn_ln->backward(ffn_grad, input);
-        if (ffn_ln_grad.cols() != input.cols()) {
-            throw std::runtime_error("FFN layer norm gradient columns must match input columns");
+        GRAD_LOG_MATRIX("ffn_grad_output", grad_ffn_normalized);
+        auto tb1 = std::chrono::high_resolution_clock::now();
+        
+        // Get cached residual (input to ffn layer norm)
+        std::string residual_key = "residual_" + std::to_string(layer_idx);
+        Matrix residual_cached = GradientCheckpoint::get_activation(residual_key);
+        
+        // Backward through FFN layer norm (using RESIDUAL, not input!)
+        Matrix grad_residual_from_ffn = ffn_ln->backward(grad_ffn_normalized, residual_cached);
+        GRAD_LOG_MATRIX("ffn_ln_grad_output", grad_residual_from_ffn);
+        
+        // Combine gradients at first residual connection
+        grad_residual = grad_residual + grad_residual_from_ffn;
+        GRAD_LOG_MATRIX("combined_residual_grad", grad_residual);
+        
+        // Backward through attention dropout
+        Matrix grad_attention_output = grad_residual;
+        if (training && attention_dropout) {
+            grad_attention_output = attention_dropout->backward(grad_attention_output);
         }
-
-        // First residual connection - proper gradient flow
-        Matrix residual_grad = ffn_ln_grad + grad_output;  // Add both gradient paths
-        // Get the cached normalized input for attention
+        
+        // Get cached attention normalized input
         std::string attn_key = "attn_norm_" + std::to_string(layer_idx);
         Matrix attn_normalized = GradientCheckpoint::get_activation(attn_key);
-        // Backward through self attention with dimension validation
-        Matrix attn_dropout_grad = training ? attention_dropout->backward(residual_grad) : residual_grad;
-        if (attn_dropout_grad.cols() != input.cols()) {
-            throw std::runtime_error("Attention dropout gradient columns must match input columns");
-        }
-
-        // Project attention gradients to correct dimension before addition
-        Matrix attention_grad = self_attention->backward(attn_dropout_grad, attn_normalized, target_distribution);
-        if (attention_grad.cols() != input.cols()) {
-            throw std::runtime_error("Attention gradient columns must match input columns");
-        }
-
-        // Ensure attention gradients have correct dimensions
-        if (attention_grad.rows() != residual_grad.rows() || attention_grad.cols() != residual_grad.cols()) {
-            throw std::runtime_error("Attention gradient dimensions (" + 
-                std::to_string(attention_grad.rows()) + "x" + std::to_string(attention_grad.cols()) + 
-                ") must match residual gradient dimensions (" +
-                std::to_string(residual_grad.rows()) + "x" + std::to_string(residual_grad.cols()) + ")");
-        }
+        
+        // Backward through self attention
+        auto tb2 = std::chrono::high_resolution_clock::now();
+        GRAD_LOG_MATRIX("attention_grad_input", grad_attention_output);
+        Matrix grad_attn_normalized = self_attention->backward(grad_attention_output, attn_normalized, target_distribution);
+        GRAD_LOG_MATRIX("attention_grad_output", grad_attn_normalized);
+        auto tb3 = std::chrono::high_resolution_clock::now();
 
         // Backward through attention layer norm
-        Matrix attention_ln_grad = attention_ln->backward(attention_grad, input);
-        if (attention_ln_grad.cols() != input.cols()) {
-            throw std::runtime_error("Attention layer norm gradient columns must match input columns");
+        Matrix grad_input_from_attn = attention_ln->backward(grad_attn_normalized, input);
+        GRAD_LOG_MATRIX("attn_ln_grad_output", grad_input_from_attn);
+        if (phase_timing) {
+            auto tb4 = std::chrono::high_resolution_clock::now();
+            auto ms = [](auto a, auto b) {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+            };
+            std::cout << "[LBWD_TIMING] L" << layer_idx
+                      << " ffn_bwd=" << ms(tb0, tb1)
+                      << "ms ln+misc=" << ms(tb1, tb2)
+                      << "ms attn_bwd=" << ms(tb2, tb3)
+                      << "ms attn_ln_bwd=" << ms(tb3, tb4) << "ms" << std::endl;
         }
-
-        // Second residual connection - proper gradient flow
-        Matrix final_grad = attention_ln_grad + residual_grad;  // Add both gradient paths
-        std::cout << "=== TransformerLayer::backward END ===" << std::endl;
-        return final_grad;
+        
+        // First residual connection: residual = attention_output + input
+        // grad flows to BOTH attention path AND directly to input
+        Matrix grad_input_total = grad_input_from_attn + grad_residual;
+        GRAD_LOG_MATRIX("layer_total_grad_output", grad_input_total);
+        
+        TRAIN_LOG("=== TransformerLayer::backward END ===");
+        return grad_input_total;
 
     } catch (const std::exception& e) {
         std::cerr << "Error in TransformerLayer::backward: " << e.what() << std::endl;
@@ -455,7 +236,8 @@ Transformer::Transformer(const TransformerConfig& config_, std::shared_ptr<Tikto
         layers.push_back(TransformerLayer::create(config, i));
     }
     
-    final_ln = std::make_unique<LayerNorm>(config.hidden_size, config.layer_norm_epsilon);
+    final_ln = std::make_unique<LayerNorm>(config.hidden_size, config.layer_norm_epsilon,
+                                           config.use_rms_norm);
     lm_head = std::make_unique<LanguageModelHead>(config.hidden_size, vocab_size);
     dropout = std::make_unique<Dropout>(config.dropout_rate);
     
@@ -474,7 +256,6 @@ struct BatchSequence {
 };
 
 TransformerOutput Transformer::forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer) {
-    std::cout << "Entering function 'Transformer::forward'" << std::endl;
     try {
         check_tokenizer();
         
@@ -496,35 +277,29 @@ TransformerOutput Transformer::forward(const std::vector<int>& input_tokens, con
         Matrix token_emb = token_embedding->forward(input_tokens);
         
         // Create position indices matrix for positional encoding
-        Matrix position_indices(1, input_tokens.size());
+        Matrix position_indices(input_tokens.size(), 1);
         for (size_t i = 0; i < input_tokens.size(); i++) {
-            position_indices(0, i) = static_cast<float>(i);
+            position_indices(i, 0) = static_cast<float>(i);
         }
-        
-        // Get base positional encodings
-        Matrix pos_emb = pos_encoding->forward(position_indices);
-        
-        // Adjust positional encodings based on separator
-        pos_emb = adjust_position_encodings(pos_emb, input_tokens);
         
         // Create separator-aware attention mask
         AttentionMask mask = create_separator_mask(input_tokens);
-        
-        // Broadcast positional embeddings to match token embeddings shape
-        Matrix broadcasted_pos_emb(token_emb.rows(), pos_emb.cols());
-        for (size_t i = 0; i < token_emb.rows(); i++) {
-            for (size_t j = 0; j < pos_emb.cols(); j++) {
-                broadcasted_pos_emb(i, j) = pos_emb(0, j);
+
+        Matrix x = token_emb;
+        // With RoPE, position information enters inside attention; additive
+        // sinusoidal embeddings would double-encode position and break parity
+        // with llama.cpp-family inference.
+        if (!config.use_rope) {
+            Matrix pos_emb = pos_encoding->forward(position_indices);
+            pos_emb = adjust_position_encodings(pos_emb, input_tokens);
+            if (token_emb.rows() != pos_emb.rows() || token_emb.cols() != pos_emb.cols()) {
+                throw std::runtime_error("Dimension mismatch: token embeddings (" +
+                    std::to_string(token_emb.rows()) + "x" + std::to_string(token_emb.cols()) +
+                    ") and positional embeddings (" +
+                    std::to_string(pos_emb.rows()) + "x" + std::to_string(pos_emb.cols()) + ") must match");
             }
+            x = token_emb + pos_emb;
         }
-        
-        // Validate dimensions before addition
-        if (token_emb.cols() != broadcasted_pos_emb.cols()) {
-            throw std::runtime_error("Dimension mismatch: token embeddings and positional embeddings must have same number of columns");
-        }
-        
-        // Combine embeddings
-        Matrix x = token_emb + broadcasted_pos_emb;
         
         // Apply dropout if in training mode
         if (training && dropout) {
@@ -550,12 +325,119 @@ TransformerOutput Transformer::forward(const std::vector<int>& input_tokens, con
         GradientCheckpoint::cache_activation("final_hidden_states", x);
         
         // Project to vocabulary space using language model head
-        Matrix logits = lm_head->forward(x);
+        Matrix logits = lm_head->forward(x, training);  // Pass training mode!
         
         return {logits, total_aux_loss};
         
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer::forward: " << e.what() << std::endl;
+        throw;
+    }
+}
+
+TransformerOutput Transformer::forward_batch(const std::vector<std::vector<int>>& batch_tokens, size_t max_seq_len) {
+    try {
+        check_tokenizer();
+        size_t batch_size = batch_tokens.size();
+        size_t vocab_size = tokenizer_->vocab_size();
+        size_t hidden_size = config.hidden_size;
+        
+        
+        // Pad and flatten batch tokens
+        // Result: flattened_tokens[batch_idx * max_seq_len + pos] = token
+        std::vector<int> flattened_tokens(batch_size * max_seq_len, 0);  // 0 = padding
+        std::vector<size_t> seq_lengths(batch_size);
+        
+        for (size_t b = 0; b < batch_size; ++b) {
+            seq_lengths[b] = std::min(batch_tokens[b].size(), max_seq_len);
+            for (size_t t = 0; t < seq_lengths[b]; ++t) {
+                int token = batch_tokens[b][t];
+                if (token >= 0 && static_cast<size_t>(token) < vocab_size) {
+                    flattened_tokens[b * max_seq_len + t] = token;
+                }
+            }
+        }
+        
+        // Get embeddings for all tokens at once: [batch*seq_len x hidden_size]
+        Matrix token_emb = token_embedding->forward(flattened_tokens);
+        m_batch_input_tokens = flattened_tokens;  // for the embedding update in backward
+
+        // Create position indices for all positions
+        Matrix position_indices(batch_size * max_seq_len, 1);
+        for (size_t b = 0; b < batch_size; ++b) {
+            for (size_t t = 0; t < max_seq_len; ++t) {
+                position_indices(b * max_seq_len + t, 0) = static_cast<float>(t);
+            }
+        }
+        
+        // Combine embeddings. With RoPE, position enters inside attention;
+        // additive sinusoidal embeddings would double-encode position.
+        Matrix x = token_emb;
+        if (!config.use_rope) {
+            Matrix pos_emb = pos_encoding->forward(position_indices);
+            x = token_emb + pos_emb;
+        }
+
+        // Apply dropout if training
+        if (training && dropout) {
+            x = dropout->forward(x);
+        }
+        
+        // Store for backward pass
+        m_layer_activations.clear();
+        m_layer_activations.push_back(x);
+        m_batch_size = batch_size;
+        m_seq_len = max_seq_len;
+        
+        // Create batched causal mask: [batch*seq_len x batch*seq_len]
+        // Block diagonal structure: each sequence only attends to itself
+        size_t mask_dim = batch_size * max_seq_len;
+        AttentionMask mask;
+        mask.mask = Matrix(mask_dim, mask_dim);
+        mask.mask.initialize_constant(-1e9f);  // Default: no attention
+        
+        // Fill in block diagonal (causal within each sequence)
+        for (size_t b = 0; b < batch_size; ++b) {
+            size_t offset = b * max_seq_len;
+            for (size_t i = 0; i < max_seq_len; ++i) {
+                for (size_t j = 0; j <= i; ++j) {  // Causal: only attend to past
+                    mask.mask(offset + i, offset + j) = 0.0f;
+                }
+            }
+        }
+        
+        // Process through transformer layers using BATCHED attention
+        // Batched: 4 big CUDA matmuls + CPU attention (avoids CUDA overhead for small ops)
+        const bool phase_timing = (std::getenv("TCPP_PHASE_TIMING") != nullptr);
+        auto ft0 = std::chrono::high_resolution_clock::now();
+        float total_aux_loss = 0.0f;
+        for (size_t i = 0; i < layers.size(); ++i) {
+            x = layers[i]->forward_batched(x, mask, batch_size, max_seq_len);
+            total_aux_loss += layers[i]->getAuxLoss();
+            m_layer_activations.push_back(x);
+        }
+        auto ft1 = std::chrono::high_resolution_clock::now();
+        // Final layer norm
+        x = final_ln->forward(x);
+        hidden_states = x;
+        last_hidden_states = x;
+        GradientCheckpoint::cache_activation("final_hidden_states", x);
+
+        // Project to vocabulary: [batch*seq_len x vocab_size]
+        Matrix logits = lm_head->forward(x, training);
+        if (phase_timing) {
+            auto ft2 = std::chrono::high_resolution_clock::now();
+            auto ms = [](auto a, auto b) {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+            };
+            std::cout << "[FWD_TIMING] layers=" << ms(ft0, ft1)
+                      << "ms lnf+lm_head=" << ms(ft1, ft2) << "ms" << std::endl;
+        }
+
+        return {logits, total_aux_loss};
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer::forward_batch: " << e.what() << std::endl;
         throw;
     }
 }
@@ -569,10 +451,7 @@ void Transformer::clear_kv_cache() {
 
 // Original backward method implementation
 void Transformer::backward(const Matrix& grad_output, const std::vector<int>& input_tokens, float learning_rate) {
-    std::cout << "Entering function 'Transformer::backward'" << std::endl;
     try {
-        std::cout << "\nStarting backward pass..." << std::endl;
-        std::cout << "Initial gradient dimensions: " << grad_output.rows() << "x" << grad_output.cols() << std::endl;
         
         // First, pass gradient through language model head
         Matrix hidden_states = GradientCheckpoint::get_activation("final_hidden_states");
@@ -589,7 +468,6 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         if (config.use_fp16) {
             float scale = loss_scaler.get_scale();
             current_grad *= scale;
-            std::cout << "Applied loss scale: " << scale << std::endl;
         }
         
         // Store layer gradients for global norm computation
@@ -657,7 +535,7 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
             if (auto* attention = layer->getAttention()) {
                 update_attention_parameters(attention, learning_rate, config);
             }
-            if (auto* moe = layer->getMixtureOfExperts()) {
+            if (auto* moe = layer->getMoE()) {
                 // Update experts
                 for (auto* expert : moe->get_experts()) {
                     update_ffn_parameters(expert, learning_rate, config);
@@ -676,18 +554,18 @@ void Transformer::backward(const Matrix& grad_output, const std::vector<int>& in
         std::cerr << "Error in backward pass: " << e.what() << std::endl;
         throw;
     }
-    std::cout << "Exiting function 'Transformer::backward'" << std::endl;
+    TRAIN_LOG("Exiting function 'Transformer::backward'");
 }
 
 void Transformer::clear_gradients() {
-    std::cout << "Entering function 'Transformer::clear_gradients'" << std::endl;
+    TRAIN_LOG("Entering function 'Transformer::clear_gradients'");
     try {
         // Reset layer gradients
         for (auto& layer : layers) {
             if (auto* attention = layer->getAttention()) {
                 attention->param_gradients() = MultiHeadAttention::Gradients();
             }
-            if (auto* moe = layer->getMixtureOfExperts()) {
+            if (auto* moe = layer->getMoE()) {
                 for (auto* expert : moe->get_experts()) {
                     expert->param_gradients() = FeedForward::Gradients();
                 }
@@ -712,47 +590,285 @@ void Transformer::clear_gradients() {
         std::cerr << "Error in Transformer::clear_gradients: " << e.what() << std::endl;
         throw;
     }
-    std::cout << "Exiting function 'Transformer::clear_gradients'" << std::endl;
+    TRAIN_LOG("Exiting function 'Transformer::clear_gradients'");
 }
 
 // New batch backward method implementation
 void Transformer::backward(const Matrix& logits, const Matrix& target_distribution, float learning_rate) {
-    std::cout << "Entering function 'Transformer::backward (with target distribution)'" << std::endl;
+    TRAIN_LOG("Entering function 'Transformer::backward (with target distribution)'");
     try {
-        // Get cached hidden states
+        GRAD_LOG_STAGE("BACKWARD_START");
+        
+        // Step 1: Compute loss gradient with respect to logits (softmax + cross-entropy gradient)
+        TRAIN_LOG("Computing loss gradient...");
+        
+        Matrix grad_logits = Utils::compute_loss_gradient(logits, target_distribution);
+        GRAD_LOG_MATRIX("loss_gradient", grad_logits);
+        
+        // Step 2: Get cached hidden states from forward pass
         Matrix last_hidden = GradientCheckpoint::get_activation("final_hidden_states");
         if (last_hidden.empty()) {
             throw std::runtime_error("No cached hidden states found for backward pass");
         }
 
-        // First compute loss gradient with respect to hidden states
-        Matrix hidden_grad(logits.rows(), config.hidden_size);
+        // Step 3: Backward through LM head (projects from vocab space back to hidden space)
+        TRAIN_LOG("Backward through LM head...");
+        Matrix grad_hidden = lm_head->backward_pass(grad_logits, last_hidden);
+        GRAD_LOG_MATRIX("lm_head_grad_output", grad_hidden);
         
-        // Backward through final layer norm if present
+        // Step 4: Backward through final layer norm
+        TRAIN_LOG("Backward through final layer norm...");
+        Matrix grad_prenorm;
         if (final_ln) {
-            hidden_grad = final_ln->backward(logits, last_hidden);
+            // Get the input to final layer norm (before normalization)
+            if (m_layer_activations.empty()) {
+                throw std::runtime_error("No layer activations cached for backward pass");
+            }
+            Matrix prenorm_input = m_layer_activations.back();
+            grad_prenorm = final_ln->backward(grad_hidden, prenorm_input);
+            GRAD_LOG_MATRIX("final_ln_grad_output", grad_prenorm);
         } else {
-            hidden_grad = logits;  // If no layer norm, use logits directly
+            grad_prenorm = grad_hidden;
         }
-
-        // Now backward through LM head with hidden gradients
-        std::cout << "\nStarting LM head backward..." << std::endl;
-        Matrix d_hidden = lm_head->backward(hidden_grad, target_distribution);
-
-        // Continue with rest of backward pass...
+        
+        // Step 5: Backward through transformer layers
+        TRAIN_LOG("Backward through transformer layers...");
+        Matrix current_grad = grad_prenorm;
+        
+        for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+            
+            // Get cached layer input
+            std::string layer_key = "layer_" + std::to_string(i) + "_input";
+            Matrix layer_input;
+            if (i == 0) {
+                // First layer uses embedding output
+                if (m_layer_activations.size() > 0) {
+                    layer_input = m_layer_activations[0];
+                } else {
+                    throw std::runtime_error("No embedding activations cached for layer 0");
+                }
+            } else {
+                // Other layers use previous layer output
+                if (static_cast<size_t>(i) < m_layer_activations.size()) {
+                    layer_input = m_layer_activations[i];
+                } else {
+                    throw std::runtime_error("No cached activation for layer " + std::to_string(i));
+                }
+            }
+            
+            try {
+                GRAD_LOG_MATRIX("layer_" + std::to_string(i) + "_grad_input", current_grad);
+                Matrix layer_grad = layers[i]->backward(current_grad, layer_input);
+                current_grad = layer_grad;
+                GRAD_LOG_MATRIX("layer_" + std::to_string(i) + "_grad_output", current_grad);
+            } catch (const std::exception& e) {
+                std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
+                throw;
+            }
+        }
+        
+        // Step 6: Update parameters with learning rate
+        TRAIN_LOG("Updating parameters...");
+        GRAD_LOG_STAGE("PARAMETER_UPDATE");
+        for (size_t i = 0; i < layers.size(); i++) {
+            layers[i]->update_parameters(learning_rate);
+        }
+        
+        GRAD_LOG_STAGE("BACKWARD_COMPLETE");
+        TRAIN_LOG("Backward pass complete!");
         
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer backward: " << e.what() << std::endl;
         throw;
     }
-    std::cout << "Exiting function 'Transformer::backward (with target distribution)'" << std::endl;
+    TRAIN_LOG("Exiting function 'Transformer::backward (with target distribution)'");
 }
 
+// Backward from pre-computed gradient (skips softmax computation in loss gradient)
+void Transformer::backward_from_grad(const Matrix& grad_logits, float learning_rate) {
+    TRAIN_LOG("Entering function 'Transformer::backward_from_grad'");
+    try {
+        GRAD_LOG_STAGE("BACKWARD_FROM_GRAD_START");
+        
+        // Skip step 1 - gradient already computed by CUDA kernel
+        GRAD_LOG_MATRIX("precomputed_gradient", grad_logits);
+        
+        // Step 2: Get cached hidden states from forward pass
+        Matrix last_hidden = GradientCheckpoint::get_activation("final_hidden_states");
+        if (last_hidden.empty()) {
+            throw std::runtime_error("No cached hidden states found for backward pass");
+        }
+
+        // Step 3: Backward through LM head
+        TRAIN_LOG("Backward through LM head...");
+        Matrix grad_hidden = lm_head->backward_pass(grad_logits, last_hidden);
+        GRAD_LOG_MATRIX("lm_head_grad_output", grad_hidden);
+        
+        // Step 4: Backward through final layer norm
+        TRAIN_LOG("Backward through final layer norm...");
+        Matrix grad_prenorm;
+        if (final_ln) {
+            if (m_layer_activations.empty()) {
+                throw std::runtime_error("No layer activations cached for backward pass");
+            }
+            Matrix prenorm_input = m_layer_activations.back();
+            grad_prenorm = final_ln->backward(grad_hidden, prenorm_input);
+        } else {
+            grad_prenorm = grad_hidden;
+        }
+        
+        // Step 5: Backward through transformer layers
+        TRAIN_LOG("Backward through transformer layers...");
+        Matrix current_grad = grad_prenorm;
+        
+        for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+            std::string layer_key = "layer_" + std::to_string(i) + "_input";
+            Matrix layer_input;
+            if (i == 0) {
+                if (m_layer_activations.size() > 0) {
+                    layer_input = m_layer_activations[0];
+                } else {
+                    throw std::runtime_error("No embedding activations cached for layer 0");
+                }
+            } else {
+                if (static_cast<size_t>(i) < m_layer_activations.size()) {
+                    layer_input = m_layer_activations[i];
+                } else {
+                    throw std::runtime_error("No cached activation for layer " + std::to_string(i));
+                }
+            }
+            
+            try {
+                Matrix layer_grad = layers[i]->backward(current_grad, layer_input);
+                current_grad = layer_grad;
+            } catch (const std::exception& e) {
+                std::cerr << "Error in layer " << i << " backward pass: " << e.what() << std::endl;
+                throw;
+            }
+        }
+        
+        // Token-embedding update (see backward_from_grad_cuda note: this
+        // gradient used to be dropped, leaving embeddings frozen).
+        if (token_embedding && !m_batch_input_tokens.empty()
+            && current_grad.rows() == m_batch_input_tokens.size()) {
+            Matrix grad_emb = (training && dropout) ? dropout->backward(current_grad)
+                                                    : current_grad;
+            token_embedding->backward(grad_emb, m_batch_input_tokens, learning_rate);
+        }
+
+        // Step 6: Update parameters
+        TRAIN_LOG("Updating parameters...");
+        for (size_t i = 0; i < layers.size(); i++) {
+            layers[i]->update_parameters(learning_rate);
+        }
+        if (final_ln) {
+            final_ln->update_parameters(learning_rate);  // was never updated before
+        }
+
+        GRAD_LOG_STAGE("BACKWARD_FROM_GRAD_COMPLETE");
+        TRAIN_LOG("Backward pass from gradient complete!");
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error in Transformer backward_from_grad: " << e.what() << std::endl;
+        throw;
+    }
+}
+
+#ifdef USE_CUDA
+// Backward pass with gradient already on device - avoids 655MB D2H transfer
+void Transformer::backward_from_grad_cuda(float* d_grad_logits, int total_positions, int vocab_size, float learning_rate) {
+    try {
+        int hidden_size = static_cast<int>(config.hidden_size);
+        (void)vocab_size;  // dimensions are taken from the resident device state
+
+        // Device-resident LM head backward + Adam update. The gradient stays on
+        // the GPU (no 655MB D2H), the resident projection weights are updated on
+        // the device, and grad_hidden (~16MB) is returned for the rest of the
+        // backward pass. Replaces the previous path that copied the 655MB grad
+        // to host and ran the LM head Adam update on the CPU.
+        Matrix grad_hidden(total_positions, hidden_size);
+        lm_head->backward_pass_cuda(d_grad_logits, total_positions, grad_hidden);
+        
+        // Continue backward pass on CPU (with GPU matmuls where applicable)
+        Matrix grad_prenorm;
+        if (final_ln) {
+            if (m_layer_activations.empty()) {
+                throw std::runtime_error("No layer activations cached");
+            }
+            Matrix prenorm_input = m_layer_activations.back();
+            grad_prenorm = final_ln->backward(grad_hidden, prenorm_input);
+        } else {
+            grad_prenorm = grad_hidden;
+        }
+        
+        // Backward through transformer layers
+        const bool phase_timing = (std::getenv("TCPP_PHASE_TIMING") != nullptr);
+        auto bt0 = std::chrono::high_resolution_clock::now();
+        Matrix current_grad = grad_prenorm;
+        for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+            Matrix layer_input;
+            if (i == 0) {
+                if (m_layer_activations.size() > 0) {
+                    layer_input = m_layer_activations[0];
+                } else {
+                    throw std::runtime_error("No embedding activations");
+                }
+            } else {
+                if (static_cast<size_t>(i) < m_layer_activations.size()) {
+                    layer_input = m_layer_activations[i];
+                } else {
+                    throw std::runtime_error("No cached activation for layer");
+                }
+            }
+            auto lb0 = std::chrono::high_resolution_clock::now();
+            current_grad = layers[i]->backward(current_grad, layer_input);
+            if (phase_timing) {
+                auto lb1 = std::chrono::high_resolution_clock::now();
+                std::cout << "[BWD_TIMING] L" << i << " backward="
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(lb1 - lb0).count()
+                          << "ms" << std::endl;
+            }
+        }
+        auto bt1 = std::chrono::high_resolution_clock::now();
+
+        // Token-embedding update: the chain used to stop at layer 0 and drop
+        // current_grad, leaving the embedding table frozen at random init.
+        // Backward through the embedding dropout's cached mask first.
+        if (token_embedding && !m_batch_input_tokens.empty()
+            && current_grad.rows() == m_batch_input_tokens.size()) {
+            Matrix grad_emb = (training && dropout) ? dropout->backward(current_grad)
+                                                    : current_grad;
+            token_embedding->backward(grad_emb, m_batch_input_tokens, learning_rate);
+        }
+
+        // Update parameters
+        for (size_t i = 0; i < layers.size(); i++) {
+            layers[i]->update_parameters(learning_rate);
+        }
+        if (final_ln) {
+            final_ln->update_parameters(learning_rate);  // was never updated before
+        }
+        if (phase_timing) {
+            auto bt2 = std::chrono::high_resolution_clock::now();
+            auto ms = [](auto a, auto b) {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+            };
+            std::cout << "[BWD_TIMING] layers_total=" << ms(bt0, bt1)
+                      << "ms updates=" << ms(bt1, bt2) << "ms" << std::endl;
+        }
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error in backward_from_grad_cuda: " << e.what() << std::endl;
+        throw;
+    }
+}
+#endif
+
 void Transformer::update_parameters(float learning_rate) {
-    std::cout << "Entering function 'Transformer::update_parameters'" << std::endl;
+    TRAIN_LOG("Entering function 'Transformer::update_parameters'");
     try {
         SCOPE_LOG();
-        std::cout << "=== Transformer::update_parameters START ===" << std::endl;
+        TRAIN_LOG("=== Transformer::update_parameters START ===");
 
         // Update layer parameters
         for (auto& layer : layers) {
@@ -780,12 +896,12 @@ void Transformer::update_parameters(float learning_rate) {
                 auto& ffn_grads = ffn->param_gradients();
 
                 // Update weights
-                update_parameter_with_clip(ffn_params.ff1_weights, ffn_grads.ff1_grad, learning_rate, config);
-                update_parameter_with_clip(ffn_params.ff2_weights, ffn_grads.ff2_grad, learning_rate, config);
+                update_parameter_with_clip(ffn_params.gate_proj_weights, ffn_grads.gate_proj_grad, learning_rate, config);
+                update_parameter_with_clip(ffn_params.down_proj_weights, ffn_grads.down_proj_grad, learning_rate, config);
 
                 // Update biases
-                update_parameter_with_clip(ffn_params.ff1_bias, ffn_grads.ff1_bias_grad, learning_rate, config);
-                update_parameter_with_clip(ffn_params.ff2_bias, ffn_grads.ff2_bias_grad, learning_rate, config);
+                update_parameter_with_clip(ffn_params.gate_proj_bias, ffn_grads.gate_proj_bias_grad, learning_rate, config);
+                update_parameter_with_clip(ffn_params.down_proj_bias, ffn_grads.down_proj_bias_grad, learning_rate, config);
             }
 
             // Update layer norm parameters
@@ -827,8 +943,8 @@ std::vector<Matrix>& Transformer::parameters() {
 
         if (auto* ffn = layer->getFeedForward()) {
             auto& ffn_params = ffn->parameters();
-            all_params.push_back(ffn_params.ff1_weights);
-            all_params.push_back(ffn_params.ff2_weights);
+            all_params.push_back(ffn_params.gate_proj_weights);
+            all_params.push_back(ffn_params.down_proj_weights);
         }
     }
 
@@ -849,9 +965,10 @@ void Transformer::initialize_weights() {
         std::mt19937 gen(rd());
         std::normal_distribution<float> dist(0.0f, scale);
         
+        // MSVC: collapse ignored, loop vars must be signed int
         #pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < weights.rows(); i++) {
-            for (size_t j = 0; j < weights.cols(); j++) {
+        for (int i = 0; i < static_cast<int>(weights.rows()); i++) {
+            for (int j = 0; j < static_cast<int>(weights.cols()); j++) {
                 float value = dist(gen);
                 // Clip extreme values
                 value = std::max(-2.0f * scale, std::min(2.0f * scale, value));
@@ -950,17 +1067,7 @@ void Transformer::load(std::istream& is) {
     }
 }
 
-void Transformer::set_training(bool training_mode) {
-    SCOPE_LOG();
-    training = training_mode;
-    // Set training mode for all components that need it
-    for (auto& layer : layers) {
-        layer->training = training_mode;
-    }
-    if (lm_head) {
-        lm_head->set_training(training_mode);
-    }
-}
+// Removed duplicate set_training() - see line 2336 for the correct implementation
 
 std::pair<std::string, PhraseType> Transformer::predict_final_phrase(
     const std::string& input_text,
@@ -972,7 +1079,8 @@ std::pair<std::string, PhraseType> Transformer::predict_final_phrase(
     std::vector<int> tokens = tokenizer.encode(input_text);
     
     // Forward pass
-    Matrix hidden_states = forward(tokens, input_text, tokenizer);
+    TransformerOutput output = forward(tokens, input_text, tokenizer);
+    Matrix hidden_states = output.logits;
     
     // Extract the prediction based on the predicted type
     std::string predicted_phrase = extract_prediction(hidden_states, predicted_type, tokenizer);
@@ -987,7 +1095,8 @@ PhraseType Transformer::predict_phrase_type(
     std::vector<int> tokens = tokenizer.encode(input_text);
     
     // Forward pass
-    Matrix hidden_states = forward(tokens, input_text, tokenizer);
+    TransformerOutput output = forward(tokens, input_text, tokenizer);
+    Matrix hidden_states = output.logits;
     
     // Analyze hidden states to determine phrase type
     return analyze_phrase_type(hidden_states, tokenizer);
@@ -1332,11 +1441,11 @@ void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learnin
     const float weight_decay = config.weight_decay;
     const float max_relative_change = 0.1f;  // Reduced back to 10% for stability
     
-    // Calculate gradient norm
+    // Calculate gradient norm (MSVC: loop vars must be signed int)
     float grad_norm = 0.0f;
     #pragma omp parallel for reduction(+:grad_norm)
-    for (size_t i = 0; i < grad.rows(); ++i) {
-        for (size_t j = 0; j < grad.cols(); ++j) {
+    for (int i = 0; i < static_cast<int>(grad.rows()); ++i) {
+        for (int j = 0; j < static_cast<int>(grad.cols()); ++j) {
             grad_norm += grad(i, j) * grad(i, j);
         }
     }
@@ -1356,10 +1465,10 @@ void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learnin
         adaptive_lr *= scaling_factor;
     }
     
-    // Update parameters with clipped gradients and proper weight decay
+    // Update parameters (MSVC: collapse ignored, loop vars must be signed int)
     #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < param.rows(); ++i) {
-        for (size_t j = 0; j < param.cols(); ++j) {
+    for (int i = 0; i < static_cast<int>(param.rows()); ++i) {
+        for (int j = 0; j < static_cast<int>(param.cols()); ++j) {
             // Apply weight decay separately from gradient
             float decay_update = -weight_decay * param(i, j);
             float grad_update = -grad(i, j) * scaling_factor;
@@ -1382,8 +1491,9 @@ void update_parameter_with_clip(Vector& param, const Vector& grad, float learnin
     const float weight_decay = config.weight_decay;
     
     float grad_norm = 0.0f;
+    // MSVC: loop vars must be signed int
     #pragma omp parallel for reduction(+:grad_norm)
-    for (size_t i = 0; i < grad.size(); ++i) {
+    for (int i = 0; i < static_cast<int>(grad.size()); ++i) {
         grad_norm += grad[i] * grad[i];
     }
     grad_norm = std::sqrt(grad_norm);
@@ -1395,11 +1505,13 @@ void update_parameter_with_clip(Vector& param, const Vector& grad, float learnin
         scaling_factor = std::sqrt(scaling_factor);  // Softer scaling
     }
     
+    // MSVC: loop vars must be signed int
     #pragma omp parallel for
-    for (size_t i = 0; i < param.size(); ++i) {
-        float decay = weight_decay * param[i];
+    for (int i = 0; i < static_cast<int>(param.size()); ++i) {
+        // FIX: decay term should be negative (same as Matrix version)
+        float decay_update = -weight_decay * param[i];
         float grad_update = -grad[i] * scaling_factor;
-        float total_update = learning_rate * (grad_update + decay);
+        float total_update = learning_rate * (grad_update + decay_update);
         float max_update = 0.1f * std::abs(param[i] + 1e-8f);
         total_update = std::clamp(total_update, -max_update, max_update);
         param[i] += total_update;
@@ -1433,12 +1545,12 @@ void update_ffn_parameters(FeedForward* ffn, float learning_rate, const Transfor
     auto& grads = ffn->param_gradients();
     
     // Update FF1 parameters
-    update_parameter_with_clip(params.ff1_weights, grads.ff1_grad, learning_rate, config);
-    update_parameter_with_clip(params.ff1_bias, grads.ff1_bias_grad, learning_rate, config);
+    update_parameter_with_clip(params.gate_proj_weights, grads.gate_proj_grad, learning_rate, config);
+    update_parameter_with_clip(params.gate_proj_bias, grads.gate_proj_bias_grad, learning_rate, config);
     
-    // Update FF2 parameters
-    update_parameter_with_clip(params.ff2_weights, grads.ff2_grad, learning_rate, config);
-    update_parameter_with_clip(params.ff2_bias, grads.ff2_bias_grad, learning_rate, config);
+    // Update down projection parameters
+    update_parameter_with_clip(params.down_proj_weights, grads.down_proj_grad, learning_rate, config);
+    update_parameter_with_clip(params.down_proj_bias, grads.down_proj_bias_grad, learning_rate, config);
 }
 
 // Add as a static member of the Transformer class
@@ -1466,19 +1578,19 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
             static const float MAX_SCALE = 32768.0f;
             static const float MIN_SCALE = 1.0f;
             
-            // Compute current gradient statistics
+            // Compute current gradient statistics (MSVC doesn't support min/max reduction)
             float current_max_grad = 0.0f;
             float current_min_grad = std::numeric_limits<float>::max();
             bool has_inf_nan = false;
             
-            #pragma omp parallel for reduction(max:current_max_grad) reduction(min:current_min_grad) reduction(||:has_inf_nan)
-            for (size_t i = 0; i < loss_grad.rows(); i++) {
-                for (size_t j = 0; j < loss_grad.cols(); j++) {
+            // Check for inf/nan and compute min/max sequentially (MSVC limitation)
+            for (int i = 0; i < static_cast<int>(loss_grad.rows()); i++) {
+                for (int j = 0; j < static_cast<int>(loss_grad.cols()); j++) {
                     float val = std::abs(loss_grad(i, j));
                     if (std::isfinite(val)) {
                         current_max_grad = std::max(current_max_grad, val);
                         current_min_grad = std::min(current_min_grad, val);
-        } else {
+                    } else {
                         has_inf_nan = true;
                     }
                 }
@@ -1523,10 +1635,10 @@ void Transformer::backward_pass(const Matrix& output, const Matrix& target_distr
             // Update loss scaler
             loss_scaler.set_scale(current_scale);
             
-            // Apply scale to gradients
+            // Apply scale to gradients (MSVC: collapse ignored, loop vars must be signed int)
             #pragma omp parallel for collapse(2)
-            for (size_t i = 0; i < loss_grad.rows(); i++) {
-                for (size_t j = 0; j < loss_grad.cols(); j++) {
+            for (int i = 0; i < static_cast<int>(loss_grad.rows()); i++) {
+                for (int j = 0; j < static_cast<int>(loss_grad.cols()); j++) {
                     loss_grad(i, j) *= current_scale;
                 }
             }
@@ -1609,12 +1721,12 @@ void Transformer::unscale_gradients(FeedForward::Gradients& grads, float scale) 
     std::cout << "Entering function 'Transformer::unscale_gradients (feedforward)'" << std::endl;
     try {
         // Unscale weight gradients
-        grads.ff1_grad *= scale;
-        grads.ff2_grad *= scale;
+        grads.gate_proj_grad *= scale;
+        grads.down_proj_grad *= scale;
 
         // Unscale bias gradients
-        grads.ff1_bias_grad *= scale;
-        grads.ff2_bias_grad *= scale;
+        grads.gate_proj_bias_grad *= scale;
+        grads.down_proj_bias_grad *= scale;
     } catch (const std::exception& e) {
         std::cerr << "Error in Transformer::unscale_gradients: " << e.what() << std::endl;
         throw;
@@ -1756,7 +1868,8 @@ std::vector<TokenPrediction> Transformer::predict_next_tokens(const std::string&
         std::vector<int> input_tokens = tokenize(input);
         
         // Get logits from forward pass
-        Matrix logits = forward(input_tokens, input, *tokenizer_);
+        TransformerOutput output = forward(input_tokens, input, *tokenizer_);
+        Matrix logits = output.logits;
         
         // Apply diversity penalty to logits
         const float diversity_penalty = 0.9f;  // Penalty factor for repeated tokens
@@ -2179,7 +2292,8 @@ std::vector<int> Transformer::generate(const std::vector<int>& input_tokens,
             
             // Forward pass through the model with proper context
             std::cout << "Performing forward pass..." << std::endl;
-            Matrix logits = forward(output_tokens, current_input_context, *tokenizer_);
+            TransformerOutput output = forward(output_tokens, current_input_context, *tokenizer_);
+            Matrix logits = output.logits;
             std::cout << "Logits shape: [" << logits.rows() << " x " << logits.cols() << "]" << std::endl;
             
             if (logits.empty()) {
@@ -2330,6 +2444,11 @@ float Transformer::train_step(const std::vector<int>& inputs, const std::vector<
 }
 
 void Transformer::set_training(bool mode) {
+    // When leaving training mode, pull the device-resident LM head weights back
+    // to host so eval/inference (which uses the host weights) is up to date.
+    if (!mode && lm_head) {
+        lm_head->sync_weights_from_device();
+    }
     training = mode;
     // Set training mode for all components that need it
     for (auto& layer : layers) {

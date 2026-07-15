@@ -39,7 +39,7 @@ public:
     // Implement operator*= directly in the header
     Vector& operator*=(float scalar) {
         #pragma omp parallel for
-        for (size_t i = 0; i < data_.size(); ++i) {
+        for (int i = 0; i < static_cast<int>(data_.size()); ++i) {
             data_[i] *= scalar;
         }
         return *this;

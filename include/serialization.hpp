@@ -10,6 +10,13 @@
 namespace p2p {
     struct NetworkMessage;
     struct ModelStateChunk;
+    struct PBFTRequest;
+    struct PBFTPrePrepare;
+    struct PBFTPrepare;
+    struct PBFTCommit;
+    struct PBFTViewChange;
+    struct PBFTNewView;
+    struct PBFTCheckpoint;
 }
 class Matrix;
 
@@ -83,5 +90,14 @@ std::vector<uint8_t> serialize_chunk(const p2p::ModelStateChunk& chunk);
 p2p::ModelStateChunk deserialize_chunk(const std::vector<uint8_t>& data);
 std::vector<uint8_t> serialize_matrix(const Matrix& matrix);
 Matrix deserialize_matrix(const std::vector<uint8_t>& data);
+
+// PBFT message serialization
+void serialize_pbft_request(const p2p::PBFTRequest& request, std::vector<uint8_t>& data);
+void serialize_pbft_pre_prepare(const p2p::PBFTPrePrepare& pre_prepare, std::vector<uint8_t>& data);
+void serialize_pbft_prepare(const p2p::PBFTPrepare& prepare, std::vector<uint8_t>& data);
+void serialize_pbft_commit(const p2p::PBFTCommit& commit, std::vector<uint8_t>& data);
+void serialize_pbft_view_change(const p2p::PBFTViewChange& view_change, std::vector<uint8_t>& data);
+void serialize_pbft_new_view(const p2p::PBFTNewView& new_view, std::vector<uint8_t>& data);
+void serialize_pbft_checkpoint(const p2p::PBFTCheckpoint& checkpoint, std::vector<uint8_t>& data);
 
 } // namespace serialization

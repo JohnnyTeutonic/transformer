@@ -1,11 +1,16 @@
 #pragma once
 
+#ifdef USE_CUDA
+// CRITICAL: Include math fix FIRST
+#include "cuda/cuda_math_fix.hpp"
+#endif
+
 #include "matrix.hpp"
 #include <vector>
 #include <tuple>
 
 #ifdef USE_CUDA
-#include "cuda/matrix.cuh"
+#include "cuda/cuda_matrix.hpp"
 #endif
 
 struct RouterOutput {
@@ -25,7 +30,9 @@ public:
     };
 
 #ifdef USE_CUDA
-    struct CudaParameters { cuda::CudaMatrix weights; };
+    struct CudaParameters { 
+        cuda::CudaMatrix weights; 
+    };
 #endif
 
     Router(size_t hidden_size, size_t num_experts, size_t top_k);

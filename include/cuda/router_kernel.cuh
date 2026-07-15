@@ -1,6 +1,7 @@
 #pragma once
 
-#include "matrix.cuh"
+#include "matrix_ops.cuh"
+#include "cuda_matrix.hpp"
 
 namespace cuda {
     namespace kernels {

@@ -41,20 +41,25 @@ void Logger::startLogging(const std::string& file_path) {
         return;
     }
 
-    // Set log file to auto-flush
+    // Set log file to unbuffered for immediate writes
     log_file.rdbuf()->pubsetbuf(nullptr, 0);
 
     // Store and redirect cout buffer
     cout_buffer = std::cout.rdbuf();
     std::cout.rdbuf(log_file.rdbuf());
 
-    // Store and redirect cerr buffer
+    // Store and redirect cerr buffer  
     cerr_buffer = std::cerr.rdbuf();
     std::cerr.rdbuf(log_file.rdbuf());
 
-    // Enable auto-flush for cout and cerr
+    // Force unbuffered I/O for immediate flush
     std::cout.setf(std::ios::unitbuf);
     std::cerr.setf(std::ios::unitbuf);
+    
+    // Additional flush to ensure file is created
+    log_file.flush();
+    std::cout.flush();
+    std::cerr.flush();
 
     logging_enabled = true;
 

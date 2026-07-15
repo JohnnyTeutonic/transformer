@@ -74,6 +74,87 @@ void TiktokenTokenizer::build_vocabulary_from_file(const std::string& filepath) 
     std::cout << "Built vocabulary with " << actual_vocab_size << " tokens" << std::endl;
 }
 
+void TiktokenTokenizer::build_vocabulary_from_plain_text(const std::string& filepath) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open file: " + filepath);
+    }
+
+    // Track word frequencies - but stop early if too many unique words
+    std::unordered_map<std::string, size_t> word_freq;
+    std::string line;
+    size_t line_count = 0;
+    const size_t MAX_UNIQUE_WORDS = 100000;  // Stop counting after 100k unique words
+    
+    std::cout << "Counting word frequencies (max " << MAX_UNIQUE_WORDS << " unique words)..." << std::endl;
+    
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        line_count++;
+        
+        // Count word frequencies (lowercase for consistency)
+        auto words = split_into_words(line);
+        for (const auto& word : words) {
+            std::string lower_word = word;
+            std::transform(lower_word.begin(), lower_word.end(), lower_word.begin(), ::tolower);
+            word_freq[lower_word]++;
+        }
+        
+        // Stop if vocabulary gets too large (memory protection)
+        if (word_freq.size() > MAX_UNIQUE_WORDS) {
+            std::cout << "Reached " << MAX_UNIQUE_WORDS << " unique words at line " 
+                      << line_count << ", stopping count..." << std::endl;
+            break;
+        }
+        
+        // Progress indicator
+        if (line_count % 10000 == 0) {
+            std::cout << "Processed " << line_count << " lines, " 
+                      << word_freq.size() << " unique words..." << std::endl;
+        }
+    }
+    
+    std::cout << "Found " << word_freq.size() << " unique words in " << line_count << " lines" << std::endl;
+    std::cout << "Sorting by frequency..." << std::endl;
+    
+    // Sort by frequency (descending)
+    std::vector<std::pair<std::string, size_t>> freq_vec(word_freq.begin(), word_freq.end());
+    std::sort(freq_vec.begin(), freq_vec.end(), 
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    std::cout << "Sorting complete, building vocabulary..." << std::endl;
+    
+    // Build vocabulary with top 20k words (must match model vocab_size)
+    const size_t MAX_VOCAB_SIZE = 20000;
+    
+    // If vocabulary is empty, add special tokens
+    if (word_to_id_.empty()) {
+        word_to_id_[UNK_TOKEN] = UNK_ID;
+        id_to_word_[UNK_ID] = UNK_TOKEN;
+        word_to_id_[SEP_TOKEN] = SEP_ID;
+        id_to_word_[SEP_ID] = SEP_TOKEN;
+    }
+    
+    // Add top frequent words.
+    // Cap on TOTAL vocabulary size (not per-call), so building from multiple
+    // files still respects the global limit instead of accumulating past it.
+    size_t added = 0;
+    for (const auto& [word, freq] : freq_vec) {
+        if (word_to_id_.size() >= MAX_VOCAB_SIZE) break;
+        
+        if (word_to_id_.find(word) == word_to_id_.end()) {
+            int new_id = word_to_id_.size();
+            word_to_id_[word] = new_id;
+            id_to_word_[new_id] = word;
+            added++;
+        }
+    }
+    
+    initialized_ = true;
+    std::cout << "Built vocabulary with top " << added << " most frequent tokens" << std::endl;
+    std::cout << "Total vocabulary size: " << word_to_id_.size() << std::endl;
+}
+
 std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {
     if (!initialized_) {
         throw std::runtime_error("Tokenizer not initialized");
@@ -83,11 +164,14 @@ std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {
     auto words = split_into_words(text);
     
     for (const auto& word : words) {
-        auto it = word_to_id_.find(word);
+        // Lowercase for consistency with vocabulary
+        std::string lower_word = word;
+        std::transform(lower_word.begin(), lower_word.end(), lower_word.begin(), ::tolower);
+        
+        auto it = word_to_id_.find(lower_word);
         if (it != word_to_id_.end()) {
             tokens.push_back(it->second);
         } else {
-            std::cout << "Unknown token: '" << word << "'" << std::endl;
             tokens.push_back(UNK_ID);
         }
     }

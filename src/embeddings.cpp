@@ -1,4 +1,5 @@
 #include "../include/embeddings.hpp"
+#include "../include/lora.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -55,27 +56,14 @@ Matrix TokenEmbedding::forward(const std::vector<int>& tokens) {
         }
     }
 
-    // More aggressive normalization
-    const float eps = 1e-6f;
-    for (size_t i = 0; i < tokens.size(); i++) {
-        float row_norm = 0.0f;
-        // Compute norm for this embedding
-        for (size_t j = 0; j < embedding_dim_; j++) {
-            float val = output(i, j);
-            row_norm += val * val;
-        }
-        row_norm = std::sqrt(row_norm + eps);
-
-        // More aggressive normalization - don't clamp the minimum norm
-        float scale = 1.0f / (row_norm + eps);
-        
-        // Apply scaling with a maximum cap to prevent tiny values
-        scale = std::min(scale, 5.0f);
-        
-        for (size_t j = 0; j < embedding_dim_; j++) {
-            output(i, j) *= scale;
-        }
-    }
+    // NOTE (2026-07-13): this used to L2-normalize every embedding row before
+    // returning. Training therefore saw unit-norm embeddings while GGUF/
+    // safetensors export ships the RAW table and every deployed reader does a
+    // raw lookup. With frozen-uniform embeddings the mismatch was a benign
+    // constant scale, but once embedding training landed, per-row norms
+    // diverged and exported models produced garbage despite healthy training
+    // loss. Raw lookup (LLaMA semantics) keeps train == deploy; the sublayer
+    // RMSNorms handle input scale.
 
     // Validate output
     for (size_t i = 0; i < output.size(); i++) {
@@ -138,62 +126,70 @@ std::unique_ptr<TokenEmbedding> TokenEmbedding::load(std::istream& is) {
     return embedding;
 }
 
-void TokenEmbedding::backward(const Matrix& grad_output, const std::vector<int>& input_tokens) {
-    // Debug dimension information
-    std::cout << "Gradient output dimensions: " << grad_output.rows() << "x" << grad_output.cols()
-              << "\n";
-    std::cout << "Embedding weights dimensions: " << weights_.rows() << "x" << weights_.cols()
-              << "\n";
-    std::cout << "Input tokens size: " << input_tokens.size() << "\n";
-
-    // Verify dimensions
+void TokenEmbedding::backward(const Matrix& grad_output, const std::vector<int>& input_tokens,
+                              float learning_rate) {
     if (grad_output.cols() != embedding_dim_) {
         throw std::runtime_error(
             "Gradient output dimension (" + std::to_string(grad_output.cols()) +
             ") must match embedding dimension (" + std::to_string(embedding_dim_) + ")");
     }
 
-    // Add check for input_tokens size matching grad_output rows
-    if (input_tokens.size() != grad_output.rows()) {
-        std::cout << "Warning: Input tokens size (" << input_tokens.size()
-                  << ") doesn't match gradient rows (" << grad_output.rows()
-                  << "). Using minimum of the two." << std::endl;
+    // Under LoRA fine-tuning the token embedding is frozen (adapters carry
+    // all trainable capacity).
+    if (lora::settings().enabled) {
+        return;
     }
 
-    // Initialize gradient accumulator matrix with same dimensions as weights
+    if (!adam_initialized_) {
+        adam_m_ = Matrix(weights_.rows(), weights_.cols(), 0.0f);
+        adam_v_ = Matrix(weights_.rows(), weights_.cols(), 0.0f);
+        adam_initialized_ = true;
+    }
+    adam_t_ += 1;
+
+    // Accumulate per-row gradients for the rows this batch touched.
     Matrix weight_grads(weights_.rows(), weights_.cols(), 0.0f);
-    std::cout << "Weight grads dimensions: " << weight_grads.shape() << std::endl;
-
-    // Use the minimum of input_tokens size and grad_output rows to prevent out of bounds
+    std::vector<char> touched(weights_.rows(), 0);
     size_t seq_length = std::min(input_tokens.size(), grad_output.rows());
-
-    // For each token in the input sequence
     for (size_t i = 0; i < seq_length; i++) {
         int token_id = input_tokens[i];
-        if (token_id >= static_cast<int>(weights_.rows())) {
-            throw std::runtime_error("Token ID " + std::to_string(token_id) +
-                                     " exceeds vocabulary size " + std::to_string(weights_.rows()));
+        if (token_id < 0 || token_id >= static_cast<int>(weights_.rows())) {
+            continue;
         }
-
-        // Accumulate gradients
+        touched[token_id] = 1;
         for (size_t j = 0; j < embedding_dim_; j++) {
             weight_grads(token_id, j) += grad_output(i, j);
         }
     }
 
-    // Apply gradients with learning rate
-    const float learning_rate = 0.01f;
-    std::cout << "Applying gradients with dimensions check...\n";
+    // Per-tensor clip over the accumulated (sparse) gradient, matching the
+    // other modules' clip_threshold=1.0 convention.
+    float norm_sq = 0.0f;
     for (size_t i = 0; i < weights_.rows(); i++) {
-        for (size_t j = 0; j < weights_.cols(); j++) {
-            weights_(i, j) -= learning_rate * weight_grads(i, j);
-            if (weight_grads(i, j) != 0.0f) {
-                std::cout << "Non-zero gradient at position (" << i << "," << j
-                          << "): " << weight_grads(i, j) << "\n";
-            }
+        if (!touched[i]) continue;
+        for (size_t j = 0; j < embedding_dim_; j++) {
+            norm_sq += weight_grads(i, j) * weight_grads(i, j);
         }
     }
-    std::cout << "Gradient application complete\n";
+    const float clip_threshold = 1.0f;
+    float norm = std::sqrt(norm_sq);
+    float clip_scale = (norm > clip_threshold) ? (clip_threshold / (norm + 1e-8f)) : 1.0f;
+
+    // Lazy row-wise Adam: only rows in the batch move (SparseAdam semantics).
+    const float beta1 = 0.9f, beta2 = 0.999f, adam_eps = 1e-8f;
+    const float bc1 = 1.0f - std::pow(beta1, static_cast<float>(adam_t_));
+    const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(adam_t_));
+    for (size_t i = 0; i < weights_.rows(); i++) {
+        if (!touched[i]) continue;
+        for (size_t j = 0; j < embedding_dim_; j++) {
+            float g = weight_grads(i, j) * clip_scale;
+            float m = beta1 * adam_m_(i, j) + (1.0f - beta1) * g;
+            float v = beta2 * adam_v_(i, j) + (1.0f - beta2) * g * g;
+            adam_m_(i, j) = m;
+            adam_v_(i, j) = v;
+            weights_(i, j) -= learning_rate * (m / bc1) / (std::sqrt(v / bc2) + adam_eps);
+        }
+    }
 }
 
 PositionalEncoding::PositionalEncoding(size_t max_seq_length, size_t hidden_size)
@@ -245,4 +241,15 @@ std::unique_ptr<PositionalEncoding> PositionalEncoding::load(std::istream& is) {
     auto pos_encoding = std::make_unique<PositionalEncoding>(max_seq_length, hidden_size);
     pos_encoding->encoding_matrix_ = Matrix::load(is);
     return pos_encoding;
+}
+
+// CPU fallback implementations for CUDA functions (used in CPU-only builds)
+void TokenEmbedding::forward_cuda(const std::vector<int>& tokens, Matrix& output) {
+    // CPU-only build: fall back to regular forward()
+    output = forward(tokens);
+}
+
+Matrix TokenEmbedding::project_to_vocab_cuda(const Matrix& input) {
+    // CPU-only build: fall back to regular project_to_vocab()
+    return project_to_vocab(input);
 }

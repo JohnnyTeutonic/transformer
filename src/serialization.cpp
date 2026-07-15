@@ -202,4 +202,84 @@ Matrix deserialize_matrix(const std::vector<uint8_t>& data) {
     return matrix;
 }
 
+// PBFT message serialization implementations
+void serialize_pbft_request(const p2p::PBFTRequest& request, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_string(request.client_id);
+    s.write_uint64(request.timestamp);
+    s.write_string(request.operation);
+    s.write_string(request.signature);
+    data = s.take_buffer();
+}
+
+void serialize_pbft_pre_prepare(const p2p::PBFTPrePrepare& pre_prepare, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_uint32(pre_prepare.view);
+    s.write_uint64(pre_prepare.sequence_number);
+    s.write_string(pre_prepare.digest);
+    s.write_string(pre_prepare.primary_signature);
+    
+    // Serialize embedded request
+    std::vector<uint8_t> request_data;
+    serialize_pbft_request(pre_prepare.request, request_data);
+    s.write_bytes(request_data);
+    
+    data = s.take_buffer();
+}
+
+void serialize_pbft_prepare(const p2p::PBFTPrepare& prepare, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_uint32(prepare.view);
+    s.write_uint64(prepare.sequence_number);
+    s.write_string(prepare.digest);
+    s.write_string(prepare.replica_id);
+    s.write_string(prepare.signature);
+    data = s.take_buffer();
+}
+
+void serialize_pbft_commit(const p2p::PBFTCommit& commit, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_uint32(commit.view);
+    s.write_uint64(commit.sequence_number);
+    s.write_string(commit.digest);
+    s.write_string(commit.replica_id);
+    s.write_string(commit.signature);
+    data = s.take_buffer();
+}
+
+void serialize_pbft_view_change(const p2p::PBFTViewChange& view_change, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_uint32(view_change.new_view);
+    s.write_string(view_change.replica_id);
+    s.write_uint64(view_change.last_sequence_number);
+    s.write_string(view_change.signature);
+    
+    // Simplified serialization - in production would serialize checkpoint_proof and prepared_requests
+    s.write_uint32(0); // checkpoint_proof size
+    s.write_uint32(0); // prepared_requests size
+    
+    data = s.take_buffer();
+}
+
+void serialize_pbft_new_view(const p2p::PBFTNewView& new_view, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_uint32(new_view.view);
+    s.write_string(new_view.primary_signature);
+    
+    // Simplified serialization - in production would serialize view_change_messages and pre_prepare_messages
+    s.write_uint32(0); // view_change_messages size
+    s.write_uint32(0); // pre_prepare_messages size
+    
+    data = s.take_buffer();
+}
+
+void serialize_pbft_checkpoint(const p2p::PBFTCheckpoint& checkpoint, std::vector<uint8_t>& data) {
+    Serializer s;
+    s.write_uint64(checkpoint.sequence_number);
+    s.write_string(checkpoint.state_digest);
+    s.write_string(checkpoint.replica_id);
+    s.write_string(checkpoint.signature);
+    data = s.take_buffer();
+}
+
 } // namespace serialization

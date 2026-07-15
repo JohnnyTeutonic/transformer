@@ -24,6 +24,14 @@ clean:
 run: build
 	@cd $(BUILD_DIR) && ./transformer
 
+# Test MoE CUDA implementation
+.PHONY: test-moe
+test-moe: build
+	@echo "Building MoE CUDA test..."
+	@cd $(BUILD_DIR) && g++ -std=c++17 -I../include -DUSE_CUDA ../test_moe_cuda.cpp -L. -ltransformer_lib -lcuda_kernels -lcudart -lcublas -o test_moe_cuda
+	@echo "Running MoE CUDA test..."
+	@cd $(BUILD_DIR) && ./test_moe_cuda
+
 # Format code (requires clang-format)
 .PHONY: format
 format:

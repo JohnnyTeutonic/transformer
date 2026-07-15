@@ -1,6 +1,10 @@
 #include "../include/lm_head.hpp"
+#include "../include/lora.hpp"
 #include "../include/token_constants.hpp"
 #include "../include/cuda/matrix_ops.cuh"  // Add CUDA matrix operations header
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+#include "../include/cuda/loss_kernels.cuh"  // Device-resident projection + loss
+#endif
 #include "../include/scope_logger.hpp"  // Add scope logger header
 #include <cmath>
 #include <iomanip>
@@ -62,60 +66,59 @@ LanguageModelHead::LanguageModelHead(size_t hidden_size, size_t vocab_size)
 }
 
 Matrix LanguageModelHead::forward(const Matrix& hidden_states, bool training) {
-    std::cout << "\n=== LanguageModelHead::forward START ===" << std::endl;
-    std::cout << "Input shape: " << hidden_states.rows() << "x" << hidden_states.cols() << std::endl;
-    std::cout << "Training mode: " << (training ? "true" : "false") << std::endl;
-    
     if (hidden_states.cols() != hidden_size_) {
-        std::cerr << "Error: Hidden dimension mismatch. Expected " << hidden_size_ 
-                  << ", got " << hidden_states.cols() << std::endl;
-        throw std::runtime_error("Hidden dimension mismatch");
+        throw std::runtime_error("Hidden dimension mismatch in LM head");
     }
     
     // Cache hidden states for backward pass
     hidden_states_ = hidden_states;
     
-    // Project hidden states to vocabulary space
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    if (training) {
+        // DEVICE-RESIDENT TRAINING PATH:
+        // Weights (projection/bias) live on the GPU and are updated there by the
+        // Adam step in backward_pass_cuda; they are uploaded once and synced back
+        // to host only for eval/checkpointing. Project hidden -> logits directly
+        // into the persistent device logits buffer (bias added on device), so the
+        // 655MB logits never round-trip to host. The training loop computes loss
+        // from the device logits.
+        cuda::lmhead_ensure_weights(
+            projection.data(),
+            bias.data(),
+            static_cast<int>(hidden_size_),
+            static_cast<int>(vocab_size_)
+        );
+        cuda::project_logits_to_device(
+            hidden_states.data(),
+            static_cast<int>(hidden_states.rows()),
+            static_cast<int>(hidden_size_),
+            static_cast<int>(vocab_size_)
+        );
+        // Logits live on device; return empty placeholder (training loop reads
+        // dimensions from the model config, not from this matrix).
+        return Matrix();
+    }
+#endif
+
+    // Project hidden states to vocabulary space: [seq_len x hidden] @ [hidden x vocab] = [seq_len x vocab]
     Matrix logits(hidden_states.rows(), vocab_size_);
     
-    try {
-        // Perform matrix multiplication
-        logits = matmul(hidden_states, projection);
-        
-        // Add bias
-        for (size_t i = 0; i < logits.rows(); ++i) {
-            for (size_t j = 0; j < logits.cols(); ++j) {
-                logits(i, j) += bias[j];
-            }
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    // Use CUDA cuBLAS for GPU acceleration (eval / inference path)
+    cuda::matmul(hidden_states, projection, logits);
+#else
+    // CPU fallback
+    logits = matmul(hidden_states, projection);
+#endif
+    
+    // Add bias using OpenMP for speed
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(logits.rows()); ++i) {
+        for (size_t j = 0; j < logits.cols(); ++j) {
+            logits(i, j) += bias[j];
         }
-        
-        std::cout << "Output logits shape: " << logits.rows() << "x" << logits.cols() << std::endl;
-        
-        // Debug: Print statistics about the logits
-        float min_logit = std::numeric_limits<float>::max();
-        float max_logit = -std::numeric_limits<float>::max();
-        float sum_logits = 0.0f;
-        
-        for (size_t i = 0; i < logits.rows(); ++i) {
-            for (size_t j = 0; j < logits.cols(); ++j) {
-                float val = logits(i, j);
-                min_logit = std::min(min_logit, val);
-                max_logit = std::max(max_logit, val);
-                sum_logits += val;
-            }
-        }
-        
-        std::cout << "Logits statistics:" << std::endl;
-        std::cout << "  Min: " << min_logit << std::endl;
-        std::cout << "  Max: " << max_logit << std::endl;
-        std::cout << "  Mean: " << sum_logits / (logits.rows() * logits.cols()) << std::endl;
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Error in forward pass: " << e.what() << std::endl;
-        throw;
     }
     
-    std::cout << "=== LanguageModelHead::forward END ===\n" << std::endl;
     return logits;
 }
 
@@ -192,16 +195,17 @@ void LanguageModelHead::update_learning_rate(float current_loss) {
 
 void LanguageModelHead::update_token_frequencies(const std::vector<int>& tokens) {
     SCOPE_LOG();
-    // Reset frequencies periodically to prevent over-accumulation
+    // Reset frequencies periodically to prevent over-accumulation (MSVC: loop vars must be signed int)
     if (training_steps % 1000 == 0) {  // Reset every 1000 steps
         #pragma omp parallel for
-        for (size_t i = 0; i < token_frequencies.size(); i++) {
+        for (int i = 0; i < static_cast<int>(token_frequencies.size()); i++) {
             token_frequencies[i] = 0.0f;
         }
     }
     
+    // MSVC: loop vars must be signed int
     #pragma omp parallel for
-    for (size_t i = 0; i < tokens.size(); i++) {
+    for (int i = 0; i < static_cast<int>(tokens.size()); i++) {
         int token = tokens[i];
         if (token >= 0 && static_cast<size_t>(token) < vocab_size_) {
             #pragma omp atomic
@@ -214,8 +218,9 @@ void LanguageModelHead::update_token_frequencies(const std::vector<int>& tokens)
     if (!token_frequencies.empty()) {
         float max_freq = *std::max_element(token_frequencies.begin(), token_frequencies.end());
         if (max_freq > 0) {
+            // MSVC: loop vars must be signed int
             #pragma omp parallel for
-            for (size_t i = 0; i < token_frequencies.size(); i++) {
+            for (int i = 0; i < static_cast<int>(token_frequencies.size()); i++) {
                 token_frequencies[i] /= max_freq;  // Normalize to [0,1] range
             }
         }
@@ -226,9 +231,9 @@ void LanguageModelHead::update_active_tokens() {
     SCOPE_LOG();
     const float decay = 0.99f;
     
-    // Parallelize frequency decay
+    // Parallelize frequency decay (MSVC: loop vars must be signed int)
     #pragma omp parallel for
-    for (size_t i = 0; i < vocab_size_; i++) {
+    for (int i = 0; i < static_cast<int>(vocab_size_); i++) {
         token_frequencies[i] *= decay;
     }
     
@@ -238,8 +243,9 @@ void LanguageModelHead::update_active_tokens() {
     // Use vector of pairs to avoid multiple passes
     std::vector<std::pair<float, size_t>> freq_pairs(vocab_size_);
     
+    // MSVC: loop vars must be signed int
     #pragma omp parallel for
-    for (size_t i = 0; i < vocab_size_; i++) {
+    for (int i = 0; i < static_cast<int>(vocab_size_); i++) {
         freq_pairs[i] = {token_frequencies[i], i};
     }
     
@@ -262,8 +268,8 @@ void LanguageModelHead::update_active_tokens() {
     }
 }
 
-#ifdef USE_CUDA
-// Add the new GPU kernel for FP16 conversion
+#ifdef __CUDACC__
+// GPU kernel for FP16 conversion (only compiled with nvcc, not MSVC)
 __global__ void convert_projection_to_fp16_kernel(
     half* output, const float* input, const unsigned char* active_tokens,
     size_t hidden_size, size_t vocab_size) {
@@ -310,15 +316,22 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
                                std::to_string(hidden_size_) + ", got: " + std::to_string(hidden_states.cols()));
     }
 
-    // Compute gradients for projection matrix
+    // Compute gradients for projection matrix (normalized by batch size)
     // hidden_states.T: [hidden_size x batch_size]
     // grad_output: [batch_size x vocab_size]
     // grad_proj: [hidden_size x vocab_size]
-    Matrix hidden_states_t = hidden_states.transpose();
-    Matrix grad_proj = matmul(hidden_states_t, grad_output);  // No need for extra transpose
+    const float batch_size = static_cast<float>(grad_output.rows());
+    const float grad_scale = 1.0f / batch_size;
     
-    // Compute bias gradients
+    Matrix hidden_states_t = hidden_states.transpose();
+    Matrix grad_proj = matmul(hidden_states_t, grad_output);
+    grad_proj *= grad_scale;  // Average over batch, not sum!
+    
+    // Compute bias gradients (normalized)
     Vector grad_bias = grad_output.row_sum();
+    for (size_t i = 0; i < grad_bias.size(); ++i) {
+        grad_bias[i] *= grad_scale;
+    }
     
     // Update parameters using Adam optimizer
     t++;  // Increment time step
@@ -330,9 +343,10 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
     const float max_update = 0.05f * scale_factor;
     
     bool has_unstable_update = false;
+    // MSVC: collapse ignored, loop vars must be signed int
     #pragma omp parallel for collapse(2) reduction(|:has_unstable_update)
-    for (size_t i = 0; i < grad_proj.rows(); ++i) {
-        for (size_t j = 0; j < grad_proj.cols(); ++j) {
+    for (int i = 0; i < static_cast<int>(grad_proj.rows()); ++i) {
+        for (int j = 0; j < static_cast<int>(grad_proj.cols()); ++j) {
             try {
                 if (!std::isfinite(grad_proj(i, j))) {
                     std::cout << "Non-finite gradient at (" << i << "," << j << ")" << std::endl;
@@ -411,10 +425,47 @@ Matrix LanguageModelHead::backward_pass(const Matrix& grad_output, const Matrix&
                                std::to_string(hidden_size_) + ", got: " + std::to_string(grad_input.cols()));
     }
     
-    std::cout << "Gradient propagation dimensions:" << std::endl;
-    std::cout << "- Input gradient: [" << grad_input.rows() << " x " << grad_input.cols() << "]" << std::endl;
+    // Gradient logging disabled for performance
     
     return grad_input;
+}
+
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+void LanguageModelHead::backward_pass_cuda(float* d_grad_logits, int num_positions, Matrix& grad_hidden_out) {
+    SCOPE_LOG();
+    // Device-resident LM head backward + Adam update. Consumes the gradient that
+    // is already on the GPU (no 655MB D2H), updates the resident projection
+    // weights in place, and returns grad_hidden (~16MB) for the rest of the
+    // backward pass. Uses the same Adam hyperparameters as the CPU path; the
+    // bias is intentionally not updated (matches backward_pass()).
+    t++;  // Match CPU: increment time step before the update.
+
+    if (grad_hidden_out.rows() != num_positions ||
+        grad_hidden_out.cols() != hidden_size_) {
+        grad_hidden_out = Matrix(num_positions, hidden_size_);
+    }
+
+    // Under LoRA fine-tuning the LM head is frozen: lr=0 leaves the resident
+    // weights untouched while grad_hidden still flows to the layers below.
+    const float effective_lr = lora::settings().enabled ? 0.0f : current_lr;
+    cuda::lmhead_backward_device(
+        d_grad_logits,
+        num_positions,
+        static_cast<int>(hidden_size_),
+        static_cast<int>(vocab_size_),
+        beta1, beta2, eps, effective_lr,
+        static_cast<int>(t),
+        grad_hidden_out.data()
+    );
+}
+#endif
+
+void LanguageModelHead::sync_weights_from_device() {
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    // Pull the resident device weights back into the host matrices so that
+    // eval/inference and checkpoint saving observe the latest values.
+    cuda::lmhead_sync_weights_to_host(projection.data(), bias.data());
+#endif
 }
 
 void LanguageModelHead::bias_completion_format(Matrix& logits) {

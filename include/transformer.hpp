@@ -106,6 +106,13 @@ class TransformerLayer {
                    const std::optional<KVCache>& kv_cache = std::nullopt);
 
     /**
+     * @brief Batched forward with explicit batch/sequence dimensions.
+     * Uses O(batch × seq²) attention instead of O((batch×seq)²).
+     */
+    Matrix forward_batched(const Matrix& input, const AttentionMask& mask,
+                          size_t batch_size, size_t seq_len);
+
+    /**
      * @brief Clears all cached states and resets layer components.
      */
     void clear_cache() {
@@ -150,7 +157,16 @@ class TransformerLayer {
     void save(std::ostream& os) const {
         self_attention->save(os);
         attention_ln->save(os);
-        moe_layer->save(os);
+        // Save feed_forward (non-MoE path used in training)
+        if (feed_forward) {
+            bool has_ff = true;
+            os.write(reinterpret_cast<const char*>(&has_ff), sizeof(has_ff));
+            feed_forward->save(os);
+        } else if (moe_layer) {
+            bool has_ff = false;
+            os.write(reinterpret_cast<const char*>(&has_ff), sizeof(has_ff));
+            moe_layer->save(os);
+        }
         ffn_ln->save(os);
     }
 
@@ -166,7 +182,16 @@ class TransformerLayer {
 
     void load(std::istream& is) {
         self_attention = MultiHeadAttention::load(is, config);
-        moe_layer = MixtureOfExperts::load(is, config);
+        attention_ln = LayerNorm::load(is);
+        // Load feed_forward or MoE based on flag
+        bool has_ff;
+        is.read(reinterpret_cast<char*>(&has_ff), sizeof(has_ff));
+        if (has_ff) {
+            feed_forward = FeedForward::load(is);
+        } else {
+            moe_layer = MixtureOfExperts::load(is, config);
+        }
+        ffn_ln = LayerNorm::load(is);
     }
     Matrix backward(const Matrix& grad_output, const Matrix& input,
                     const Matrix& target_distribution = Matrix());
@@ -192,10 +217,24 @@ class TransformerLayer {
     }
 
     FeedForward* getFeedForward() {
+        return feed_forward.get();
+    }
+
+    const FeedForward* getFeedForward() const {
+        return feed_forward.get();
+    }
+
+    MixtureOfExperts* getMoE() {
         return moe_layer.get();
     }
     LayerNorm* getLayerNorm() {
         return attention_ln.get();
+    }
+    const LayerNorm* getLayerNorm() const {
+        return attention_ln.get();
+    }
+    const LayerNorm* getFfnLayerNorm() const {
+        return ffn_ln.get();
     }
     void convert_to_fp16();
 
@@ -208,7 +247,12 @@ class TransformerLayer {
             attention_ln = std::make_unique<LayerNorm>(*other.attention_ln);
         }
         if (other.moe_layer) {
-            moe_layer = std::make_unique<MixtureOfExperts>(*other.moe_layer);
+            // MixtureOfExperts cannot be copied (unique_ptr members)
+            // If you need to copy, use save/load instead
+            throw std::runtime_error("Cannot copy TransformerLayer with MoE - use save/load instead");
+        }
+        if (other.feed_forward) {
+            feed_forward = std::make_unique<FeedForward>(*other.feed_forward);
         }
         if (other.ffn_ln) {
             ffn_ln = std::make_unique<LayerNorm>(*other.ffn_ln);
@@ -227,7 +271,11 @@ class TransformerLayer {
                 attention_ln = std::make_unique<LayerNorm>(*other.attention_ln);
             }
             if (other.moe_layer) {
-                moe_layer = std::make_unique<MixtureOfExperts>(*other.moe_layer);
+                // MixtureOfExperts cannot be copied (unique_ptr members)
+                throw std::runtime_error("Cannot copy TransformerLayer with MoE - use save/load instead");
+            }
+            if (other.feed_forward) {
+                feed_forward = std::make_unique<FeedForward>(*other.feed_forward);
             }
             if (other.ffn_ln) {
                 ffn_ln = std::make_unique<LayerNorm>(*other.ffn_ln);
@@ -237,9 +285,16 @@ class TransformerLayer {
     }
 
     void update_parameters(float learning_rate) {
+        // Note: self_attention->update_parameters is empty stub
+        // Attention params updated via Transformer::update_parameters instead
         if (self_attention) {
             self_attention->update_parameters(learning_rate);
         }
+        // Update feed forward (non-MoE case)
+        if (feed_forward) {
+            feed_forward->update_parameters(learning_rate);
+        }
+        // Update MoE layer (MoE case)
         if (moe_layer) {
             moe_layer->update_parameters(learning_rate);
         }
@@ -300,6 +355,13 @@ private:
     Matrix hidden_states;
     Matrix last_hidden_states;
     std::vector<Matrix> m_layer_activations;
+    std::vector<int> m_batch_input_tokens;  // flat tokens cached by forward_batch
+                                            // for the embedding update in
+                                            // backward_from_grad* (which used to
+                                            // drop the layer-0 input gradient,
+                                            // leaving embeddings frozen)
+    size_t m_batch_size = 1;  // For batched training
+    size_t m_seq_len = 0;     // For batched training
     std::vector<KVCache> m_kv_caches;
     std::vector<std::pair<size_t, size_t>> last_seq_boundaries;
     std::vector<int> last_input_tokens_;
@@ -714,12 +776,40 @@ public:
     TransformerOutput forward(const std::vector<int>& input_tokens, const std::string& original_query, const TiktokenTokenizer& tokenizer);
 
     /**
+     * @brief Performs batched forward pass for training efficiency.
+     * @param batch_tokens Batch of token sequences (will be padded to max length)
+     * @param max_seq_len Maximum sequence length for padding
+     * @return Batched logits [batch_size * seq_len x vocab_size]
+     */
+    TransformerOutput forward_batch(const std::vector<std::vector<int>>& batch_tokens, size_t max_seq_len);
+
+    /**
      * @brief Performs backward pass and updates model parameters
      * @param logits Output logits from forward pass
      * @param target_distribution Target probability distribution
      * @param learning_rate Learning rate for parameter updates
      */
     void backward(const Matrix& logits, const Matrix& target_distribution, float learning_rate);
+
+    /**
+     * @brief Backward pass from pre-computed gradient (skips softmax computation).
+     * Use this when gradient is already computed (e.g., by CUDA loss kernel).
+     * @param grad_logits Pre-computed gradient [batch*seq_len x vocab_size]
+     * @param learning_rate Learning rate for parameter updates
+     */
+    void backward_from_grad(const Matrix& grad_logits, float learning_rate);
+
+#ifdef USE_CUDA
+    /**
+     * @brief Backward pass with gradient already on device (avoids 655MB D2H transfer).
+     * Use with compute_cross_entropy_loss_keep_grad_on_device().
+     * @param d_grad_logits Device pointer to gradient [total_positions x vocab_size]
+     * @param total_positions Number of positions (batch_size * seq_len)
+     * @param vocab_size Vocabulary size
+     * @param learning_rate Learning rate for parameter updates
+     */
+    void backward_from_grad_cuda(float* d_grad_logits, int total_positions, int vocab_size, float learning_rate);
+#endif
 
     /**
      * @brief Trains the transformer on the given dataset.
@@ -775,11 +865,30 @@ public:
     const TransformerConfig& getConfig() const {
         return config;
     }
+    /** Re-wire the tokenizer into every attention layer. Required after
+     *  ModelSaver::loadCheckpoint, which rebuilds layer components without
+     *  their tokenizer (otherwise the first single-sequence forward — e.g.
+     *  validation after a resume — throws "Tokenizer not set"). */
+    void set_tokenizer(const std::shared_ptr<TiktokenTokenizer>& tok) {
+        tokenizer_ = tok;
+        initialize_attention_layers();
+    }
     const std::vector<std::unique_ptr<TransformerLayer>>& getLayers() const {
         return layers;
     }
     std::vector<std::unique_ptr<TransformerLayer>>& getLayers() {
         return layers;
+    }
+    
+    // GGUF export accessors
+    const TokenEmbedding* getTokenEmbedding() const { return token_embedding.get(); }
+    const LayerNorm* getFinalLayerNorm() const { return final_ln.get(); }
+    const LanguageModelHead* getLMHead() const { return lm_head.get(); }
+
+    // Output vocabulary size (columns of the LM head projection). Used by the
+    // training loop when logits are kept device-resident and not materialized.
+    size_t get_output_vocab_size() const {
+        return lm_head ? lm_head->get_weights().cols() : 0;
     }
     virtual ~Transformer();
 

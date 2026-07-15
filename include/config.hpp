@@ -62,6 +62,14 @@ struct PathConfig {
  * - File paths and checkpointing
  * - Generation and beam search settings
  */
+namespace transformer_runtime {
+// Set once at startup, before model construction, when training in LLaMA
+// mode. Modules whose update path has no config access (attention, FFN)
+// consult this to keep biases frozen at zero, so the exported GGUF (which
+// carries no bias tensors) reproduces training math exactly.
+extern bool llama_no_bias;
+}
+
 struct TransformerConfig {
     // Model parameters
     size_t num_layers;
@@ -73,13 +81,13 @@ struct TransformerConfig {
     size_t vocab_size = 0;  // Initialize to 0 to detect if not properly set
 
     // Training parameters
-    size_t batch_size;
+    size_t batch_size = 32;
     size_t min_batch_size = 1;
     size_t max_batch_size = 128;
-    size_t num_epochs;
-    float initial_lr;
-    float dropout_rate;
-    float weight_decay;
+    size_t num_epochs = 10;
+    float initial_lr = 1e-4f;
+    float dropout_rate = 0.1f;
+    float weight_decay = 0.0f;  // Default to 0 - no weight decay
     
     // Early stopping parameters
     size_t early_stopping_patience;
@@ -94,9 +102,9 @@ struct TransformerConfig {
     float decay_factor;
     
     // Optimization parameters
-    float gradient_clip_threshold;
-    float layer_norm_epsilon;
-    size_t gradient_accumulation_steps;
+    float gradient_clip_threshold = 1.0f;
+    float layer_norm_epsilon = 1e-5f;  // Prevent division by zero in LayerNorm
+    size_t gradient_accumulation_steps = 1;
     bool use_gradient_checkpointing;
     bool use_fp16;
     size_t memory_pool_size;
@@ -104,6 +112,20 @@ struct TransformerConfig {
     // Attention parameters
     bool use_flash_attention;
     bool use_rope;
+
+    // LLaMA-compatible training mode: RMSNorm instead of LayerNorm, RoPE
+    // instead of additive sinusoidal position embeddings, and all biases
+    // frozen at zero. Required for lossless GGUF export to llama.cpp-family
+    // inference engines (tinyllama.cpp), whose "llama" architecture computes
+    // exactly this math.
+    // NOTE: kept as the derived legacy flag; the primitives are now selected
+    // independently by arch::ArchitectureSpec via the fields below.
+    bool llama_mode = false;
+
+    // Decoupled architecture primitives (set via arch::ArchitectureSpec).
+    bool use_rms_norm = false;   // RMSNorm (true) vs classic LayerNorm (false)
+    bool use_biases = true;      // false freezes all biases at zero (llama)
+
     bool use_sliding_window;
     size_t window_size;
     bool use_gqa;
@@ -120,6 +142,20 @@ struct TransformerConfig {
     // Checkpoint loading
     bool load_from_checkpoint = false;
     std::string checkpoint_to_load;
+
+    // Post-training export. format: "gguf" | "safetensors" | "both" | "none".
+    // path is the base output path (format extension appended when missing).
+    // Explicit CLI flags (--export-gguf / --export-safetensors) take
+    // precedence over this block.
+    std::string export_format = "none";
+    std::string export_path = "";
+
+    // LoRA fine-tuning (see lora.hpp): freeze the base model, train rank-r
+    // adapters on the attention/FFN projections. Pair with --resume to
+    // fine-tune a trained checkpoint. Exports carry merged weights.
+    bool lora_enabled = false;
+    size_t lora_rank = 8;
+    float lora_alpha = 16.0f;
 
     // Optimizer settings
     bool use_momentum = false;

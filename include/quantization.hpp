@@ -9,32 +9,71 @@
 #endif
 
 /**
+ * @brief Quantization granularity mode.
+ * 
+ * Per-tensor: Single scale for entire tensor (coarse, fails for heterogeneous activations)
+ * Per-channel: Separate scale per hidden dimension (optimal for H > 127 per Manifold Nyquist)
+ * Auto: Automatically select based on heterogeneity measurement
+ */
+enum class QuantizationMode {
+    Disabled,    ///< No quantization (FP32 everywhere)
+    PerTensor,   ///< Global quantization scale (legacy)
+    PerChannel,  ///< Per-channel quantization (optimal for transformers)
+    Auto         ///< Auto-select based on heterogeneity
+};
+
+/**
  * @brief Post-training quantization for model compression.
  * 
  * The Quantizer class provides functionality for quantizing model weights
  * and activations to reduced precision (e.g., 8-bit integers) after training.
  * Features include:
  * - Configurable bit width
- * - Scale and zero-point calibration
+ * - Per-tensor and per-channel quantization modes
+ * - Heterogeneity-aware auto-selection (Manifold Nyquist Criterion)
  * - CUDA acceleration support
  * - Symmetric and asymmetric quantization
  */
 class Quantizer {
   private:
-    size_t bits;         ///< Number of bits for quantization
-    float scale;         ///< Scaling factor for quantization
-    float zero_point;    ///< Zero point offset for asymmetric quantization
+    size_t bits;                     ///< Number of bits for quantization
+    QuantizationMode mode;           ///< Quantization granularity mode
+    
+    // Per-tensor quantization parameters (legacy)
+    float scale;                     ///< Scaling factor for per-tensor quantization
+    float zero_point;                ///< Zero point offset for asymmetric quantization
+    
+    // Per-channel quantization parameters
+    std::vector<float> channel_scales;      ///< Per-channel scaling factors
+    std::vector<float> channel_zero_points; ///< Per-channel zero points
+    size_t num_channels;                    ///< Number of channels (hidden dimension)
+    
+    /**
+     * @brief Measure activation heterogeneity H = max(σ_i) / median(σ_i).
+     * 
+     * High heterogeneity (H > 127 for INT8) indicates per-channel quantization is required.
+     * This implements the Manifold Nyquist Criterion from the quantization theory.
+     * 
+     * @param input Input activation tensor [batch * seq, hidden_dim]
+     * @return Heterogeneity measure H
+     */
+    float measure_heterogeneity(const Matrix& input);
 
   public:
     /**
-     * @brief Constructs a quantizer with specified precision.
+     * @brief Constructs a quantizer with specified precision and mode.
      * @param num_bits Number of bits for quantization (default: 8)
+     * @param quant_mode Quantization granularity mode (default: Auto)
      */
-    explicit Quantizer(size_t num_bits = 8);
+    explicit Quantizer(size_t num_bits = 8, QuantizationMode quant_mode = QuantizationMode::Auto);
 
     /**
      * @brief Quantizes a floating-point matrix to reduced precision.
-     * @param input Input matrix to quantize
+     * 
+     * Automatically selects per-tensor or per-channel based on mode setting.
+     * For Auto mode, measures heterogeneity and selects optimal granularity.
+     * 
+     * @param input Input matrix to quantize [batch*seq, hidden_dim]
      * @return Quantized matrix
      */
     Matrix quantize(const Matrix& input);
@@ -45,6 +84,24 @@ class Quantizer {
      * @return Quantized matrix
      */
     Matrix quantize_cuda(const Matrix& input);
+    
+    /**
+     * @brief Per-channel quantization (CPU implementation).
+     * 
+     * Computes separate scale per hidden dimension (channel).
+     * Optimal for activations with H > 127 (Manifold Nyquist Criterion).
+     * 
+     * @param input Input matrix [batch*seq, hidden_dim]
+     * @return Quantized matrix
+     */
+    Matrix quantize_per_channel(const Matrix& input);
+    
+    /**
+     * @brief Per-channel quantization (CUDA implementation).
+     * @param input Input matrix [batch*seq, hidden_dim]
+     * @return Quantized matrix
+     */
+    Matrix quantize_per_channel_cuda(const Matrix& input);
 
     /**
      * @brief Dequantizes a matrix back to floating-point.
@@ -59,6 +116,37 @@ class Quantizer {
      * @return Dequantized floating-point matrix
      */
     Matrix dequantize_cuda(const Matrix& quantized);
+    
+    /**
+     * @brief Per-channel dequantization (CPU implementation).
+     * @param quantized Quantized matrix to convert back
+     * @return Dequantized floating-point matrix
+     */
+    Matrix dequantize_per_channel(const Matrix& quantized);
+    
+    /**
+     * @brief Per-channel dequantization (CUDA implementation).
+     * @param quantized Quantized matrix to convert back
+     * @return Dequantized floating-point matrix
+     */
+    Matrix dequantize_per_channel_cuda(const Matrix& quantized);
+    
+    /**
+     * @brief Get current quantization mode.
+     * @return Current quantization mode
+     */
+    QuantizationMode get_mode() const { return mode; }
+    
+    /**
+     * @brief Get last measured heterogeneity value.
+     * @return Heterogeneity H (or 0.0 if not measured)
+     */
+    float get_heterogeneity() const { return last_heterogeneity; }
+
+  private:
+    float last_heterogeneity = 0.0f; ///< Last measured heterogeneity value
+
+  public:
 
     /**
      * @brief Saves quantization parameters to a stream.

@@ -3,3 +3,13 @@ transformer_log.log
 transformer.log
 docs/
 bin/
+
+# Colab work
+colab_out_smoke/
+colab_out_smoke2/
+scripts/colab_smoke_roundtrip.py
+scripts/tcpps_boot.py
+scripts/tcpps2_boot.py
+
+# Build artifacts
+build_test/

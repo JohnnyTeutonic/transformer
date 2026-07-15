@@ -1,4 +1,10 @@
 #pragma once
+
+#ifdef USE_CUDA
+// CRITICAL: Include math fix FIRST
+#include "cuda/cuda_math_fix.hpp"
+#endif
+
 #include "components.hpp"
 #include "layer_norm.hpp"
 #include "tiktoken_tokenizer.hpp"
@@ -10,8 +16,7 @@
 #include <deque>
 
 // Only include CUDA headers if CUDA is available
-#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
-#include <cuda_runtime.h>
+#ifdef USE_CUDA
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 #endif
@@ -70,12 +75,14 @@ class LanguageModelHead {
     float* h_projection = nullptr;
     float* h_bias = nullptr;
 
-    // Device memory buffers
+    // Device memory buffers (declare when USE_CUDA, not just when compiling with nvcc)
     float* d_projection = nullptr;  // Device copy of projection matrix
     float* d_bias = nullptr;       // Device copy of bias
+#ifdef USE_CUDA
     half* d_projection_fp16 = nullptr;  // FP16 version of projection
     half* d_hidden_states_fp16 = nullptr;  // FP16 version of input
     half* d_output_fp16 = nullptr;  // FP16 intermediate output
+#endif
     float* d_output = nullptr;      // Final FP32 output
 
     // Add new member variables
@@ -165,6 +172,26 @@ class LanguageModelHead {
      */
     Matrix backward_pass(const Matrix& grad_output, const Matrix& hidden_states);
 
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    /**
+     * @brief Device-resident backward pass + Adam weight update.
+     * Consumes the gradient already on the GPU (avoids the 655MB D2H copy),
+     * updates the resident projection weights on the device, and returns
+     * grad_hidden for the remainder of the backward pass.
+     * @param d_grad_logits Device pointer to gradient [num_positions x vocab_size]
+     * @param num_positions Number of positions (batch_size * seq_len)
+     * @param grad_hidden_out OUTPUT host matrix [num_positions x hidden_size]
+     */
+    void backward_pass_cuda(float* d_grad_logits, int num_positions, Matrix& grad_hidden_out);
+#endif
+
+    /**
+     * @brief Copies the device-resident weights back to the host matrices.
+     * No-op on CPU builds or if the device weights are not initialized. Call
+     * before eval/inference or checkpoint saving so the host weights are current.
+     */
+    void sync_weights_from_device();
+
     /**
      * @brief Saves the model head to a stream.
      * @param os Output stream to save to
@@ -210,6 +237,9 @@ class LanguageModelHead {
      * @return Const reference to the projection weights matrix
      */
     const Matrix& get_weights() const { return projection; }
+
+    // GGUF export alias
+    const Matrix& getWeights() const { return projection; }
 
     /**
      * @brief Gets the bias vector.
@@ -306,9 +336,11 @@ class LanguageModelHead {
         h_bias = nullptr;
         d_projection = nullptr;
         d_bias = nullptr;
+#ifdef __CUDACC__
         d_projection_fp16 = nullptr;
         d_hidden_states_fp16 = nullptr;
         d_output_fp16 = nullptr;
+#endif
         d_output = nullptr;
         
     #ifdef USE_CUDA

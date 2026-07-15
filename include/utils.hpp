@@ -209,9 +209,10 @@ public:
     // Add inline utility functions for gradient computation
     static inline float compute_grad_norm(const Matrix& grad) {
         float norm = 0.0f;
+        // MSVC: loop vars must be signed int
         #pragma omp parallel for reduction(+:norm)
-        for (size_t i = 0; i < grad.rows(); ++i) {
-            for (size_t j = 0; j < grad.cols(); ++j) {
+        for (int i = 0; i < static_cast<int>(grad.rows()); ++i) {
+            for (int j = 0; j < static_cast<int>(grad.cols()); ++j) {
                 norm += grad(i, j) * grad(i, j);
             }
         }
@@ -223,22 +224,47 @@ public:
     }
 
     // Add loss computation functions
-    static inline float compute_loss(const Matrix& output, const Matrix& target_distribution) {
-        if (output.size() != target_distribution.size()) {
-            throw std::runtime_error("Output and target distribution must have the same size");
+    // NOTE: This function expects RAW LOGITS, not probabilities!
+    // It applies log-softmax internally for numerical stability.
+    static inline float compute_loss(const Matrix& logits, const Matrix& target_distribution) {
+        if (logits.size() != target_distribution.size()) {
+            throw std::runtime_error("Logits and target distribution must have the same size");
         }
 
-        const size_t batch_size = output.rows();
-        const size_t vocab_size = output.cols();
-        const float epsilon = 1e-5f;  // Increased from 1e-10f for better stability
+        const size_t batch_size = logits.rows();
+        const size_t vocab_size = logits.cols();
+        const float epsilon = 1e-10f;
         float total_loss = 0.0f;
 
+        // Pre-compute max logits for numerical stability (log-sum-exp trick)
+        std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(batch_size); ++i) {
+            for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
+                max_logits[i] = std::max(max_logits[i], logits(i, j));
+            }
+        }
+
+        // Pre-compute log-sum-exp denominators
+        std::vector<float> log_sum_exp(batch_size, 0.0f);
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(batch_size); ++i) {
+            float sum_exp = 0.0f;
+            for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
+                sum_exp += std::exp(logits(i, j) - max_logits[i]);
+            }
+            log_sum_exp[i] = max_logits[i] + std::log(sum_exp + epsilon);
+        }
+
+        // Compute cross-entropy loss using log-softmax
+        // log_softmax(x)_j = x_j - log(sum(exp(x)))
+        // CE = -sum(target * log_softmax(logits))
         #pragma omp parallel for reduction(+:total_loss)
-        for (size_t i = 0; i < batch_size; ++i) {
-            for (size_t j = 0; j < vocab_size; ++j) {
+        for (int i = 0; i < static_cast<int>(batch_size); ++i) {
+            for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
                 if (target_distribution(i, j) > 0.0f) {
-                    float pred = std::clamp(output(i, j), epsilon, 1.0f - epsilon);
-                    total_loss -= target_distribution(i, j) * std::log(pred);
+                    float log_softmax = logits(i, j) - log_sum_exp[i];
+                    total_loss -= target_distribution(i, j) * log_softmax;
                 }
             }
         }
@@ -258,29 +284,31 @@ public:
 
         // Pre-compute max values for numerical stability
         std::vector<float> max_logits(batch_size, -std::numeric_limits<float>::infinity());
+        // MSVC: loop vars must be signed int
         #pragma omp parallel for
-        for (size_t i = 0; i < batch_size; ++i) {
-            for (size_t j = 0; j < vocab_size; ++j) {
+        for (int i = 0; i < static_cast<int>(batch_size); ++i) {
+            for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
                 max_logits[i] = std::max(max_logits[i], output(i, j));
             }
         }
 
         // Pre-compute denominator terms
         std::vector<float> denominators(batch_size, 0.0f);
+        // MSVC: loop vars must be signed int
         #pragma omp parallel for
-        for (size_t i = 0; i < batch_size; ++i) {
+        for (int i = 0; i < static_cast<int>(batch_size); ++i) {
             float sum_exp = 0.0f;
-            for (size_t j = 0; j < vocab_size; ++j) {
+            for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
                 float shifted_logit = output(i, j) - max_logits[i];
                 sum_exp += std::exp(shifted_logit);
             }
             denominators[i] = std::max(sum_exp, epsilon);
         }
 
-        // Compute final gradients
+        // Compute final gradients (MSVC: collapse ignored)
         #pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < batch_size; ++i) {
-            for (size_t j = 0; j < vocab_size; ++j) {
+        for (int i = 0; i < static_cast<int>(batch_size); ++i) {
+            for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
                 float shifted_logit = output(i, j) - max_logits[i];
                 float softmax_output = std::exp(shifted_logit) / denominators[i];
                 

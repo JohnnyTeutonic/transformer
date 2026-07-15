@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <vector>
 #include <numeric>
+#include <limits>
+#include <cmath>
 
 #ifdef USE_CUDA
 #include "../include/cuda/router_kernel.cuh"
@@ -78,7 +80,28 @@ RouterOutput Router::forward(const Matrix& hidden_states) {
     Matrix logits = hidden_states * params_.weights;
 
     // 2. Compute softmax over logits to get probabilities
-    softmax_cache_ = logits.softmax(); // Cache for backward pass
+    // Manual softmax implementation (row-wise)
+    softmax_cache_ = Matrix(logits.rows(), logits.cols());
+    for (size_t i = 0; i < logits.rows(); ++i) {
+        // Find max for numerical stability
+        float max_val = -std::numeric_limits<float>::infinity();
+        for (size_t j = 0; j < logits.cols(); ++j) {
+            max_val = std::max(max_val, logits(i, j));
+        }
+        
+        // Compute exp and sum
+        float sum = 0.0f;
+        for (size_t j = 0; j < logits.cols(); ++j) {
+            float exp_val = std::exp(logits(i, j) - max_val);
+            softmax_cache_(i, j) = exp_val;
+            sum += exp_val;
+        }
+        
+        // Normalize
+        for (size_t j = 0; j < logits.cols(); ++j) {
+            softmax_cache_(i, j) /= sum;
+        }
+    }
 
     // 3. Select top-k experts for each token
     size_t batch_size = hidden_states.rows();

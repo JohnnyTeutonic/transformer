@@ -25,6 +25,10 @@ class TokenEmbedding {
     mutable Matrix weights_grad_; ///< Gradient matrix for embedding weights
     size_t vocab_size_;          ///< Size of the vocabulary
     size_t embedding_dim_;       ///< Dimension of each embedding vector
+    Matrix adam_m_;              ///< Adam first moment (lazy row-wise)
+    Matrix adam_v_;              ///< Adam second moment (lazy row-wise)
+    size_t adam_t_ = 0;          ///< Adam step counter
+    bool adam_initialized_ = false;
 
   public:
     /**
@@ -49,11 +53,17 @@ class TokenEmbedding {
     Matrix project_to_vocab(const Matrix& hidden_states);
 
     /**
-     * @brief Computes gradients during backpropagation.
-     * @param grad_output Gradient of the loss with respect to the output
-     * @param input_tokens Original input token IDs
+     * @brief Accumulates token gradients and applies a lazy row-wise Adam
+     *        update (only rows touched by the batch). Until 2026-07-13 this
+     *        was never called from the training backward pass (embeddings
+     *        stayed frozen at random init) and hardcoded lr=0.01 plain SGD.
+     * @param grad_output [num_tokens x embedding_dim] gradient w.r.t. the
+     *        embedding output (after any embedding dropout backward)
+     * @param input_tokens Original input token IDs (same order as rows)
+     * @param learning_rate trainer learning rate
      */
-    void backward(const Matrix& grad_output, const std::vector<int>& input_tokens);
+    void backward(const Matrix& grad_output, const std::vector<int>& input_tokens,
+                  float learning_rate);
 
     /**
      * @brief CUDA-accelerated forward pass.
@@ -80,6 +90,9 @@ class TokenEmbedding {
      * @return Const reference to the weights matrix
      */
     const Matrix& get_weights() const { return weights_; }
+    
+    // GGUF export alias
+    const Matrix& getWeights() const { return weights_; }
 
     /**
      * @brief Gets the embedding weight matrix (const).

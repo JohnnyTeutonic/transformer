@@ -24,6 +24,7 @@ public:
     
     // Vocabulary management
     void build_vocabulary_from_file(const std::string& filepath);
+    void build_vocabulary_from_plain_text(const std::string& filepath);  // For WikiText-style data
     size_t vocab_size() const { return word_to_id_.size(); }
     bool is_initialized() const { return initialized_; }
     

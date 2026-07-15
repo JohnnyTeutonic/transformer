@@ -229,6 +229,11 @@ class Matrix {
     void apply_gelu_derivative(const Matrix& x);
 
     /**
+     * @brief Applies SwiSH (Swish) activation function element-wise: x * sigmoid(x).
+     */
+    void apply_swish();
+
+    /**
      * @brief Applies softmax function row-wise.
      */
     void apply_softmax();
@@ -238,6 +243,12 @@ class Matrix {
      * @param bias Bias vector to add
      */
     void add_bias(const Vector& bias);
+
+    /**
+     * @brief Computes the sum of each column (reduction over rows).
+     * @return Vector of column sums
+     */
+    Vector column_sum() const;
 
     /**
      * @brief Matrix addition assignment operator.
@@ -411,8 +422,8 @@ class Matrix {
 };
 
 // Make to_vector inline to allow multiple definitions
-inline std::vector<int> to_vector(const Matrix& m) {
-    return std::vector<int>(m.data(), m.data() + m.size());
+inline std::vector<float> to_vector(const Matrix& m) {
+    return std::vector<float>(m.data(), m.data() + m.size());
 }
 
 // Non-member operators

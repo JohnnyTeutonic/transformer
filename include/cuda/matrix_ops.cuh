@@ -28,4 +28,10 @@ namespace cuda {
     void layer_norm_backward(const Matrix& grad_output, const Matrix& input,
                            const Matrix& gamma, Matrix& grad_gamma,
                            Matrix& grad_beta, float eps);
+
+    // Softmax operations
+    void softmax(Matrix& matrix);  // In-place row-wise softmax
+    
+    // Add bias
+    void add_bias(Matrix& matrix, const Vector& bias);
 } 

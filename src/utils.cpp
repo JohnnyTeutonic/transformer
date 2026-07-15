@@ -358,18 +358,18 @@ float Utils::compute_batch_loss(
 
     float total_loss = 0.0f;
 
-    // Process each item in the batch
+    // Process each item in the batch (MSVC: loop vars must be signed int)
     #pragma omp parallel for reduction(+:total_loss)
-    for (size_t i = 0; i < batch_size; ++i) {
+    for (int i = 0; i < static_cast<int>(batch_size); ++i) {
         // Find max logit for numerical stability
         float max_logit = -std::numeric_limits<float>::infinity();
-        for (size_t j = 0; j < vocab_size; ++j) {
+        for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
             max_logit = std::max(max_logit, logits(i, j));
         }
 
         // Compute log-sum-exp trick for softmax denominator
         float sum_exp = 0.0f;
-        for (size_t j = 0; j < vocab_size; ++j) {
+        for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
             float shifted_logit = logits(i, j) - max_logit;
             // Clamp extremely negative values
             if (shifted_logit > min_log_prob) {
@@ -383,7 +383,7 @@ float Utils::compute_batch_loss(
 
         // Compute cross-entropy loss for this item
         float sequence_loss = 0.0f;
-        for (size_t j = 0; j < vocab_size; ++j) {
+        for (int j = 0; j < static_cast<int>(vocab_size); ++j) {
             if (target_distribution(i, j) > 0.0f) {
                 // Compute log probability with numerical stability
                 float log_prob = logits(i, j) - log_denominator;
@@ -455,18 +455,18 @@ TransformerConfig Utils::load_config(const std::string& config_path) {
     // Load training parameters
     if (j.contains("training")) {
         const auto& training = j["training"];
-        config.training.samples_per_iteration = training.value("samples_per_iteration", 32);
-        config.training.num_epochs = training.value("num_epochs", config.training.num_epochs);
-        config.training.dropout_rate = training.value("dropout_rate", config.training.dropout_rate);
-        config.training.weight_decay = training.value("weight_decay", config.training.weight_decay);
+        // Note: samples_per_iteration not in TransformerConfig, skip or add to config
+        config.num_epochs = training.value("num_epochs", config.num_epochs);
+        config.dropout_rate = training.value("dropout_rate", config.dropout_rate);
+        config.weight_decay = training.value("weight_decay", config.weight_decay);
         
         if (training.contains("cross_validation")) {
             auto& cv = training["cross_validation"];
-            config.training.cross_validation.num_folds = cv.value("num_folds", 2);
-            config.training.cross_validation.validation_frequency = cv.value("validation_frequency", 1);
-            config.training.cross_validation.early_stopping_threshold = cv.value("early_stopping_threshold", 1.5f);
-            config.training.cross_validation.early_stopping_patience = cv.value("early_stopping_patience", 2);
-            config.training.cross_validation.num_epochs = cv.value("num_epochs", 10);
+            config.num_folds = cv.value("num_folds", config.num_folds);
+            // validation_frequency not in TransformerConfig
+            config.early_stopping_threshold = cv.value("early_stopping_threshold", config.early_stopping_threshold);
+            config.early_stopping_patience = cv.value("early_stopping_patience", config.early_stopping_patience);
+            // num_epochs already set above
         }
     }
     
@@ -885,7 +885,8 @@ ValidationMetrics Utils::evaluate_validation(
         // Forward pass for each sequence with context
         std::vector<Matrix> all_logits;
         for (size_t i = 0; i < context_batch.size(); i++) {
-            Matrix seq_logits = transformer.forward(context_batch[i], full_contexts[i], tokenizer);
+            TransformerOutput output = transformer.forward(context_batch[i], full_contexts[i], tokenizer);
+            Matrix seq_logits = output.logits;
             Matrix last_logits(1, seq_logits.cols());
             for (size_t j = 0; j < seq_logits.cols(); j++) {
                 last_logits(0, j) = seq_logits(seq_logits.rows() - 1, j);
@@ -1296,7 +1297,7 @@ float Utils::perform_cross_validation(
     const TiktokenTokenizer& tokenizer,
     const std::vector<std::pair<std::string, std::string>>& data) {
     
-    const size_t num_folds = transformer.getConfig().training.cross_validation.num_folds;  // Get from config instead of hardcoding
+    const size_t num_folds = transformer.getConfig().num_folds;  // Get from config instead of hardcoding
     const size_t fold_size = data.size() / num_folds;
     float total_loss = 0.0f;
 
@@ -1317,8 +1318,9 @@ float Utils::perform_cross_validation(
     std::vector<ProcessedData> processed_data;
     processed_data.reserve(data.size());
 
+    // MSVC: loop vars must be signed int
     #pragma omp parallel for
-    for (size_t i = 0; i < data.size(); i++) {
+    for (int i = 0; i < static_cast<int>(data.size()); i++) {
         const auto& [input_str, target_str] = data[i];
         std::string processed_input = input_str;
         std::string processed_target = target_str;
@@ -1364,8 +1366,8 @@ float Utils::perform_cross_validation(
             for (size_t i = batch_start; i < batch_end; i++) {
                 const auto& tokens = val_data[i].input_tokens;
                 if (!tokens.empty()) {
-                    Matrix logits = transformer.forward(tokens, "", tokenizer);
-                    batch_logits.push_back(std::move(logits));
+                    TransformerOutput output = transformer.forward(tokens, "", tokenizer);
+                    batch_logits.push_back(std::move(output.logits));
                 }
             }
 
@@ -1488,8 +1490,8 @@ void Utils::generate_predictions(
     
     // Also show top predictions for the next token (for comparison)
     std::cout << "\nTop next token predictions (for reference):" << std::endl;
-    Matrix logits = transformer.forward(input_tokens, input_text, *tokenizer);
-    print_top_predictions(logits, *tokenizer, transformer, 5);
+    TransformerOutput output = transformer.forward(input_tokens, input_text, *tokenizer);
+    print_top_predictions(output.logits, *tokenizer, transformer, 5);
 }
 
 // Add debugging for gradient analysis

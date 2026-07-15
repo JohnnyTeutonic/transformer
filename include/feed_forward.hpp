@@ -1,8 +1,17 @@
 #pragma once
+
+#ifdef USE_CUDA
+// CRITICAL: Include math fix FIRST before any other includes
+#include "cuda/cuda_math_fix.hpp"
+#endif
+
 #include "matrix.hpp"
 #include "vector.hpp"
 #include "components.hpp"
+#include "lora.hpp"
+
 #ifdef USE_CUDA
+#include "cuda/cuda_matrix.hpp"
 #include "cuda/cuda_utils.cuh"
 #endif
 
@@ -33,6 +42,24 @@ class FeedForward {
         FloatVector down_proj_bias_grad;
     };
 
+    // Adam optimizer state (first + second moments; see attention.hpp note)
+    struct MomentumState {
+        Matrix gate_proj_m;
+        Matrix up_proj_m;
+        Matrix down_proj_m;
+        Matrix gate_proj_v;
+        Matrix up_proj_v;
+        Matrix down_proj_v;
+        FloatVector gate_proj_bias_m;
+        FloatVector up_proj_bias_m;
+        FloatVector down_proj_bias_m;
+        FloatVector gate_proj_bias_v;
+        FloatVector up_proj_bias_v;
+        FloatVector down_proj_bias_v;
+        size_t t = 0;
+        bool initialized = false;
+    };
+
 #ifdef USE_CUDA
     // Structs for GPU data
     struct CudaParameters {
@@ -42,9 +69,9 @@ class FeedForward {
     };
 
     struct CudaGradients {
-        cuda::CudaMatrix gate_proj_weights_grad;
-        cuda::CudaMatrix up_proj_weights_grad;
-        cuda::CudaMatrix down_proj_weights_grad;
+        cuda::CudaMatrix gate_proj_grad;
+        cuda::CudaMatrix up_proj_grad;
+        cuda::CudaMatrix down_proj_grad;
     };
 #endif
 
@@ -61,11 +88,17 @@ class FeedForward {
 
     Parameters params_;
     Gradients grads_;
+    MomentumState momentum_;  // For stable training
+    // LoRA adapters (active only when lora::settings().enabled)
+    lora::LoRAAdapter lora_gate_, lora_up_, lora_down_;
 
     // CPU caches
     Matrix input_cache_;
     Matrix gated_linear_output_cache_;
     Matrix up_proj_output_cache_;
+    Matrix intermediate_cache_;  // For SwiGLU intermediate results
+    Matrix gate_cache_;          // For gate projection cache
+    Matrix up_cache_;            // For up projection cache
 
 #ifdef USE_CUDA
     // GPU caches and parameters
@@ -120,16 +153,21 @@ class FeedForward {
     static std::unique_ptr<FeedForward> load(std::istream& is);
 
     // Update accessor methods to use Parameters structure
-    Matrix& get_ff1_weights() { return params_.ff1_weights; }
-    Matrix& get_ff2_weights() { return params_.ff2_weights; }
-    FloatVector& getBias1() { return params_.ff1_bias; }
-    FloatVector& getBias2() { return params_.ff2_bias; }
+    Matrix& get_ff1_weights() { return params_.gate_proj_weights; }
+    Matrix& get_ff2_weights() { return params_.down_proj_weights; }
+    FloatVector& getBias1() { return params_.gate_proj_bias; }
+    FloatVector& getBias2() { return params_.down_proj_bias; }
 
     // Add const versions
-    const Matrix& get_ff1_weights() const { return params_.ff1_weights; }
-    const Matrix& get_ff2_weights() const { return params_.ff2_weights; }
-    const FloatVector& getBias1() const { return params_.ff1_bias; }
-    const FloatVector& getBias2() const { return params_.ff2_bias; }
+    const Matrix& get_ff1_weights() const { return params_.gate_proj_weights; }
+    const Matrix& get_ff2_weights() const { return params_.down_proj_weights; }
+    const FloatVector& getBias1() const { return params_.gate_proj_bias; }
+    const FloatVector& getBias2() const { return params_.down_proj_bias; }
+    
+    // GGUF export accessors (SwiGLU naming)
+    const Matrix& getGateWeights() const { return params_.gate_proj_weights; }
+    const Matrix& getUpWeights() const { return params_.up_proj_weights; }
+    const Matrix& getDownWeights() const { return params_.down_proj_weights; }
 
     // Add parameter accessors
     Parameters& parameters() { return params_; }
@@ -139,8 +177,22 @@ class FeedForward {
 
     // Update get_weights to use Parameters structure
     std::vector<std::reference_wrapper<Matrix>> get_weights() {
-        return {std::ref(params_.ff1_weights), std::ref(params_.ff2_weights)};
+        return {std::ref(params_.gate_proj_weights), std::ref(params_.up_proj_weights), std::ref(params_.down_proj_weights)};
     }
+
+#ifdef USE_CUDA
+    // Get CUDA parameters for GPU operations
+    CudaParameters get_cuda_params() const {
+        if (!params_gpu_) {
+            // Create GPU parameters on demand
+            const_cast<FeedForward*>(this)->params_gpu_ = std::make_unique<CudaParameters>();
+            const_cast<FeedForward*>(this)->params_gpu_->gate_proj_weights = cuda::CudaMatrix(params_.gate_proj_weights);
+            const_cast<FeedForward*>(this)->params_gpu_->up_proj_weights = cuda::CudaMatrix(params_.up_proj_weights);
+            const_cast<FeedForward*>(this)->params_gpu_->down_proj_weights = cuda::CudaMatrix(params_.down_proj_weights);
+        }
+        return *params_gpu_;
+    }
+#endif
 
     // Update copy constructor to use Parameters/Gradients
     FeedForward(const FeedForward& other)

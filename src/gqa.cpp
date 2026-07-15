@@ -1,5 +1,7 @@
 #include "../include/gqa.hpp"
+#ifdef USE_CUDA
 #include "../include/cuda/gqa_kernels.cuh"
+#endif
 #include <iostream>
 
 GroupedQueryAttention::GroupedQueryAttention(size_t hidden_size_, size_t num_heads_,

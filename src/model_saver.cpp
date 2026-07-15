@@ -152,50 +152,40 @@ bool ModelSaver::loadModel(Transformer& transformer, const std::string& director
 }
 
 bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::string& directory,
-                                const std::string& model_name, int epoch, float loss) {
+                                const std::string& model_name, int epoch, float loss, int step) {
     try {
         // Convert to absolute path
         std::filesystem::path current_path = std::filesystem::current_path();
         std::filesystem::path dir_path = current_path / directory;
+        std::cerr << "[CKPT DEBUG] cwd=" << current_path << " dir=" << dir_path << std::endl;
         
         // Create full directory path if it doesn't exist
         if (!std::filesystem::exists(dir_path)) {
-            std::cout << "Creating directory path: " << dir_path << std::endl;
+            std::cerr << "[CKPT DEBUG] Creating directory: " << dir_path << std::endl;
             if (!std::filesystem::create_directories(dir_path)) {
-                logger.log("Failed to create directory: " + dir_path.string() +
-                          " (Check permissions and path)", true);
+                std::cerr << "[CKPT ERROR] Failed to create directory: " << dir_path << std::endl;
                 return false;
             }
         }
 
         // Verify directory is writable
         if (!std::filesystem::is_directory(dir_path)) {
-            logger.log("Path exists but is not a directory: " + dir_path.string(), true);
+            std::cerr << "[CKPT ERROR] Not a directory: " << dir_path << std::endl;
             return false;
         }
 
-        std::error_code ec;
-        auto perms = std::filesystem::status(dir_path, ec).permissions();
-        if (ec) {
-            logger.log("Failed to check directory permissions: " + ec.message(), true);
-            return false;
-        }
-
-        if ((perms & std::filesystem::perms::owner_write) == std::filesystem::perms::none) {
-            logger.log("Directory is not writable: " + dir_path.string(), true);
-            return false;
-        }
+        // Skip Unix-style permission check on Windows (uses ACLs instead)
+        // The actual file write test below is the reliable check
 
         // Create checkpoint filename with absolute path
         std::string checkpoint_file = (dir_path / getCheckpointFilename("", model_name, epoch)).string();
-        logger.log("Saving checkpoint to: " + checkpoint_file);
+        std::cerr << "[CKPT DEBUG] Saving to: " << checkpoint_file << std::endl;
 
         // Test file writability before proceeding
         {
             std::ofstream test_file(checkpoint_file);
             if (!test_file) {
-                logger.log("Cannot write to checkpoint file: " + checkpoint_file +
-                          " (Check permissions)", true);
+                std::cerr << "[CKPT ERROR] Cannot write file: " << checkpoint_file << std::endl;
                 return false;
             }
         }
@@ -203,15 +193,17 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
         // Open checkpoint file for actual writing
         std::ofstream ckpt_file(checkpoint_file, std::ios::binary);
         if (!ckpt_file) {
-            logger.log("Failed to open checkpoint file for writing: " + checkpoint_file, true);
+            std::cerr << "[CKPT ERROR] Failed to open for binary write: " << checkpoint_file << std::endl;
             return false;
         }
+        std::cerr << "[CKPT DEBUG] File opened, writing metadata..." << std::endl;
 
         // Write metadata as JSON
         nlohmann::json checkpoint_meta;
         const auto& config = transformer.getConfig();
 
         checkpoint_meta["epoch"] = epoch;
+        checkpoint_meta["step"] = step;
         checkpoint_meta["loss"] = loss;
         checkpoint_meta["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
         checkpoint_meta["model_config"] = {
@@ -222,7 +214,6 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
             {"intermediate_size", config.intermediate_size},
             {"max_seq_length", config.max_seq_length},
         };
-        checkpoint_meta["samples_per_iteration"] = config.training.samples_per_iteration;
 
         std::string meta_str = checkpoint_meta.dump();
         size_t meta_size = meta_str.size();
@@ -283,7 +274,7 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
 bool ModelSaver::loadCheckpoint(Transformer& transformer, const std::string& checkpoint_path) {
     std::ifstream ckpt_file(checkpoint_path, std::ios::binary);
     if (!ckpt_file) {
-        logger.log("Failed to open checkpoint file for reading", true);
+        std::cerr << "[LOAD ERROR] Failed to open checkpoint file: " << checkpoint_path << std::endl;
         return false;
     }
 
@@ -291,16 +282,30 @@ bool ModelSaver::loadCheckpoint(Transformer& transformer, const std::string& che
         // Read metadata size
         size_t meta_size;
         ckpt_file.read(reinterpret_cast<char*>(&meta_size), sizeof(meta_size));
+        std::cerr << "[LOAD DEBUG] Metadata size: " << meta_size << std::endl;
+        
+        if (meta_size > 10000 || meta_size == 0) {
+            std::cerr << "[LOAD ERROR] Invalid metadata size (likely corrupted checkpoint)" << std::endl;
+            return false;
+        }
 
         // Read metadata JSON
         std::string meta_str(meta_size, '\0');
         ckpt_file.read(&meta_str[0], meta_size);
+        std::cerr << "[LOAD DEBUG] Metadata: " << meta_str.substr(0, 200) << "..." << std::endl;
 
         json checkpoint_meta = json::parse(meta_str);
 
         // Verify model configuration
         const auto& config = transformer.getConfig();
         const auto& saved_config = checkpoint_meta["model_config"];
+        
+        std::cerr << "[LOAD DEBUG] Saved config: hidden=" << saved_config["hidden_size"] 
+                  << " heads=" << saved_config["num_heads"]
+                  << " layers=" << saved_config["num_layers"] << std::endl;
+        std::cerr << "[LOAD DEBUG] Model config: hidden=" << config.hidden_size 
+                  << " heads=" << config.num_heads
+                  << " layers=" << config.num_layers << std::endl;
 
         if (saved_config["hidden_size"] != config.hidden_size ||
             saved_config["num_heads"] != config.num_heads ||
@@ -308,18 +313,28 @@ bool ModelSaver::loadCheckpoint(Transformer& transformer, const std::string& che
             saved_config["head_dim"] != config.head_dim ||
             saved_config["intermediate_size"] != config.intermediate_size ||
             saved_config["max_seq_length"] != config.max_seq_length) {
-            logger.log("Model configuration mismatch in checkpoint", true);
+            std::cerr << "[LOAD ERROR] Model configuration mismatch in checkpoint" << std::endl;
             return false;
         }
 
-        // Load model state
-        transformer.load(ckpt_file);
+        // Load model state - must match save format (layer by layer)
+        std::cerr << "[LOAD DEBUG] Loading model weights from position " << ckpt_file.tellg() << std::endl;
+        auto& layers = transformer.getLayers();
+        std::cerr << "[LOAD DEBUG] Loading " << layers.size() << " layers..." << std::endl;
+        for (size_t i = 0; i < layers.size(); ++i) {
+            std::cerr << "[LOAD DEBUG] Loading layer " << i << " from position " << ckpt_file.tellg() << std::endl;
+            layers[i]->load(ckpt_file);
+            if (!ckpt_file) {
+                std::cerr << "[LOAD ERROR] Failed to load layer " << i << std::endl;
+                return false;
+            }
+        }
 
-        logger.log("Successfully loaded checkpoint from epoch " +
-                   std::to_string(checkpoint_meta["epoch"].get<int>()));
+        std::cerr << "[LOAD SUCCESS] Loaded checkpoint from epoch " 
+                  << checkpoint_meta["epoch"].get<int>() << std::endl;
         return true;
     } catch (const std::exception& e) {
-        logger.log("Error loading checkpoint: " + std::string(e.what()), true);
+        std::cerr << "[LOAD ERROR] Exception: " << e.what() << std::endl;
         return false;
     }
 }
@@ -378,6 +393,9 @@ std::string ModelSaver::createDirectory(const std::string& base_dir) const {
 
 std::string ModelSaver::getCheckpointFilename(const std::string& directory,
                                               const std::string& model_name, int epoch) const {
+    if (directory.empty()) {
+        return model_name + "_checkpoint_" + std::to_string(epoch) + ".ckpt";
+    }
     return directory + "/" + model_name + "_checkpoint_" + std::to_string(epoch) + ".ckpt";
 }
 

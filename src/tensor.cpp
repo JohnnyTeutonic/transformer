@@ -83,15 +83,16 @@ Tensor Tensor::permute(const std::vector<unsigned long>& perm) const {
 
     Tensor result(new_dims[0], new_dims[1], new_dims[2], new_dims[3]);
 
+    // MSVC: collapse ignored, loop vars must be signed int
 #pragma omp parallel for collapse(4)
-    for (size_t i = 0; i < dims_[0]; ++i) {
-        for (size_t j = 0; j < dims_[1]; ++j) {
-            for (size_t k = 0; k < dims_[2]; ++k) {
-                for (size_t l = 0; l < dims_[3]; ++l) {
-                    std::vector<size_t> old_idx = {i, j, k, l};
+    for (int i = 0; i < static_cast<int>(dims_[0]); ++i) {
+        for (int j = 0; j < static_cast<int>(dims_[1]); ++j) {
+            for (int k = 0; k < static_cast<int>(dims_[2]); ++k) {
+                for (int l = 0; l < static_cast<int>(dims_[3]); ++l) {
+                    std::vector<size_t> old_idx = {static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(k), static_cast<size_t>(l)};
                     std::vector<size_t> new_idx = {old_idx[perm[0]], old_idx[perm[1]],
                                                    old_idx[perm[2]], old_idx[perm[3]]};
-                    result.at(new_idx[0], new_idx[1], new_idx[2], new_idx[3]) = at(i, j, k, l);
+                    result.at(new_idx[0], new_idx[1], new_idx[2], new_idx[3]) = at(static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(k), static_cast<size_t>(l));
                 }
             }
         }
@@ -107,17 +108,19 @@ Tensor Tensor::tensormul(const Tensor& other) const {
 
     Tensor result(dims_[0], dims_[1], dims_[2], other.dims_[3]);
 
+    // MSVC: collapse ignored, loop vars must be signed int, no simd without experimental
 #pragma omp parallel for collapse(4)
-    for (size_t i = 0; i < dims_[0]; ++i) {
-        for (size_t j = 0; j < dims_[1]; ++j) {
-            for (size_t k = 0; k < dims_[2]; ++k) {
-                for (size_t l = 0; l < other.dims_[3]; ++l) {
+    for (int i = 0; i < static_cast<int>(dims_[0]); ++i) {
+        for (int j = 0; j < static_cast<int>(dims_[1]); ++j) {
+            for (int k = 0; k < static_cast<int>(dims_[2]); ++k) {
+                for (int l = 0; l < static_cast<int>(other.dims_[3]); ++l) {
                     float sum = 0.0f;
-#pragma omp simd reduction(+ : sum)
-                    for (size_t m = 0; m < dims_[3]; ++m) {
-                        sum += at(i, j, k, m) * other.at(i, j, m, l);
+                    // No simd on MSVC
+                    for (int m = 0; m < static_cast<int>(dims_[3]); ++m) {
+                        sum += at(static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(k), static_cast<size_t>(m)) * 
+                               other.at(static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(m), static_cast<size_t>(l));
                     }
-                    result.at(i, j, k, l) = sum;
+                    result.at(static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(k), static_cast<size_t>(l)) = sum;
                 }
             }
         }

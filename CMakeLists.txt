@@ -1,733 +1,270 @@
-cmake_minimum_required(VERSION 3.15)
-project(transformer_cpp CUDA CXX)
+cmake_minimum_required(VERSION 3.18)
 
-# Set CUDA architecture policy
-cmake_policy(SET CMP0104 NEW)
-
-# Add Doxygen support
-find_package(Doxygen)
-if(DOXYGEN_FOUND)
-    add_custom_target(docs
-        ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Generating API documentation with Doxygen"
-        VERBATIM)
+# Compatibility for CMake 4.x with older dependencies
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Minimum policy version for dependencies")
 endif()
 
-set(CMAKE_CXX_STANDARD 20)
+# Option to enable CUDA
+option(CUDA_ENABLED "Enable CUDA support" OFF)
+
+if(CUDA_ENABLED)
+    # CRITICAL: Set CUDA flags BEFORE project() call for compiler identification
+    # VS 2026 is not officially supported by CUDA 13.0, so we need to allow it
+    set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler" CACHE STRING "CUDA compiler flags" FORCE)
+    
+    # Also set for C++ compiler to allow CUDA headers in .cpp files
+    if(MSVC)
+        # Force-include compatibility header before anything else
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /FI\"${CMAKE_SOURCE_DIR}/include/cuda_compat.h\"" CACHE STRING "C++ compiler flags" FORCE)
+        # Add compile definitions to disable CUDA host compiler check
+        add_compile_definitions(__NV_NO_HOST_COMPILER_CHECK _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH USE_CUDA CUDA_AVAILABLE)
+    endif()
+    
+    project(transformer_cpp LANGUAGES CXX CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    
+    # CUDA architectures. Respect an explicit -DCMAKE_CUDA_ARCHITECTURES=NN
+    # (required for cross-GPU builds); otherwise detect the local GPU
+    # ("native", CMake >= 3.24) and fall back to a multi-arch set covering
+    # the GPUs we train on:
+    #   75 = T4 (Colab)   80 = A100 (Colab)   86 = Ampere consumer
+    #   89 = L4 (Colab) / RTX 4060 (local)
+    # NOTE: never FORCE a single arch here — sm_89 binaries cannot run on
+    # T4/A100, which silently broke Colab builds before.
+    include(CheckLanguage)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+            set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures")
+        else()
+            set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89" CACHE STRING "CUDA architectures")
+        endif()
+    endif()
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    
+    message(STATUS "CUDA enabled - version ${CUDAToolkit_VERSION}")
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+else()
+    project(transformer_cpp LANGUAGES CXX)
+    message(STATUS "CUDA disabled - CPU-only build")
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Set default CUDA architectures if not specified
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 86)
-endif()
-
-# Include FetchContent for downloading dependencies
+# Include FetchContent
 include(FetchContent)
 
-# Find required packages
-find_package(CUDAToolkit)
+# Find Threads
+find_package(Threads REQUIRED)
 
-# Find OpenSSL for P2P networking
-find_package(OpenSSL REQUIRED)
-
-# Find NVML for GPU monitoring (part of CUDA toolkit)
-if(CUDAToolkit_FOUND)
-    find_library(NVML_LIBRARY nvidia-ml
-        HINTS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib
-        PATHS /usr/lib/x86_64-linux-gnu /usr/lib64
-    )
-    if(NVML_LIBRARY)
-        message(STATUS "NVML found: ${NVML_LIBRARY}")
-        add_definitions(-DNVML_AVAILABLE)
-    else()
-        message(WARNING "NVML not found - GPU monitoring will be limited")
-    endif()
+# Find OpenSSL (optional for minimal build)
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
 endif()
 
-# Find or fetch MPI for distributed training
-find_package(MPI QUIET)
-
-if(NOT MPI_FOUND)
-    message(STATUS "MPI not found locally - creating minimal MPI stub for single-node training")
-    
-    # Create minimal MPI stub for development/testing
-    set(MPI_STUB_DIR ${CMAKE_BINARY_DIR}/mpi_stub)
-    file(MAKE_DIRECTORY ${MPI_STUB_DIR}/include)
-    
-    # Create minimal mpi.h stub
-    file(WRITE ${MPI_STUB_DIR}/include/mpi.h "
-#pragma once
-#include <cstddef>
-#include <cstring>
-
-// MPI Constants
-#define MPI_COMM_WORLD 0
-#define MPI_SUCCESS 0
-#define MPI_THREAD_MULTIPLE 3
-#define MPI_FLOAT 1
-#define MPI_INT 2
-#define MPI_UNSIGNED_LONG 3
-#define MPI_BYTE 4
-#define MPI_SUM 1
-
-// MPI Types
-typedef int MPI_Comm;
-typedef int MPI_Datatype;
-typedef int MPI_Op;
-
-// MPI Functions (single-node stubs)
-inline int MPI_Init(int* argc, char*** argv) { return MPI_SUCCESS; }
-inline int MPI_Init_thread(int* argc, char*** argv, int required, int* provided) { 
-    if (provided) *provided = MPI_THREAD_MULTIPLE; 
-    return MPI_SUCCESS; 
-}
-inline int MPI_Finalize() { return MPI_SUCCESS; }
-inline int MPI_Initialized(int* flag) { *flag = 1; return MPI_SUCCESS; }
-inline int MPI_Finalized(int* flag) { *flag = 0; return MPI_SUCCESS; }
-inline int MPI_Comm_rank(MPI_Comm comm, int* rank) { *rank = 0; return MPI_SUCCESS; }
-inline int MPI_Comm_size(MPI_Comm comm, int* size) { *size = 1; return MPI_SUCCESS; }
-inline int MPI_Barrier(MPI_Comm comm) { return MPI_SUCCESS; }
-inline int MPI_Bcast(void* buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm) { return MPI_SUCCESS; }
-inline int MPI_Allreduce(const void* sendbuf, void* recvbuf, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm) {
-    // Single rank: just copy data
-    if (sendbuf != recvbuf) {
-        size_t bytes = count * sizeof(float); // Assume float for simplicity
-        memcpy(recvbuf, sendbuf, bytes);
-    }
-    return MPI_SUCCESS;
-}
-")
-    
-    # Set MPI variables for our stub
-    set(MPI_CXX_FOUND TRUE)
-    set(MPI_CXX_INCLUDE_DIRS ${MPI_STUB_DIR}/include)
-    set(MPI_CXX_LIBRARIES "")  # No libraries needed for stub
-    
-    message(STATUS "MPI stub created for single-node development")
-    message(WARNING "Using MPI stub - install real MPI for multi-node distributed training")
-endif()
-
-if(MPI_FOUND OR MPI_CXX_FOUND)
-    message(STATUS "MPI available - enabling distributed training support")
-    add_definitions(-DMPI_AVAILABLE)
-    
-    # Find or fetch NCCL for GPU communication (if CUDA available)
-    if(CUDAToolkit_FOUND)
-        find_path(NCCL_INCLUDE_DIR nccl.h HINTS ${CUDA_TOOLKIT_ROOT_DIR}/include)
-        find_library(NCCL_LIBRARY nccl HINTS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib)
-        
-        if(NOT NCCL_INCLUDE_DIR OR NOT NCCL_LIBRARY)
-            message(STATUS "NCCL not found locally - creating NCCL stub for development")
-            
-            # Create NCCL stub directory
-            set(NCCL_STUB_DIR ${CMAKE_BINARY_DIR}/nccl_stub)
-            file(MAKE_DIRECTORY ${NCCL_STUB_DIR}/include)
-            
-            # Create minimal nccl.h stub
-            file(WRITE ${NCCL_STUB_DIR}/include/nccl.h "
-#pragma once
-#include <cuda_runtime.h>
-
-// NCCL Types
-typedef struct ncclComm* ncclComm_t;
-typedef enum { ncclSuccess = 0 } ncclResult_t;
-typedef enum { ncclSum = 0 } ncclRedOp_t;
-typedef enum { ncclFloat = 0 } ncclDataType_t;
-typedef struct { char internal[128]; } ncclUniqueId;
-
-// NCCL Functions (stubs that fall back to CUDA memcpy)
-inline ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) { return ncclSuccess; }
-inline ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) { 
-    *comm = (ncclComm_t)1; // Dummy handle
-    return ncclSuccess; 
-}
-inline ncclResult_t ncclCommDestroy(ncclComm_t comm) { return ncclSuccess; }
-inline ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, 
-                                 ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
-    // Single GPU: just copy data
-    if (sendbuff != recvbuff) {
-        cudaMemcpyAsync(recvbuff, sendbuff, count * sizeof(float), cudaMemcpyDeviceToDevice, stream);
-    }
-    return ncclSuccess;
-}
-inline const char* ncclGetErrorString(ncclResult_t result) { return \"ncclSuccess\"; }
-")
-            
-            # Set NCCL variables for stub
-            set(NCCL_INCLUDE_DIR ${NCCL_STUB_DIR}/include)
-            set(NCCL_LIBRARY "")  # No library needed for stub
-            
-            message(STATUS "NCCL stub created for single-GPU development")
-            message(WARNING "Using NCCL stub - install real NCCL for multi-GPU distributed training")
-        endif()
-        
-        if(NCCL_INCLUDE_DIR)
-            message(STATUS "NCCL available - enabling GPU-to-GPU communication")
-            add_definitions(-DNCCL_AVAILABLE)
-        endif()
-    endif()
-else()
-    message(STATUS "MPI not available - building without distributed training support")
-endif()
-
-# Set CUDA availability flag
-if(CUDAToolkit_FOUND)
-    message(STATUS "CUDA found - enabling CUDA support")
-    add_definitions(-DCUDA_AVAILABLE)
-else()
-    message(STATUS "CUDA not found - building without CUDA support")
-endif()
-
-# Optional: Find OpenMP
-if(MSVC)
-    find_package(OpenMP QUIET)
-else()
-    find_package(OpenMP)
-endif()
-
-# Store OpenMP status for later use
-if(OpenMP_CXX_FOUND)
-    message(STATUS "OpenMP found - enabling parallel processing support")
-    if(MSVC)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
-    else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
-        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fopenmp")
-    endif()
-else()
-    message(WARNING "OpenMP not found - parallel processing will be disabled")
-endif()
-
-# Download and build nlohmann/json
+# Fetch nlohmann/json
 FetchContent_Declare(
     json
     URL https://github.com/nlohmann/json/releases/download/v3.11.2/json.tar.xz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-set(FETCHCONTENT_QUIET OFF)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(json)
 
 # Include directories
-if(CUDAToolkit_FOUND)
-    include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-endif()
-
-# Base include directories - single source of truth for all includes
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/third_party
 )
 
-# Add tiktoken include directory globally
-include_directories(
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tiktoken/cpp/include
-)
-
-# Core source files
+# Core source files (COMPLETE BUILD)
 set(CORE_SOURCES
-    src/components.cpp
-    src/vector_ops.cpp
-    src/logger.cpp
-    src/model_saver.cpp
-    src/half_precision.cpp
-    src/gradient_checkpoint.cpp
-    src/utils.cpp
-    src/performance_metrics.cpp
-    src/gqa.cpp
-    src/beam_search.cpp
+    # Core infrastructure
     src/config.cpp
-    src/tiktoken_tokenizer.cpp
-    src/matrix.cpp
-    src/data_augmentation.cpp
-    src/lm_head.cpp
-    src/hyperparameter_tuner.cpp
-    src/count_vocabulary.cpp
+    src/architecture.cpp
+    src/lora.cpp
+    src/logger.cpp
     src/scope_logger.cpp
-    # Add training components
-    src/training/loss_tracker.cpp
-    src/training/gradient_manager.cpp
-    src/training/learning_rate_scheduler.cpp
-    src/training/training_state_manager.cpp
-    src/training/training_monitor.cpp
-    src/phrase_analysis.cpp
-    src/serialization.cpp
+    src/components.cpp  # Contains ACTUAL Matrix implementations!
+    src/matrix.cpp
+    src/matmul_optimized.cpp  # Optimized matmul (12-18x speedup)
     src/tensor.cpp
-    src/text_analysis.cpp
-    src/quantization.cpp
-    src/router.cpp
-    src/moe.cpp
-    src/optimizer/adam.cpp
-    src/optimizer.cpp
-    src/p2p_network.cpp
-    src/p2p_training_coordinator.cpp
-    # NEW: Production-Ready Performance Optimizations
-    src/adaptive_batch_optimizer.cpp
-    src/gradient_accumulator.cpp
-    src/async_data_loader.cpp
-)
-
-# Neural network components
-set(NN_SOURCES
-    src/attention.cpp
-    src/transformer.cpp
+    src/utils.cpp
+    src/vector_ops.cpp
+    
+    # Model components
+    src/embeddings.cpp
     src/layer_norm.cpp
     src/feed_forward.cpp
-    src/embeddings.cpp
-)
-
-# Distributed training components (conditional)
-if(MPI_FOUND)
-    set(DISTRIBUTED_SOURCES
-        src/distributed_transformer.cpp
-    )
-endif()
-
-# Training and utilities
-set(UTIL_SOURCES
-    src/cache.cpp
-    src/optimizer.cpp
-)
-
-# Language model components
-set(LM_SOURCES
+    src/attention.cpp
+    src/transformer_layer.cpp
+    src/transformer.cpp
+    src/lm_head.cpp
+    src/router.cpp
+    src/moe.cpp
+    src/gqa.cpp
+    
+    # Training components
     src/vocabulary.cpp
-)
-
-# Optimization components
-set(OPTIMIZER_SOURCES
-    src/optimizer/sam.cpp
-)
-
-# Add the tensor source file to the sources list
-set(SOURCES
-    ${SOURCES}
-    src/tensor.cpp
-)
-
-# Add the tensor header to the includes
-set(HEADERS
-    ${HEADERS}
-    include/tensor.hpp
-)
-
-# Add the debug header to the includes
-set(HEADERS
-    ${HEADERS}
-    include/debug.hpp
-)
-
-# Add CUDA compilation flags
-if(CUDAToolkit_FOUND)
-    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_60)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-endif()
-
-# Create library with all components
-add_library(transformer_lib
-    ${CORE_SOURCES}
-    ${NN_SOURCES}
-    ${UTIL_SOURCES}
-    ${LM_SOURCES}
-    ${OPTIMIZER_SOURCES}
-    ${DISTRIBUTED_SOURCES}
-    ${SOURCES}
-)
-
-# Set CUDA specific properties for the library
-set_target_properties(transformer_lib PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE ON
-)
-
-# Add OpenMP configuration if found
-if(OpenMP_CXX_FOUND)
-    target_compile_definitions(transformer_lib PUBLIC USE_OPENMP)
-    target_compile_options(transformer_lib PRIVATE ${OpenMP_CXX_FLAGS})
-    if(NOT MSVC)
-        target_compile_options(transformer_lib PRIVATE -fopenmp)
-    endif()
-    target_link_libraries(transformer_lib PUBLIC OpenMP::OpenMP_CXX)
-endif()
-
-# Create single executable
-add_executable(transformer src/main.cpp)
-
-# Link everything to the executable
-target_link_libraries(transformer
-    PRIVATE
-    transformer_lib
-    nlohmann_json::nlohmann_json
-    ${OpenSSL_LIBRARIES}
-)
-
-# Create distributed training example if MPI is available
-if(MPI_FOUND OR MPI_CXX_FOUND)
-    add_executable(distributed_training_example examples/distributed_training_example.cpp)
-    target_link_libraries(distributed_training_example
-        PRIVATE
-        transformer_lib
-        nlohmann_json::nlohmann_json
-    )
+    src/tiktoken_tokenizer.cpp
+    src/gradient_checkpoint.cpp
+    # src/gradient_accumulator.cpp  # Excluded: missing logger/half_precision dependencies
+    src/cache.cpp
     
-    # Set properties for MPI executable (only if system MPI)
-    if(MPI_FOUND)
-        set_target_properties(distributed_training_example PROPERTIES
-            COMPILE_FLAGS "${MPI_COMPILE_FLAGS}"
-            LINK_FLAGS "${MPI_LINK_FLAGS}"
-        )
-    endif()
+    # Quantization
+    src/quantization.cpp
+    src/quantization_api.cpp
     
-    message(STATUS "Distributed training example will be built")
-endif()
-
-if(CUDAToolkit_FOUND)
-    target_link_libraries(transformer_lib
-        PUBLIC
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::curand
-    )
+    # Training infrastructure (EXCLUDED: PyTorch dependencies)
+    # src/training/gradient_manager.cpp
+    # src/training/learning_rate_scheduler.cpp
+    # src/training/loss_tracker.cpp
+    # src/training/training_monitor.cpp
+    # src/training/training_state_manager.cpp
     
-    # Link NVML if available for GPU monitoring
-    if(NVML_LIBRARY)
-        target_link_libraries(transformer_lib PUBLIC ${NVML_LIBRARY})
-    endif()
-endif()
-
-# Compiler options
-target_compile_definitions(transformer_lib
-    PUBLIC
-    USE_CUDA
+    # Utilities
+    src/model_saver.cpp
+    src/gguf_export.cpp
+    src/safetensors_export.cpp
+    # src/performance_metrics.cpp
+    # src/debugging_monitoring.cpp
 )
 
-if(MSVC)
-    target_compile_options(transformer_lib
-        PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/W3">
-    )
-else()
-    target_compile_options(transformer_lib
-        PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -Wall>
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>
-    )
-endif()
-
-# Installation
-install(TARGETS transformer transformer_lib
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-
-install(DIRECTORY include/
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cuh"
-)
-
-# Optional dependencies
-find_library(TCMALLOC_LIB tcmalloc)
-if(TCMALLOC_LIB)
-    message(STATUS "tcmalloc found: ${TCMALLOC_LIB}")
-    target_link_libraries(transformer_lib PUBLIC ${TCMALLOC_LIB})
-else()
-    message(WARNING "tcmalloc not found, continuing without it")
-endif()
-
-# Link OpenMP if found
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(transformer_lib PUBLIC OpenMP::OpenMP_CXX)
-endif()
-
-# Link MPI if available
-if(MPI_FOUND)
-    # System MPI
-    target_link_libraries(transformer_lib PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_lib PUBLIC ${MPI_INCLUDE_PATH})
-elseif(MPI_CXX_FOUND)
-    # Fetched MPI
-    target_include_directories(transformer_lib PUBLIC ${MPI_CXX_INCLUDE_DIRS})
-    target_link_libraries(transformer_lib PUBLIC ${MPI_CXX_LIBRARIES})
-endif()
-
-# Link NCCL if available
-if(NCCL_INCLUDE_DIR)
-    target_include_directories(transformer_lib PUBLIC ${NCCL_INCLUDE_DIR})
-    if(NCCL_LIBRARY)
-        target_link_libraries(transformer_lib PUBLIC ${NCCL_LIBRARY})
-    endif()
-endif()
-
-# Add CUDA kernels library only if CUDA is found
-if(CUDAToolkit_FOUND)
-    add_library(cuda_kernels STATIC
+# Add CUDA sources if enabled
+if(CUDA_ENABLED)
+    list(APPEND CORE_SOURCES
+        src/cuda/cuda_matrix.cu
+        src/cuda/swiglu_kernels.cu
+        src/cuda/quantization_kernels.cu
         src/cuda/matrix_ops.cu
-        src/cuda/attention_ops.cu
-        src/cuda/backward_ops.cu
-        src/cuda/feed_forward_kernels.cu
-        src/cuda/half_precision_kernels.cu
-        src/cuda/cuda_utils.cu
-        src/cuda/cuda_init.cu
-        src/cuda/token_embedding_cuda.cu
-        src/cuda/layernorm_cuda.cu
-        src/cuda/gqa_kernels.cu
-        src/cuda/beam_search_ops.cu
-        src/cuda/tokenizer_kernels.cu
-        src/cuda/swiglu_kernel.cu
-        src/cuda/router_kernel.cu
+        src/cuda/fused_attention_kernels.cu
         src/cuda/moe_kernel.cu
+        src/cuda/router_kernel.cu
+        src/cuda/layernorm_cuda.cu
+        src/cuda/loss_kernels.cu
+        src/cuda/attention_ops.cu
     )
-
-    set_target_properties(cuda_kernels PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        LANGUAGE CUDA
-    )
-
-    # Add CUDA include directories
-    target_include_directories(cuda_kernels
-        PRIVATE
-        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRS}
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/third_party
-    )
-    
-    # Add nlohmann_json include directory for CUDA kernels
-    target_include_directories(cuda_kernels
-        PRIVATE
-        $<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>
-    )
-
-    # Link CUDA libraries to cuda_kernels
-    target_link_libraries(cuda_kernels
-        PUBLIC
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::curand
-        nlohmann_json::nlohmann_json
-    )
-
-    # Link cuda_kernels to transformer_lib
-    target_link_libraries(transformer_lib
-        PUBLIC
-        cuda_kernels
+    # Set CUDA language for .cu files only (not .cpp files)
+    # lm_head.cpp removed - it has CPU fallback and doesn't need NVCC
+    set_source_files_properties(
+        src/cuda/cuda_matrix.cu
+        src/cuda/swiglu_kernels.cu
+        src/cuda/quantization_kernels.cu
+        src/cuda/matrix_ops.cu
+        src/cuda/fused_attention_kernels.cu
+        src/cuda/moe_kernel.cu
+        src/cuda/router_kernel.cu
+        src/cuda/layernorm_cuda.cu
+        src/cuda/loss_kernels.cu
+        src/cuda/attention_ops.cu
+        PROPERTIES LANGUAGE CUDA
     )
 endif()
 
-find_package(nlohmann_json 3.2.0 REQUIRED)
-target_link_libraries(transformer_lib PRIVATE nlohmann_json::nlohmann_json)
+add_library(transformer_core STATIC ${CORE_SOURCES})
 
-# Make sure the include directory is in the include path
-target_include_directories(transformer_lib 
+target_include_directories(transformer_core 
     PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/third_party
 )
 
-# ============================================================================
-# INTEGRATED PLATFORM COMPONENTS - Added for distributed curation and RLHF
-# ============================================================================
-
-# Distributed Curation Library
-add_library(distributed_curation STATIC
-    src/distributed_curation.cpp
-)
-
-target_include_directories(distributed_curation
+target_link_libraries(transformer_core 
     PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(distributed_curation
-    PUBLIC
-    transformer_lib
-    Threads::Threads
-    OpenSSL::SSL
-    OpenSSL::Crypto
-)
-
-# Distributed RLHF Library
-add_library(distributed_rlhf STATIC
-    src/distributed_rlhf.cpp
-)
-
-target_include_directories(distributed_rlhf
-    PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(distributed_rlhf
-    PUBLIC
-    transformer_lib
-    distributed_curation
+    nlohmann_json::nlohmann_json
     Threads::Threads
 )
 
-# Web Annotation Interface Library
-add_library(web_interface STATIC
-    src/web_annotation_interface.cpp
-)
-
-target_include_directories(web_interface
-    PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(web_interface
-    PUBLIC
-    distributed_curation
-    Threads::Threads
-)
-
-# Platform-specific networking libraries for web interface
-if(WIN32)
-    target_link_libraries(web_interface PRIVATE ws2_32)
+# Enable OpenMP for optimized matmul (multi-threading)
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(transformer_core PUBLIC OpenMP::OpenMP_CXX)
+    message(STATUS "OpenMP enabled for optimized matmul")
+else()
+    message(WARNING "OpenMP not found - matmul will use single thread (still faster)")
 endif()
 
-# Integrated Platform Library
-add_library(integrated_platform STATIC
-    src/integrated_platform.cpp
-)
-
-target_include_directories(integrated_platform
-    PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(integrated_platform
-    PUBLIC
-    transformer_lib
-    distributed_curation
-    distributed_rlhf
-    web_interface
-    Threads::Threads
-)
-
-# Link CUDA kernels to new libraries if available
-if(CUDAToolkit_FOUND)
-    target_link_libraries(distributed_rlhf PUBLIC cuda_kernels)
-    target_link_libraries(integrated_platform PUBLIC cuda_kernels)
-endif()
-
-# Integrated Platform Node Executable
-add_executable(integrated_platform_node
-    src/main_integrated.cpp
-)
-
-target_link_libraries(integrated_platform_node
-    PRIVATE
-    integrated_platform
-)
-
-# Test executables for new components
-add_executable(test_curation
-    tests/test_curation.cpp
-)
-
-target_link_libraries(test_curation
-    PRIVATE
-    distributed_curation
-)
-
-add_executable(test_rlhf
-    tests/test_rlhf.cpp
-)
-
-target_link_libraries(test_rlhf
-    PRIVATE
-    distributed_rlhf
-)
-
-add_executable(test_web_interface
-    tests/test_web_interface.cpp
-)
-
-target_link_libraries(test_web_interface
-    PRIVATE
-    web_interface
-)
-
-add_executable(test_integrated
-    tests/test_integrated.cpp
-)
-
-target_link_libraries(test_integrated
-    PRIVATE
-    integrated_platform
-)
-
-# Custom targets for easy building
-add_custom_target(integrated_all
-    DEPENDS integrated_platform_node test_curation test_rlhf test_web_interface test_integrated
-    COMMENT "Building all integrated platform components"
-)
-
-# Installation rules for new components
-install(TARGETS 
-    distributed_curation
-    distributed_rlhf
-    web_interface
-    integrated_platform
-    integrated_platform_node
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-
-# Print integrated platform build information
-message(STATUS "")
-message(STATUS "Integrated Platform Configuration:")
-message(STATUS "  - Distributed Curation: distributed_curation")
-message(STATUS "  - Distributed RLHF: distributed_rlhf")
-message(STATUS "  - Web Interface: web_interface")
-message(STATUS "  - Integrated Platform: integrated_platform")
-message(STATUS "  - Platform Node: integrated_platform_node")
-message(STATUS "")
-message(STATUS "NEW: Production-Ready Performance Optimizations:")
-message(STATUS "  - Adaptive Batch Optimization: 15-30% throughput improvement")
-message(STATUS "  - Mixed Precision Gradient Accumulation: 40-50% memory reduction")
-message(STATUS "  - Asynchronous Data Loading: 20-40% training speedup")
-message(STATUS "")
-message(STATUS "Build Targets:")
-message(STATUS "  make transformer              # Original transformer training")
-message(STATUS "  make integrated_platform_node # Integrated platform node")
-message(STATUS "  make integrated_all           # All integrated components")
-message(STATUS "")
-
-# ============================================================================
-# END INTEGRATED PLATFORM COMPONENTS
-# ============================================================================
-
-add_definitions(
-    -DPAD_TOKEN_ID=0
-    -DUNK_TOKEN_ID=1
-    -DBOS_TOKEN_ID=2
-    -DEOS_TOKEN_ID=3
-    -DMASK_TOKEN_ID=4
-)
-
-# Simplified tiktoken data copying
-add_custom_command(TARGET transformer POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tiktoken_data"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/tiktoken_data"
-        "${CMAKE_BINARY_DIR}/tiktoken_data"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/cl100k_base.vocab.json"
-        "${CMAKE_SOURCE_DIR}/third_party/tiktoken/tiktoken/cl100k_base.merges.json"
-        "${CMAKE_BINARY_DIR}/tiktoken_data/"
-    COMMENT "Copying tiktoken data files to build directory"
-)
-
-if(CUDAToolkit_FOUND)
-    # Set source file properties to compile with CUDA
-    set_source_files_properties(
-        src/lm_head.cpp
-        PROPERTIES
-        LANGUAGE CUDA
+# Enable CPU optimizations (AVX2/SIMD) - CXX only, not CUDA
+if(MSVC)
+    # MSVC flags for Windows - only apply to C++ files, not CUDA
+    target_compile_options(transformer_core PRIVATE 
+        $<$<COMPILE_LANGUAGE:CXX>:/O2>              # Maximum optimization
+        $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>       # Enable AVX2 SIMD
+        $<$<COMPILE_LANGUAGE:CXX>:/fp:fast>         # Fast floating-point math
     )
+    message(STATUS "MSVC optimizations enabled: /O2 /arch:AVX2 /fp:fast (CXX only)")
+else()
+    # GCC/Clang flags for Linux/macOS
+    target_compile_options(transformer_core PRIVATE 
+        -O3              # Maximum optimization
+        -march=native    # Use all available CPU instructions
+        -ffast-math      # Fast floating-point math
+    )
+    message(STATUS "GCC/Clang optimizations enabled: -O3 -march=native")
 endif()
+
+# Link CUDA libraries if enabled
+if(CUDA_ENABLED)
+    target_link_libraries(transformer_core PUBLIC CUDA::cudart CUDA::cublas)
+    target_compile_definitions(transformer_core PUBLIC 
+        USE_CUDA
+        CUDA_AVAILABLE  # Legacy macro used in some parts of the code
+        __NV_NO_HOST_COMPILER_CHECK  # Disable CUDA host compiler version check
+        _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH  # Allow VS 2026 with CUDA 13
+    )
+    # Only define __CUDACC__ for CUDA files, not C++ files
+    target_compile_definitions(transformer_core PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:__CUDACC__>
+    )
+    
+    # CUDA 12.6 bug workaround: suppress constexpr redeclaration errors
+    # This is NVIDIA bug #4229173 - safe to suppress as math functions work correctly
+    # Use compiler-specific flags: GCC/Clang vs MSVC
+    if(MSVC)
+        target_compile_options(transformer_core PRIVATE 
+            $<$<COMPILE_LANGUAGE:CXX>:/W3>  # Warning level 3 for MSVC
+            $<$<COMPILE_LANGUAGE:CXX>:/D__NV_NO_HOST_COMPILER_CHECK>
+            $<$<COMPILE_LANGUAGE:CXX>:/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/W3>  # Pass to host compiler
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__NV_NO_HOST_COMPILER_CHECK>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH>
+        )
+    else()
+        target_compile_options(transformer_core PRIVATE 
+            $<$<COMPILE_LANGUAGE:CXX>:-Wno-error -fpermissive>
+        )
+    endif()
+endif()
+
+# Main executable commented out - depends on PyTorch
+# add_executable(transformer_minimal src/main.cpp)
+# target_link_libraries(transformer_minimal PRIVATE transformer_core)
+
+# Simple training test executable (CPU-only, production ready)
+add_executable(train_simple src/train_simple.cpp)
+target_link_libraries(train_simple PRIVATE transformer_core)
+target_include_directories(train_simple PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# WikiText training executable (full training on WikiText-103)
+add_executable(train_wikitext src/train_wikitext.cpp)
+target_link_libraries(train_wikitext PRIVATE transformer_core)
+target_include_directories(train_wikitext PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+message(STATUS "")
+message(STATUS "================================")
+if(CUDA_ENABLED)
+    message(STATUS "CUDA-Enabled Build:")
+    message(STATUS "  - Core transformer with GPU acceleration")
+    message(STATUS "  - Per-channel quantization kernels")
+    message(STATUS "  - CUDA ${CUDAToolkit_VERSION}")
+else()
+    message(STATUS "CPU-Only Build:")
+    message(STATUS "  - Core transformer (no GPU)")
+endif()
+message(STATUS "================================")
+message(STATUS "")
+
