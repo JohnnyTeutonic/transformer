@@ -186,13 +186,20 @@ Bisection state (2026-07-22, in progress):
   engine stayed clean). FIXED: CPU forward is now bias-free to match the
   trained function. Necessary but NOT sufficient — parity still fails with
   nearly identical deltas.
-- The remaining divergence is present at position 0 (single token), FFN
-  sub-op L2 blows 31.8 -> 315 in layer 0 on the CPU build. cuBLAS wrapper
-  uses the standard row-major swap (looks correct); embedding L2s are
-  scale-ambiguous (sqrt(hidden) x16 folding). NEXT: add an env-gated
-  per-layer L2 print to the ENGINE's CPU forward and diff against
-  TCPP_LAYER_TRACE on the same tokens — first diverging sub-op names the
-  broken op.
+- LOCALIZED to ATTENTION (2026-07-22, TINYLLAMA_LAYER_TRACE vs
+  TCPP_LAYER_TRACE on the same single token, pos=0): at position 0
+  attention is exactly o_proj(v_proj(x)) — softmax over one position is 1,
+  RoPE cannot matter — and the two stacks disagree 6x: trainer-CPU
+  attn L2 16.78 vs engine 97.31 (engine is the trusted side; it serves
+  this model coherently). Everything else matches: ln1 16.34/16.15,
+  ln2 31.78/32.20, and the "FFN blowup" was a red herring (engine ffn
+  L2 263 — ~300 is this model's normal magnitude; RMSNorm's scale
+  invariance hid the attention error from downstream L2s). Suspect: the
+  trainer CPU attention Q/K/V/O matmul convention (x*W vs W*x / layout)
+  differs from the CUDA kernel convention the weights were trained in —
+  the same disease class as the fictional FFN biases. NEXT: diff
+  trainer-CPU attention matvec semantics against the CUDA attention
+  kernel's, starting at v_proj/o_proj.
 
 En route the suite also (1) PASSED save->reload->forward bit-identity
 (after fixing the test to set_training(false) — dropout was live at
