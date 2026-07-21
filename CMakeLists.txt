@@ -254,6 +254,10 @@ add_executable(train_wikitext src/train_wikitext.cpp)
 target_link_libraries(train_wikitext PRIVATE transformer_core)
 target_include_directories(train_wikitext PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+add_executable(golden_batch_test src/golden_batch_test.cpp)
+target_link_libraries(golden_batch_test PRIVATE transformer_core)
+target_include_directories(golden_batch_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 message(STATUS "")
 message(STATUS "================================")
 if(CUDA_ENABLED)

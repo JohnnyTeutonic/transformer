@@ -107,12 +107,17 @@ Matrix FeedForward::forward(const Matrix& input) {
         // CPU implementation
         input_cache_ = input;
 
-        // Gate and Up projections
+        // Gate and Up projections.
+        // NO BIASES: the CUDA SwiGLU kernel computes a bias-free FFN (LLaMA
+        // style), so the biases were invisible to every training run while
+        // Adam walked them along fictional gradients — the checkpointed bias
+        // vectors are noise. Adding them here made the CPU forward diverge
+        // ~29x in CE from the CUDA forward on identical weights (golden-batch
+        // suite, 2026-07-22; CHAT_EXPERIMENTS.md Finding 6). The bias-free
+        // function IS the trained function; GGUF export has no FFN bias slots.
         Matrix gate = matmul(input, params_.gate_proj_weights);
-        gate.add_bias(params_.gate_proj_bias);
 
         Matrix up = matmul(input, params_.up_proj_weights);
-        up.add_bias(params_.up_proj_bias);
 
         // Swish activation on the gate (MSVC: loop vars must be signed int)
         Matrix gate_swish = gate;
@@ -137,9 +142,8 @@ Matrix FeedForward::forward(const Matrix& input) {
         gate_cache_ = gate;
         up_cache_ = up;
 
-        // Down projection
+        // Down projection (bias-free, see note above)
         Matrix output = matmul(gated, params_.down_proj_weights);
-        output.add_bias(params_.down_proj_bias);
 
         return output;
 #endif

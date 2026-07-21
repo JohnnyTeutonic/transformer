@@ -35,3 +35,4 @@ smoke_*.log
 train_ts_*.log
 tinystories_prep.log
 scripts/debugging.log
+build_wsl/

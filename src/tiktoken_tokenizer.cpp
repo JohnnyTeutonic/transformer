@@ -155,6 +155,26 @@ void TiktokenTokenizer::build_vocabulary_from_plain_text(const std::string& file
     std::cout << "Total vocabulary size: " << word_to_id_.size() << std::endl;
 }
 
+void TiktokenTokenizer::load_vocabulary_from_id_list(const std::string& filepath) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open vocab id list: " + filepath);
+    }
+    word_to_id_.clear();
+    id_to_word_.clear();
+    std::string line;
+    int id = 0;
+    while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        word_to_id_[line] = id;
+        id_to_word_[id] = line;
+        ++id;
+    }
+    initialized_ = true;
+    std::cout << "Loaded vocabulary from id list: " << id << " tokens" << std::endl;
+}
+
 std::vector<int> TiktokenTokenizer::encode(const std::string& text) const {
     if (!initialized_) {
         throw std::runtime_error("Tokenizer not initialized");

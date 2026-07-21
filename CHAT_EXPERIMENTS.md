@@ -156,6 +156,53 @@ vocabulary, most rows nearly untrained under Zipf sparsity; at V=148
 (TinyChat) = 2.3%. Tying input/output embeddings halves the vocab share
 (~22% freed at V=5000) and couples lexical representation to prediction.
 
+## Finding 6 — CPU-build forward diverges from CUDA forward (golden-batch
+## suite, first run, 2026-07-22)
+
+The golden-batch suite (src/golden_batch_test.cpp + TINYLLAMA_LOGITS_DUMP +
+scripts/compare_golden_logits.py) was built to decide the 8b near-tie
+anomaly and instead caught something bigger on its first run: chat8b's
+checkpoint — which passes the CUDA resume probe on the VM at its recorded
+loss 0.348 — measures **batched CE 10.03 on the CPU build** of the same
+code, and its CPU forward predicts a near-constant token ('water')
+regardless of context, while the inference engine serves the same weights
+correctly. Same weights, three stacks: CUDA trainer ~0.35, engine coherent,
+CPU trainer broken. Divergence is present at sequence position 0 with a
+single-token prompt, so RoPE and causal masking are exonerated; the defect
+is in the CPU per-position pipeline (embedding/norm/FFN/head path). This is
+(a) the two-year-old "major discrepancies between CPU and GPU builds"
+Jonathan fought when first writing tinyllama.cpp, now reproducible in one
+command, and (b) a candidate root cause for the unresolved XCHECK ~2x-loss
+anomaly IF the CUDA build's host-side eval path shares the broken CPU code.
+Localization is a [SUBOP]-style differential trace between the trainer CPU
+forward and the engine CPU forward on the same input — both stacks run on
+this laptop; no GPU needed for the first bisection.
+
+Bisection state (2026-07-22, in progress):
+- FFN biases were FICTIONAL parameters: the CUDA SwiGLU kernel computes a
+  bias-free FFN in every configuration, while use_biases defaulted on, so
+  biases were initialized at 0.01 and Adam-updated along gradients for a
+  function never computed; GGUF export has no FFN-bias slots (why the
+  engine stayed clean). FIXED: CPU forward is now bias-free to match the
+  trained function. Necessary but NOT sufficient — parity still fails with
+  nearly identical deltas.
+- The remaining divergence is present at position 0 (single token), FFN
+  sub-op L2 blows 31.8 -> 315 in layer 0 on the CPU build. cuBLAS wrapper
+  uses the standard row-major swap (looks correct); embedding L2s are
+  scale-ambiguous (sqrt(hidden) x16 folding). NEXT: add an env-gated
+  per-layer L2 print to the ENGINE's CPU forward and diff against
+  TCPP_LAYER_TRACE on the same tokens — first diverging sub-op names the
+  broken op.
+
+En route the suite also (1) PASSED save->reload->forward bit-identity
+(after fixing the test to set_training(false) — dropout was live at
+inference, cross-process max|dlogit| 1.68 on identical weights), and
+(2) exposed that vocabulary construction has NO sort tie-break, so
+equal-frequency words get platform-dependent ids: a checkpoint's vocab is
+only reproducible from its own exported GGUF (scripts/extract_gguf_vocab.py
++ golden_batch_test --vocab-list). Do NOT change the sort to fix this while
+any lane is mid-run; it reorders every existing model's vocabulary.
+
 ## Finding 4 — (engineering, cross-ref) Silent train/deploy divergence
 
 The FeedForward stale-GPU-cache bug (README, resolved 2026-07-19) meant
