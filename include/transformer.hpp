@@ -881,6 +881,11 @@ public:
     }
     
     // GGUF export accessors
+    // Read-only view of the last forward_batch's cached activations
+    // (embedded input + each layer's output) — used by the cross-build
+    // activation trace to bracket the first diverging op.
+    const std::vector<Matrix>& get_layer_activations() const { return m_layer_activations; }
+
     const TokenEmbedding* getTokenEmbedding() const { return token_embedding.get(); }
     const LayerNorm* getFinalLayerNorm() const { return final_ln.get(); }
     const LanguageModelHead* getLMHead() const { return lm_head.get(); }

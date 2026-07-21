@@ -193,6 +193,13 @@ class LanguageModelHead {
     void sync_weights_from_device();
 
     /**
+     * @brief Marks the device-resident weights stale so the next training step
+     * re-uploads the host weights. Call after loading host weights (e.g.
+     * checkpoint restore). No-op on CPU builds.
+     */
+    void invalidate_device_weights();
+
+    /**
      * @brief Saves the model head to a stream.
      * @param os Output stream to save to
      */

@@ -390,12 +390,17 @@ TransformerOutput Transformer::forward_batch(const std::vector<std::vector<int>>
         m_seq_len = max_seq_len;
         
         // Create batched causal mask: [batch*seq_len x batch*seq_len]
-        // Block diagonal structure: each sequence only attends to itself
-        size_t mask_dim = batch_size * max_seq_len;
+        // Block diagonal structure: each sequence only attends to itself.
+        // The CUDA batched-attention kernel enforces per-sequence causal
+        // masking internally and never reads this matrix — and the dense
+        // allocation is O((batch*seq)^2): 268MB at 64x128 and 4GB at 64x256.
+        // Only materialize it for the CPU attention path.
         AttentionMask mask;
+#ifndef USE_CUDA
+        size_t mask_dim = batch_size * max_seq_len;
         mask.mask = Matrix(mask_dim, mask_dim);
         mask.mask.initialize_constant(-1e9f);  // Default: no attention
-        
+
         // Fill in block diagonal (causal within each sequence)
         for (size_t b = 0; b < batch_size; ++b) {
             size_t offset = b * max_seq_len;
@@ -405,6 +410,7 @@ TransformerOutput Transformer::forward_batch(const std::vector<std::vector<int>>
                 }
             }
         }
+#endif
         
         // Process through transformer layers using BATCHED attention
         // Batched: 4 big CUDA matmuls + CPU attention (avoids CUDA overhead for small ops)
@@ -1042,25 +1048,51 @@ Transformer::~Transformer() {
     std::cout << "Transformer destructor called" << std::endl;
 }
 
+void Transformer::save(std::ostream& os) const {
+    SCOPE_LOG();
+    // Full-model serialization, mirrored exactly by load(). NOTE: the caller
+    // must sync the device-resident LM head to host first (see
+    // LanguageModelHead::sync_weights_from_device) or the saved head is stale.
+    token_embedding->save(os);
+    pos_encoding->save(os);
+    for (const auto& layer : layers) {
+        layer->save(os);
+    }
+    final_ln->save(os);
+    lm_head->save(os);
+}
+
 void Transformer::load(std::istream& is) {
     SCOPE_LOG();
     try {
-        // Load token embedding
-        token_embedding->load(is);
+        // The component load() methods are STATIC factories returning new
+        // objects. The old code here called them through the instance
+        // pointers and discarded the results, so embeddings, final_ln and
+        // the LM head were parsed but never restored — every checkpoint
+        // resume silently kept those tensors at random init (found
+        // 2026-07-17: restored models scored ~ln(vocab) uniform loss).
+        token_embedding = TokenEmbedding::load(is);
+        pos_encoding = PositionalEncoding::load(is);
 
-        // Load positional encoding
-        pos_encoding->load(is);
-
-        // Load transformer layers
         for (auto& layer : layers) {
             layer->load(is);
         }
 
-        // Load final layer norm
-        final_ln->load(is);
+        final_ln = LayerNorm::load(is);
 
-        // Load language model head
-        lm_head->load(is);
+        // Keep the existing lm_head object (it carries hidden/vocab sizes,
+        // tokenizer pointer and optimizer state) and read the weights
+        // directly, mirroring LanguageModelHead::save. (The static
+        // LanguageModelHead::load factory constructs a temporary head with
+        // sizes (0,0), which the Matrix ctor rejects.)
+        {
+            lm_head->get_weights() = Matrix::load(is);
+            lm_head->get_bias() = Vector::load(is);
+            float saved_dropout = 0.0f;
+            is.read(reinterpret_cast<char*>(&saved_dropout), sizeof(saved_dropout));
+        }
+        // The device-resident copy (if any) is now stale.
+        lm_head->invalidate_device_weights();
 
     } catch (const std::exception& e) {
         throw std::runtime_error("Error loading transformer: " + std::string(e.what()));

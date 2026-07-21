@@ -1,0 +1,14 @@
+{
+    "architecture": {
+        "family": "custom",
+        "overrides": {
+            "norm": "rmsnorm",
+            "positions": "rope",
+            "ffn": "swiglu",
+            "attention": "gqa",
+            "num_kv_heads": 4,
+            "biases": false
+        }
+    },
+    "export": { "format": "both", "path": "model" }
+}

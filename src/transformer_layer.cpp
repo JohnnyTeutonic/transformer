@@ -19,6 +19,11 @@ TransformerLayer::TransformerLayer(const TransformerConfig& config_, size_t idx)
         config.use_flash_attention, config.use_rope, config.use_sliding_window, config.window_size,
         config.use_gqa, config.num_kv_heads, config.max_seq_length, config.use_fp16,
         true);  // use_fused_attention = true for GPU acceleration
+        // ⚠️ The fused kernel (fused_attention_kernels.cu) implements NO
+        // RoPE — it must never carry a RoPE-family model's forward. It is
+        // reachable only via single-sequence forward() without kv_cache;
+        // training uses forward_batched (which applies RoPE on host).
+        // Also note MultiHeadAttention::load does not restore this flag.
 
     // use_rms_norm selects RMSNorm (no mean subtraction, no beta) to match
     // llama.cpp-family inference engines; false gives classic LayerNorm.
@@ -115,6 +120,27 @@ Matrix TransformerLayer::forward_batched(const Matrix& input, const AttentionMas
 
     // Second residual connection
     Matrix output = ffn_output + residual;
+
+    // Sub-op activation trace (TCPP_LAYER_TRACE): CPU and CUDA builds
+    // produce ~200x different layer outputs on identical weights; the first
+    // diverging sub-op L2 between builds names the broken op.
+    if (std::getenv("TCPP_LAYER_TRACE") != nullptr) {
+        auto l2 = [](const Matrix& m) {
+            double s = 0.0;
+            for (size_t i = 0; i < m.rows(); ++i)
+                for (size_t j = 0; j < m.cols(); ++j)
+                    s += double(m(i, j)) * m(i, j);
+            return std::sqrt(s);
+        };
+        std::cout << "[SUBOP] L" << layer_idx
+                  << " in=" << l2(input)
+                  << " ln1=" << l2(normalized)
+                  << " attn=" << l2(attention_output)
+                  << " res1=" << l2(residual)
+                  << " ln2=" << l2(ffn_normalized)
+                  << " ffn=" << l2(ffn_output)
+                  << " out=" << l2(output) << std::endl;
+    }
 
     if (phase_timing) {
         auto lt4 = std::chrono::high_resolution_clock::now();

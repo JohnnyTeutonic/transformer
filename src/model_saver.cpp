@@ -1,8 +1,11 @@
 #include "../include/model_saver.hpp"
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
+#include <sstream>
 #include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
@@ -181,22 +184,36 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
         std::string checkpoint_file = (dir_path / getCheckpointFilename("", model_name, epoch)).string();
         std::cerr << "[CKPT DEBUG] Saving to: " << checkpoint_file << std::endl;
 
-        // Test file writability before proceeding
-        {
-            std::ofstream test_file(checkpoint_file);
-            if (!test_file) {
-                std::cerr << "[CKPT ERROR] Cannot write file: " << checkpoint_file << std::endl;
-                return false;
-            }
-        }
-
-        // Open checkpoint file for actual writing
-        std::ofstream ckpt_file(checkpoint_file, std::ios::binary);
+        // ATOMIC WRITE: stream into a .tmp sibling and rename at the end.
+        // The old code truncated and rewrote the live file in place (twice —
+        // a writability probe, then the real write), so any concurrent copy
+        // (the Colab relay loop mirrors this file) could capture an empty or
+        // partial checkpoint.
+        std::string tmp_file = checkpoint_file + ".tmp";
+        std::ofstream ckpt_file(tmp_file, std::ios::binary);
         if (!ckpt_file) {
-            std::cerr << "[CKPT ERROR] Failed to open for binary write: " << checkpoint_file << std::endl;
+            std::cerr << "[CKPT ERROR] Failed to open for binary write: " << tmp_file << std::endl;
             return false;
         }
         std::cerr << "[CKPT DEBUG] File opened, writing metadata..." << std::endl;
+
+        // Serialize the full model payload to memory first so its hash can be
+        // recorded in the metadata. The Colab relay (download -> OneDrive ->
+        // upload) was caught delivering full-length checkpoints whose tensors
+        // mixed two save generations (2026-07-18: restored models measured
+        // 15-18 CE vs ~5-6 recorded); a content hash makes every consumer
+        // able to reject such files outright.
+        std::ostringstream payload_stream(std::ios::binary);
+        transformer.save(payload_stream);
+        const std::string payload = payload_stream.str();
+        uint64_t fnv = 14695981039346656037ULL;
+        for (unsigned char ch : payload) {
+            fnv ^= ch;
+            fnv *= 1099511628211ULL;
+        }
+        char fnv_hex[17];
+        std::snprintf(fnv_hex, sizeof(fnv_hex), "%016llx",
+                      static_cast<unsigned long long>(fnv));
 
         // Write metadata as JSON
         nlohmann::json checkpoint_meta;
@@ -205,6 +222,15 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
         checkpoint_meta["epoch"] = epoch;
         checkpoint_meta["step"] = step;
         checkpoint_meta["loss"] = loss;
+        // Format 2 (2026-07-17): full-model payload via Transformer::save
+        // (embeddings + pos encoding + layers + final_ln + LM head). Format-1
+        // checkpoints contained ONLY the transformer layers and cannot
+        // restore a working model.
+        // Format 3 (2026-07-18): LayerNorm blocks now carry eps + rms flag
+        // (format-2 loads rebuilt every norm as non-RMS LayerNorm — llama
+        // models restored with the wrong normalizer and scored ~2x loss).
+        checkpoint_meta["format"] = 3;
+        checkpoint_meta["payload_fnv64"] = std::string(fnv_hex);
         checkpoint_meta["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
         checkpoint_meta["model_config"] = {
             {"hidden_size", config.hidden_size},
@@ -228,27 +254,30 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
             return false;
         }
 
-        // Save model state
-        const auto& layers = transformer.getLayers();
-        size_t total_bytes_written = 0;
-        
-        for (const auto& layer : layers) {
-            size_t bytes_before = ckpt_file.tellp();
-            layer->save(ckpt_file);
-            size_t bytes_after = ckpt_file.tellp();
-            
-            if (!ckpt_file) {
-                logger.log("Failed to write layer data", true);
-                return false;
-            }
-            
-            total_bytes_written += (bytes_after - bytes_before);
+        // Write the pre-serialized full-model payload (hashed above).
+        // (The previous code iterated only transformer.getLayers(), so
+        // embeddings, final_ln and the LM head were never in the checkpoint —
+        // every resume restarted them from random init.)
+        if (!ckpt_file.write(payload.data(), static_cast<std::streamsize>(payload.size()))) {
+            logger.log("Failed to write model data", true);
+            return false;
         }
+        size_t total_bytes_written = payload.size();
 
         // Ensure everything is written and validate
         ckpt_file.flush();
         if (!ckpt_file) {
             logger.log("Error occurred while writing checkpoint file", true);
+            return false;
+        }
+        ckpt_file.close();
+
+        // Atomically publish the finished file
+        std::error_code rename_ec;
+        std::filesystem::rename(tmp_file, checkpoint_file, rename_ec);
+        if (rename_ec) {
+            std::cerr << "[CKPT ERROR] Failed to publish checkpoint (rename): "
+                      << rename_ec.message() << std::endl;
             return false;
         }
 
@@ -317,17 +346,48 @@ bool ModelSaver::loadCheckpoint(Transformer& transformer, const std::string& che
             return false;
         }
 
-        // Load model state - must match save format (layer by layer)
-        std::cerr << "[LOAD DEBUG] Loading model weights from position " << ckpt_file.tellg() << std::endl;
-        auto& layers = transformer.getLayers();
-        std::cerr << "[LOAD DEBUG] Loading " << layers.size() << " layers..." << std::endl;
-        for (size_t i = 0; i < layers.size(); ++i) {
-            std::cerr << "[LOAD DEBUG] Loading layer " << i << " from position " << ckpt_file.tellg() << std::endl;
-            layers[i]->load(ckpt_file);
-            if (!ckpt_file) {
-                std::cerr << "[LOAD ERROR] Failed to load layer " << i << std::endl;
+        // Reject format-1 (layers-only) checkpoints: they lack embeddings,
+        // final_ln and the LM head, so "restoring" one produces a broken
+        // model that scores ~ln(vocab) uniform loss.
+        int ckpt_format = checkpoint_meta.value("format", 1);
+        if (ckpt_format != 3) {
+            std::cerr << "[LOAD ERROR] Checkpoint format " << ckpt_format
+                      << " cannot restore a working model (format 1: layers "
+                      << "only; format 2: norm layers restored with the wrong "
+                      << "normalizer type). Requires format 3." << std::endl;
+            return false;
+        }
+
+        // Read the remaining payload into memory, verify its hash against the
+        // metadata (when present), then load. Rejects relay-corrupted files —
+        // full-length checkpoints mixing two save generations were caught in
+        // the Colab download path (2026-07-18).
+        std::cerr << "[LOAD DEBUG] Loading full model from position " << ckpt_file.tellg() << std::endl;
+        std::string payload((std::istreambuf_iterator<char>(ckpt_file)),
+                            std::istreambuf_iterator<char>());
+        if (checkpoint_meta.contains("payload_fnv64")) {
+            uint64_t fnv = 14695981039346656037ULL;
+            for (unsigned char ch : payload) {
+                fnv ^= ch;
+                fnv *= 1099511628211ULL;
+            }
+            char fnv_hex[17];
+            std::snprintf(fnv_hex, sizeof(fnv_hex), "%016llx",
+                          static_cast<unsigned long long>(fnv));
+            std::string expected = checkpoint_meta["payload_fnv64"].get<std::string>();
+            if (expected != fnv_hex) {
+                std::cerr << "[LOAD ERROR] Checkpoint payload hash mismatch (file "
+                          << fnv_hex << " vs recorded " << expected
+                          << ") — corrupt/mixed relay copy, refusing to load." << std::endl;
                 return false;
             }
+            std::cerr << "[LOAD DEBUG] Payload hash verified (" << fnv_hex << ")" << std::endl;
+        }
+        std::istringstream payload_stream(payload, std::ios::binary);
+        transformer.load(payload_stream);
+        if (!payload_stream && !payload_stream.eof()) {
+            std::cerr << "[LOAD ERROR] Failed to load model data" << std::endl;
+            return false;
         }
 
         std::cerr << "[LOAD SUCCESS] Loaded checkpoint from epoch " 

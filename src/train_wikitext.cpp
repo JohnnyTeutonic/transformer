@@ -102,6 +102,12 @@ struct TrainingConfig {
     size_t max_train_seqs = 0;   // 0 = use all; otherwise cap number of training sequences
     bool use_small = false;      // Use the truncated *-small.txt training files (fast smoke tests)
     bool tiny = false;           // Tiny model dims (128/2 layers) for round-trip smoke tests
+    bool mid = false;            // Middle tier (256/4 layers) — chat-capable, T4-trainable
+    bool doc_aligned = false;    // Dialogue/instruct: bin-pack whole documents, no mid-doc window starts
+    bool assistant_only_loss = false;  // Mask loss on user-turn tokens and role markers:
+                                       // every update optimizes P(answer|question) directly.
+                                       // The prompt still shapes representations via the
+                                       // answer loss through attention.
     std::string export_gguf = ""; // After training, export the model to this GGUF path
     std::string export_safetensors = ""; // After training, export the model to this safetensors path
     std::string config_json = ""; // Optional transformer_config.json overriding model defaults
@@ -124,6 +130,68 @@ static float effective_lr_at(const TrainingConfig& config, size_t global_step) {
         lr *= 0.1f + 0.45f * (1.0f + std::cos(3.14159265f * prog));
     }
     return lr;
+}
+
+/**
+ * @brief Document-aligned loader for dialogue/instruct data (2026-07-20).
+ *
+ * The prose loader below packs a flat word stream into overlapping windows;
+ * audit on DailyDialog showed 97% of windows begin MID-dialogue (often
+ * mid-sentence) with ~2.3 dialogues per window — responses train without
+ * their prompts and conditioning signal drowns. Here: one line = one
+ * document; whole documents are bin-packed into windows (never split,
+ * except documents longer than seq_len which split at "user:" turn
+ * boundaries); no overlap; short windows are left short (the trainer pads
+ * with 0 and the loss ignore-index masks it).
+ */
+std::vector<std::vector<int>> load_and_tokenize_doc_aligned(
+    const std::string& filepath,
+    TiktokenTokenizer& tokenizer,
+    size_t max_seq_len
+) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open file: " + filepath);
+    }
+    std::vector<std::vector<int>> batches;
+    std::vector<int> window;
+    std::string line;
+    const std::vector<int> turn_tok = tokenizer.encode("user:");
+    const int user_id = turn_tok.empty() ? -1 : turn_tok[0];
+
+    auto flush_window = [&]() {
+        if (window.size() >= 2) batches.push_back(window);
+        window.clear();
+    };
+
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        auto doc = tokenizer.encode(line);
+        if (doc.size() < 2) continue;
+
+        // Oversized document: split at turn boundaries ("user:") under the cap
+        if (doc.size() > max_seq_len) {
+            size_t start = 0;
+            while (start < doc.size()) {
+                size_t end = std::min(start + max_seq_len, doc.size());
+                if (end < doc.size()) {
+                    size_t cut = end;
+                    while (cut > start + 1 && doc[cut] != user_id) --cut;
+                    if (cut > start + 1) end = cut;
+                }
+                flush_window();
+                window.assign(doc.begin() + start, doc.begin() + end);
+                flush_window();
+                start = end;
+            }
+            continue;
+        }
+        if (window.size() + doc.size() > max_seq_len) flush_window();
+        window.insert(window.end(), doc.begin(), doc.end());
+    }
+    flush_window();
+    std::cout << "Loaded " << batches.size() << " doc-aligned sequences" << std::endl;
+    return batches;
 }
 
 /**
@@ -349,15 +417,54 @@ TrainingMetrics train(
             // Build target indices for CUDA loss computation
             std::vector<int> target_indices(total_positions, 0);
             size_t loss_count = 0;
-            
+
+            // --assistant-loss: role-marker ids, resolved once. If either
+            // marker is not a single known token in this corpus, the flag
+            // cannot work — disable it loudly rather than train a lie.
+            static int user_marker_id = -1, asst_marker_id = -1;
+            static bool markers_resolved = false;
+            if (config.assistant_only_loss && !markers_resolved) {
+                auto u = tokenizer.encode("user:");
+                auto a = tokenizer.encode("assistant:");
+                if (u.size() == 1 && a.size() == 1 && u[0] != 0 && a[0] != 0) {
+                    user_marker_id = u[0];
+                    asst_marker_id = a[0];
+                    std::cout << "[ALOSS] assistant-only loss active (user:=" << user_marker_id
+                              << " assistant:=" << asst_marker_id << ")" << std::endl;
+                } else {
+                    std::cerr << "[ALOSS] WARNING: role markers not single known tokens; "
+                              << "--assistant-loss DISABLED for this run" << std::endl;
+                }
+                markers_resolved = true;
+            }
+
             for (size_t b = 0; b < actual_batch_size; ++b) {
                 const auto& tokens = batch_seqs[b];
+                // Loss-mask state machine: positions whose TARGET token lies in
+                // a user turn (or is a role marker) carry no loss. Doc-aligned
+                // sequences begin at a turn boundary, so starting in_user=true
+                // is exact there; elsewhere it errs toward masking a partial
+                // leading turn, which is the safe direction.
+                bool in_user = true;
                 for (size_t t = 1; t < tokens.size(); ++t) {
                     int target_token = tokens[t];
                     size_t pos = b * seq_len + (t - 1);
-                    if (static_cast<size_t>(target_token) < vocab_size && pos < total_positions) {
+                    bool masked = false;
+                    if (user_marker_id >= 0) {
+                        if (tokens[t - 1] == user_marker_id) in_user = true;
+                        else if (tokens[t - 1] == asst_marker_id) in_user = false;
+                        masked = in_user || target_token == user_marker_id
+                                         || target_token == asst_marker_id;
+                    }
+                    if (static_cast<size_t>(target_token) < vocab_size && pos < total_positions
+                        && !masked) {
                         target_indices[pos] = target_token;
-                        loss_count++;
+                        // Target 0 (PAD/<unk>) is excluded from the loss; the
+                        // unfilled last position of each row also stays 0 and
+                        // is likewise ignored rather than trained toward <unk>.
+                        if (target_token != 0) {
+                            loss_count++;
+                        }
                     }
                 }
             }
@@ -377,7 +484,7 @@ TrainingMetrics train(
                 static_cast<int>(total_positions),
                 static_cast<int>(vocab_size)
             );
-            
+
             GRAD_DIAG.set_step(global_step);
             GRAD_LOG_SCALAR("loss_before_backward", avg_loss);
             GRAD_LOG_SCALAR("effective_lr", effective_lr);
@@ -399,6 +506,83 @@ TrainingMetrics train(
                           << "ms loss=" << ms(pt1, pt2)
                           << "ms backward+update=" << ms(pt2, pt3) << "ms" << std::endl;
             }
+
+            // XCHECK (2026-07-18): hash-verified checkpoints measure ~2x the
+            // loss the CUDA path reports for the same weights — either the
+            // device loss readout is wrong or the trained state diverges from
+            // the host weights that eval/checkpoint/export all use. Compare
+            // the same batch through the host eval path (runs AFTER backward:
+            // an eval forward overwrites the cached activations backward
+            // needs), and expose the device loss divisor.
+            // Fire one step after each periodic save (save_interval cadence)
+            // so the measurement brackets the save-path sync: a corrupt host
+            // head right after a save pins the fault to that sync.
+            if (global_step % config.save_interval == 1 || global_step == 10) {
+                if (transformer.get_lm_head()) {
+                    transformer.get_lm_head()->sync_weights_from_device();
+                }
+                transformer.set_training(false);
+                double xsum = 0.0; size_t xcnt = 0;
+                for (size_t xs = 0; xs < std::min<size_t>(4, batch_seqs.size()); ++xs) {
+                    const auto& xt = batch_seqs[xs];
+                    if (xt.size() < 2) continue;
+                    TransformerOutput xo = transformer.forward(xt, "xcheck", tokenizer);
+                    size_t xr = xo.logits.rows(), xv = xo.logits.cols();
+                    for (size_t t = 1; t < xt.size() && t - 1 < xr; ++t) {
+                        int tg = xt[t];
+                        if (tg == 0 || static_cast<size_t>(tg) >= xv) continue;
+                        float mx = -std::numeric_limits<float>::infinity();
+                        for (size_t v = 0; v < xv; ++v) mx = std::max(mx, xo.logits(t - 1, v));
+                        float se = 0.0f;
+                        for (size_t v = 0; v < xv; ++v) se += std::exp(xo.logits(t - 1, v) - mx);
+                        xsum += -(xo.logits(t - 1, tg) - mx - std::log(se + 1e-10f));
+                        xcnt++;
+                    }
+                }
+                // Same sequences through the BATCHED path (the one training
+                // optimizes): if batched and single-sequence losses diverge
+                // on the same weights, the two forward implementations
+                // compute different functions — the train!=deploy split.
+                double bsum = 0.0; size_t bcnt = 0;
+                {
+                    std::vector<std::vector<int>> bx(batch_seqs.begin(),
+                        batch_seqs.begin() + std::min<size_t>(4, batch_seqs.size()));
+                    TransformerOutput bo = transformer.forward_batch(bx, seq_len);
+                    if (bo.logits.rows() == bx.size() * seq_len) {
+                        size_t bv = bo.logits.cols();
+                        for (size_t s = 0; s < bx.size(); ++s) {
+                            const auto& xt = bx[s];
+                            for (size_t t = 1; t < xt.size() && t - 1 < seq_len; ++t) {
+                                int tg = xt[t];
+                                if (tg == 0 || static_cast<size_t>(tg) >= bv) continue;
+                                size_t row = s * seq_len + (t - 1);
+                                float mx = -std::numeric_limits<float>::infinity();
+                                for (size_t v = 0; v < bv; ++v) mx = std::max(mx, bo.logits(row, v));
+                                float se = 0.0f;
+                                for (size_t v = 0; v < bv; ++v) se += std::exp(bo.logits(row, v) - mx);
+                                bsum += -(bo.logits(row, tg) - mx - std::log(se + 1e-10f));
+                                bcnt++;
+                            }
+                        }
+                    }
+                }
+                transformer.set_training(true);
+                // Host LM-head fingerprint: the saved head was identified as
+                // the corrupt tensor (tied-head swap: 13.6 -> 8.6), so track
+                // its host-side stats at each sync point.
+                double hsum = 0.0;
+                const Matrix& hw = transformer.get_lm_head()->get_weights();
+                size_t hn = std::min<size_t>(hw.rows() * hw.cols(), 200000);
+                for (size_t i = 0; i < hn; ++i) hsum += std::fabs(hw.data()[i]);
+                std::cout << "[XCHECK] step=" << global_step
+                          << " cuda_loss=" << avg_loss
+                          << " single_loss=" << (xcnt ? xsum / xcnt : -1.0)
+                          << " batched_loss=" << (bcnt ? bsum / bcnt : -1.0)
+                          << " cuda_valid=" << cuda::get_last_valid_count()
+                          << "/" << total_positions
+                          << " head_meanabs=" << (hsum / std::max<size_t>(hn, 1))
+                          << std::endl;
+            }
 #else
             // CPU fallback: compute loss and gradient
             static Matrix grad_logits;
@@ -410,6 +594,12 @@ TrainingMetrics train(
             #pragma omp parallel for reduction(+:batch_loss)
             for (int pos = 0; pos < static_cast<int>(total_positions); ++pos) {
                 int target_token = target_indices[pos];
+                if (target_token == 0) {  // PAD/<unk>: no loss, zero gradient row
+                    for (size_t v = 0; v < vocab_size; ++v) {
+                        grad_logits(pos, v) = 0.0f;
+                    }
+                    continue;
+                }
                 float max_logit = -1e9f;
                 for (size_t v = 0; v < vocab_size; ++v) {
                     max_logit = std::max(max_logit, output.logits(pos, v));
@@ -562,8 +752,9 @@ TrainingMetrics train(
                         int target = val_tokens[t];
                         size_t pos = t - 1;
                         
-                        if (static_cast<size_t>(target) < val_vocab_size) {
+                        if (target != 0 && static_cast<size_t>(target) < val_vocab_size) {
                             // Compute log-softmax over vocabulary for this position
+                            // (target 0 = PAD/<unk> is ignored, matching training)
                             float max_logit = -std::numeric_limits<float>::infinity();
                             for (size_t v = 0; v < val_vocab_size; ++v) {
                                 max_logit = std::max(max_logit, val_output.logits(pos, v));
@@ -611,7 +802,12 @@ TrainingMetrics train(
                         train_log.flush();
                     }
                     
-                    // Save best checkpoint
+                    // Save best checkpoint (sync the device-resident LM head
+                    // first — training mode keeps the authoritative copy on
+                    // the GPU and the periodic-save path already does this)
+                    if (transformer.get_lm_head()) {
+                        transformer.get_lm_head()->sync_weights_from_device();
+                    }
                     static ModelSaver best_saver;
                     if (best_saver.saveCheckpoint(transformer, config.output_dir, "best_model", 
                                                    epoch, val_loss, global_step)) {
@@ -633,6 +829,83 @@ TrainingMetrics train(
                 // authoritative).
                 if (transformer.get_lm_head()) {
                     transformer.get_lm_head()->sync_weights_from_device();
+                    // Fingerprint the host head that is about to be serialized:
+                    // compare offline against the written file's head to split
+                    // sync-fault (bad before serialization) from
+                    // serialization-fault (bad after).
+                    const Matrix& shw = transformer.get_lm_head()->get_weights();
+                    size_t shn = std::min<size_t>(shw.rows() * shw.cols(), 200000);
+                    double ssum = 0.0;
+                    uint64_t sfnv = 14695981039346656037ULL;
+                    const unsigned char* sb = reinterpret_cast<const unsigned char*>(shw.data());
+                    for (size_t i = 0; i < shn * sizeof(float); ++i) {
+                        sfnv ^= sb[i];
+                        sfnv *= 1099511628211ULL;
+                    }
+                    for (size_t i = 0; i < shn; ++i) ssum += std::fabs(shw.data()[i]);
+                    char sfnv_hex[17];
+                    std::snprintf(sfnv_hex, sizeof(sfnv_hex), "%016llx",
+                                  static_cast<unsigned long long>(sfnv));
+                    std::cout << "[SAVE] step=" << global_step
+                              << " host_head_meanabs=" << (ssum / std::max<size_t>(shn, 1))
+                              << " host_head_fnv=" << sfnv_hex
+                              << std::endl;
+                    // Deterministic activation trace on a fixed input,
+                    // computed at the exact state this checkpoint captures.
+                    // Rerun locally on the relayed file and diff: the first
+                    // diverging number names the CUDA-vs-CPU op (local
+                    // batched==single at 12.5 vs VM training at 6.4 proved
+                    // the split is between builds, not between forwards).
+                    {
+                        transformer.set_training(false);
+                        std::vector<int> trace_in;
+                        for (int ti = 2; ti < 130; ++ti) trace_in.push_back(ti);
+                        TransformerOutput to_ = transformer.forward(trace_in, "trace", tokenizer);
+                        std::ostringstream tr;
+                        tr << std::setprecision(8);
+                        size_t lr_ = to_.logits.rows();
+                        if (lr_ > 0) {
+                            for (int k = 0; k < 6; ++k) tr << to_.logits(lr_ - 1, k) << " ";
+                            double l2 = 0.0;
+                            for (size_t v = 0; v < to_.logits.cols(); ++v) {
+                                double z = to_.logits(lr_ - 1, v);
+                                l2 += z * z;
+                            }
+                            tr << "| logitsL2=" << std::sqrt(l2);
+                        }
+                        std::cout << "[TRACE] step=" << global_step << " " << tr.str() << std::endl;
+                        // Same fixed input through the BATCHED path with
+                        // batch=1 (Jonathan: "batching was difficult...the
+                        // API does allow you to switch it off"): VM-vs-local
+                        // diff of THIS line is the cleanest cross-build
+                        // comparison (same code path, different build), and
+                        // per-layer L2s bracket the first diverging op.
+                        {
+                            std::vector<std::vector<int>> b1{trace_in};
+                            TransformerOutput b1o = transformer.forward_batch(b1, trace_in.size());
+                            std::ostringstream tb;
+                            tb << std::setprecision(8);
+                            size_t br = b1o.logits.rows();
+                            if (br > 0) {
+                                for (int k = 0; k < 6; ++k) tb << b1o.logits(br - 1, k) << " ";
+                                double l2 = 0.0;
+                                for (size_t v = 0; v < b1o.logits.cols(); ++v) {
+                                    double z = b1o.logits(br - 1, v);
+                                    l2 += z * z;
+                                }
+                                tb << "| logitsL2=" << std::sqrt(l2) << " | layerL2:";
+                                for (const auto& act : transformer.get_layer_activations()) {
+                                    double a2 = 0.0;
+                                    for (size_t i = 0; i < act.rows(); ++i)
+                                        for (size_t j = 0; j < act.cols(); ++j)
+                                            a2 += double(act(i, j)) * act(i, j);
+                                    tb << " " << std::sqrt(a2);
+                                }
+                            }
+                            std::cout << "[TRACE-B1] step=" << global_step << " " << tb.str() << std::endl;
+                        }
+                        transformer.set_training(true);
+                    }
                 }
                 static ModelSaver saver;
                 if (saver.saveCheckpoint(transformer, config.output_dir, "wikitext_model", 
@@ -732,6 +1005,14 @@ int main(int argc, char** argv) {
                 train_config.use_small = true;
             } else if (arg == "--tiny") {
                 train_config.tiny = true;
+            } else if (arg == "--mid") {
+                train_config.mid = true;
+            } else if (arg == "--doc-aligned") {
+                train_config.doc_aligned = true;
+            } else if (arg == "--assistant-loss") {
+                train_config.assistant_only_loss = true;
+            } else if (arg == "--seq-len" && i + 1 < argc) {
+                train_config.max_seq_len = std::stoul(argv[++i]);
             } else if (arg == "--export-gguf" && i + 1 < argc) {
                 train_config.export_gguf = argv[++i];
             } else if (arg == "--export-safetensors" && i + 1 < argc) {
@@ -841,7 +1122,16 @@ int main(int argc, char** argv) {
         
         // Now initialize model config with vocabulary size from tokenizer
         TransformerConfig model_config;
-        if (train_config.tiny) {
+        if (train_config.mid) {
+            // Middle tier (2026-07-19, Enterprise era): 4L/256h — ~8x the
+            // tiny core, still trainable on a T4 without the resident-tensor
+            // refactor. First config where topic-holding chat is plausible.
+            model_config.vocab_size = std::min(tokenizer->vocab_size(), static_cast<size_t>(5000));
+            model_config.hidden_size = 256;
+            model_config.num_heads = 8;
+            model_config.num_layers = 4;
+            model_config.intermediate_size = 1024;
+        } else if (train_config.tiny) {
             // Tiny model for fast train -> export -> tinyllama.cpp round-trip tests
             model_config.vocab_size = std::min(tokenizer->vocab_size(), static_cast<size_t>(5000));
             model_config.hidden_size = 128;
@@ -925,11 +1215,15 @@ int main(int argc, char** argv) {
         auto train_data = std::vector<std::vector<int>>();
         
         // Load train-0-small.txt (using same path as vocab building)
-        auto train_data_0 = load_and_tokenize(train_file_0, *tokenizer, train_config.max_seq_len);
+        auto train_data_0 = train_config.doc_aligned
+            ? load_and_tokenize_doc_aligned(train_file_0, *tokenizer, train_config.max_seq_len)
+            : load_and_tokenize(train_file_0, *tokenizer, train_config.max_seq_len);
         train_data.insert(train_data.end(), train_data_0.begin(), train_data_0.end());
         
         // Load train-1-small.txt (using same path as vocab building)
-        auto train_data_1 = load_and_tokenize(train_file_1, *tokenizer, train_config.max_seq_len);
+        auto train_data_1 = train_config.doc_aligned
+            ? load_and_tokenize_doc_aligned(train_file_1, *tokenizer, train_config.max_seq_len)
+            : load_and_tokenize(train_file_1, *tokenizer, train_config.max_seq_len);
         train_data.insert(train_data.end(), train_data_1.begin(), train_data_1.end());
         
         // Optionally cap number of training sequences (fast smoke tests)
@@ -940,8 +1234,38 @@ int main(int argc, char** argv) {
         
         // Load validation data
         std::string val_file = train_config.data_path + "/validation.txt";
-        auto val_data = load_and_tokenize(val_file, *tokenizer, train_config.max_seq_len);
+        auto val_data = train_config.doc_aligned
+            ? load_and_tokenize_doc_aligned(val_file, *tokenizer, train_config.max_seq_len)
+            : load_and_tokenize(val_file, *tokenizer, train_config.max_seq_len);
         
+        // The tokenizer's vocab cap (20k) can exceed the model preset's cap
+        // (5k on --mid/--tiny). The CUDA embedding gather is unchecked, so an
+        // id >= model vocab reads out-of-bounds GPU memory as its embedding —
+        // silently. (This hit chat7a and chat8c: every word ranked past 5000
+        // trained on garbage vectors.) Remap those ids to UNK_ID (0), which is
+        // also the loss ignore-index, and report the OOV rate.
+        {
+            size_t oov = 0, total = 0;
+            const int vcap = static_cast<int>(model_config.vocab_size);
+            for (auto* split : {&train_data, &val_data}) {
+                for (auto& seq : *split) {
+                    for (auto& t : seq) {
+                        ++total;
+                        if (t >= vcap || t < 0) { t = tokenizer->get_unk_token_id(); ++oov; }
+                    }
+                }
+            }
+            if (oov > 0) {
+                std::cout << "[VOCAB] WARNING: " << oov << "/" << total << " tokens ("
+                          << (100.0 * oov / total) << "%) exceed model vocab "
+                          << vcap << " -> remapped to UNK. Tokenizer vocab "
+                          << tokenizer->vocab_size()
+                          << " should be rebuilt to match the model cap." << std::endl;
+            } else {
+                std::cout << "[VOCAB] all token ids within model vocab (" << vcap << ")" << std::endl;
+            }
+        }
+
         // Initialize model
         std::cout << "\nInitializing transformer..." << std::endl;
         Transformer transformer(model_config, tokenizer);
@@ -949,6 +1273,7 @@ int main(int argc, char** argv) {
         // Resume from checkpoint if specified
         size_t start_step = 0;
         size_t start_epoch = 0;
+        float resume_expected_loss = -1.0f;
         if (!train_config.resume_checkpoint.empty()) {
             std::cout << "\n========================================" << std::endl;
             std::cout << "Resuming from checkpoint: " << train_config.resume_checkpoint << std::endl;
@@ -970,6 +1295,9 @@ int main(int argc, char** argv) {
                         if (checkpoint_meta.contains("epoch")) {
                             start_epoch = checkpoint_meta["epoch"].get<size_t>();
                         }
+                        if (checkpoint_meta.contains("loss")) {
+                            resume_expected_loss = checkpoint_meta["loss"].get<float>();
+                        }
                         std::cout << "Checkpoint metadata: epoch=" << start_epoch << " step=" << start_step << std::endl;
                     } catch (...) {
                         std::cerr << "Warning: Could not parse checkpoint metadata" << std::endl;
@@ -986,10 +1314,150 @@ int main(int argc, char** argv) {
                 // resume crashes with "Tokenizer not set in MultiHeadAttention"
                 // (found 2026-07-12 when reclaim-resume first exercised this path).
                 transformer.set_tokenizer(tokenizer);
+
+                // RESUME PROBE: measure the restored model before training a
+                // single step. Two Colab runs (2026-07-17) exported degraded
+                // models after a reclaim-resume that formally "succeeded" but
+                // scored far above the checkpoint's recorded loss. Whatever
+                // the remaining cause, refuse to train a restore that does
+                // not reproduce its own saved loss — fall back to scratch
+                // (loudly) so the run still yields a usable model, and the
+                // probe verdict localizes the bug (probe pass + later decay
+                // = training-side; probe fail = restore-side).
+                if (resume_expected_loss > 0.0f && !train_data.empty()) {
+                    transformer.set_training(false);
+                    const size_t kProbeSeqs = 8;
+                    double probe_sum = 0.0;
+                    size_t probe_cnt = 0;
+                    for (size_t s = 0; s < std::min(kProbeSeqs, train_data.size()); ++s) {
+                        const auto& toks = train_data[s];
+                        if (toks.size() < 2) continue;
+                        TransformerOutput out = transformer.forward(toks, "resume_probe", *tokenizer);
+                        size_t rows = out.logits.rows();
+                        size_t vs = out.logits.cols();
+                        for (size_t t = 1; t < toks.size() && t - 1 < rows; ++t) {
+                            int target = toks[t];
+                            if (target == 0 || static_cast<size_t>(target) >= vs) continue;
+                            float mx = -std::numeric_limits<float>::infinity();
+                            for (size_t v = 0; v < vs; ++v) mx = std::max(mx, out.logits(t - 1, v));
+                            float se = 0.0f;
+                            for (size_t v = 0; v < vs; ++v) se += std::exp(out.logits(t - 1, v) - mx);
+                            probe_sum += -(out.logits(t - 1, target) - mx - std::log(se + 1e-10f));
+                            probe_cnt++;
+                        }
+                    }
+                    float probe_loss = probe_cnt > 0
+                        ? static_cast<float>(probe_sum / probe_cnt) : -1.0f;
+                    // Same sequences through the BATCHED forward (the path
+                    // training optimizes): a batched-vs-single split on the
+                    // same weights localizes the train!=deploy divergence to
+                    // the forward implementations rather than the weights.
+                    double bp_sum = 0.0; size_t bp_cnt = 0;
+                    {
+                        std::vector<std::vector<int>> bx;
+                        for (size_t s = 0; s < std::min<size_t>(4, train_data.size()); ++s)
+                            bx.push_back(train_data[s]);
+                        size_t bsl = train_config.max_seq_len;
+                        TransformerOutput bo = transformer.forward_batch(bx, bsl);
+                        if (bo.logits.rows() == bx.size() * bsl) {
+                            size_t bv = bo.logits.cols();
+                            for (size_t s = 0; s < bx.size(); ++s) {
+                                const auto& xt = bx[s];
+                                for (size_t t = 1; t < xt.size() && t - 1 < bsl; ++t) {
+                                    int tg = xt[t];
+                                    if (tg == 0 || static_cast<size_t>(tg) >= bv) continue;
+                                    size_t row = s * bsl + (t - 1);
+                                    float mx = -std::numeric_limits<float>::infinity();
+                                    for (size_t v = 0; v < bv; ++v) mx = std::max(mx, bo.logits(row, v));
+                                    float se = 0.0f;
+                                    for (size_t v = 0; v < bv; ++v) se += std::exp(bo.logits(row, v) - mx);
+                                    bp_sum += -(bo.logits(row, tg) - mx - std::log(se + 1e-10f));
+                                    bp_cnt++;
+                                }
+                            }
+                        }
+                    }
+                    std::cout << "[RESUME PROBE] measured=" << probe_loss
+                              << " batched=" << (bp_cnt ? bp_sum / bp_cnt : -1.0)
+                              << " checkpoint-recorded=" << resume_expected_loss
+                              << " (" << probe_cnt << " positions)" << std::endl;
+                    // Same deterministic activation trace as the save block —
+                    // diff against the VM's [TRACE] line for the same ckpt.
+                    {
+                        std::vector<int> trace_in;
+                        for (int ti = 2; ti < 130; ++ti) trace_in.push_back(ti);
+                        TransformerOutput to_ = transformer.forward(trace_in, "trace", *tokenizer);
+                        std::ostringstream tr;
+                        tr << std::setprecision(8);
+                        size_t lr_ = to_.logits.rows();
+                        if (lr_ > 0) {
+                            for (int k = 0; k < 6; ++k) tr << to_.logits(lr_ - 1, k) << " ";
+                            double l2 = 0.0;
+                            for (size_t v = 0; v < to_.logits.cols(); ++v) {
+                                double z = to_.logits(lr_ - 1, v);
+                                l2 += z * z;
+                            }
+                            tr << "| logitsL2=" << std::sqrt(l2);
+                        }
+                        std::cout << "[TRACE] resume " << tr.str() << std::endl;
+                        {
+                            std::vector<std::vector<int>> b1{trace_in};
+                            TransformerOutput b1o = transformer.forward_batch(b1, trace_in.size());
+                            std::ostringstream tb;
+                            tb << std::setprecision(8);
+                            size_t br = b1o.logits.rows();
+                            if (br > 0) {
+                                for (int k = 0; k < 6; ++k) tb << b1o.logits(br - 1, k) << " ";
+                                double l2 = 0.0;
+                                for (size_t v = 0; v < b1o.logits.cols(); ++v) {
+                                    double z = b1o.logits(br - 1, v);
+                                    l2 += z * z;
+                                }
+                                tb << "| logitsL2=" << std::sqrt(l2) << " | layerL2:";
+                                for (const auto& act : transformer.get_layer_activations()) {
+                                    double a2 = 0.0;
+                                    for (size_t i = 0; i < act.rows(); ++i)
+                                        for (size_t j = 0; j < act.cols(); ++j)
+                                            a2 += double(act(i, j)) * act(i, j);
+                                    tb << " " << std::sqrt(a2);
+                                }
+                            }
+                            std::cout << "[TRACE-B1] resume " << tb.str() << std::endl;
+                        }
+                    }
+                    // Judge via the BATCHED measurement: single-seq forward
+                    // routes through the fused no-RoPE kernel on CUDA builds
+                    // (a function neither training nor deployment uses) and
+                    // false-alarms on good restores (reads ~10 on a 6.5
+                    // model). forward_batched is the trained function.
+                    float probe_decision = bp_cnt > 0
+                        ? static_cast<float>(bp_sum / bp_cnt) : probe_loss;
+                    if (std::getenv("TCPP_FORCE_RESUME") != nullptr) {
+                        std::cout << "[RESUME PROBE] TCPP_FORCE_RESUME set — keeping restore regardless of probe." << std::endl;
+                    } else if (probe_decision > resume_expected_loss + 2.0f) {
+                        std::cerr << "\n[RESUME PROBE] RESTORED MODEL DOES NOT MATCH ITS CHECKPOINT "
+                                  << "(measured " << probe_loss << " vs recorded "
+                                  << resume_expected_loss << "). Discarding the restore and "
+                                  << "training from scratch instead of training a corrupt model."
+                                  << std::endl;
+                        transformer.initialize_weights();
+                        transformer.set_tokenizer(tokenizer);
+                        if (transformer.get_lm_head()) {
+                            transformer.get_lm_head()->invalidate_device_weights();
+                        }
+                        start_step = 0;
+                        start_epoch = 0;
+                    }
+                }
             } else {
-                std::cerr << "WARNING: Failed to load checkpoint, starting from scratch" << std::endl;
-                start_step = 0;
-                start_epoch = 0;
+                // A failed restore must be fatal: silently "starting from
+                // scratch" burned a full Colab run on 2026-07-17 (the resumed
+                // lane retrained from init at the cosine-floor LR and
+                // exported a degraded model). The caller asked to resume;
+                // give it a checkpoint that loads, or no --resume.
+                std::cerr << "FATAL: --resume given but checkpoint failed to load: "
+                          << train_config.resume_checkpoint << std::endl;
+                return 1;
             }
         }
         

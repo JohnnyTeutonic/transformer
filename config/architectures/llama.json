@@ -1,0 +1,6 @@
+{
+    "architecture": {
+        "family": "llama"
+    },
+    "export": { "format": "gguf", "path": "model" }
+}

@@ -4,9 +4,14 @@
 
 namespace cuda {
 
+// Targets equal to this id (PAD/<unk> in the word-level vocab) are excluded
+// from the loss and receive a zero gradient row. This also masks the phantom
+// last-position-per-row target left at 0 by the trainer's target fill.
+constexpr int LOSS_IGNORE_INDEX = 0;
+
 /**
  * Fused softmax + cross-entropy loss computation on GPU.
- * Computes: loss = -sum(log(softmax(logits)[target])) / num_positions
+ * Computes: loss = -sum over non-ignored targets / count(non-ignored)
  * 
  * @param logits Input logits [num_positions x vocab_size] (device memory)
  * @param targets Target token indices [num_positions] (device memory)
@@ -151,6 +156,13 @@ float compute_loss_from_device_logits(
  * Safe to call multiple times.
  */
 void cleanup_loss_resources();
+
+/**
+ * Number of non-ignored target positions in the last loss computation.
+ * Used to normalize the LM head gradient consistently with the loss mean.
+ * 0 until the first loss call.
+ */
+int get_last_valid_count();
 
 /**
  * Get the device pointer to the gradient computed by the last loss call.

@@ -44,6 +44,17 @@ void TokenEmbedding::forward_cuda(const std::vector<int>& tokens, Matrix& output
     int hidden_size = get_embedding_dim();
     const Matrix& embedding_table = get_embedding_table();
 
+    // The device gather is unchecked: an out-of-range id reads OOB GPU memory
+    // as its embedding vector with no error. Fail loudly on the host instead.
+    const int vocab_rows = static_cast<int>(embedding_table.rows());
+    for (int t : tokens) {
+        if (t < 0 || t >= vocab_rows) {
+            throw std::runtime_error("TokenEmbedding::forward_cuda: token id " +
+                std::to_string(t) + " out of range [0, " +
+                std::to_string(vocab_rows) + ")");
+        }
+    }
+
     // Allocate device memory
     int* d_tokens;
     float *d_embedding_table, *d_output;

@@ -194,21 +194,33 @@ Matrix LayerNorm::compute_gradients(const Matrix& grad_output) {
 }
 
 void LayerNorm::save(std::ostream& os) const {
-    // Write hidden_size first (load() expects this)
+    // Write hidden_size first (load() expects this), then the norm's
+    // FUNCTION parameters. eps and rms_mode were not serialized before
+    // 2026-07-18: load() rebuilt every norm as mean-subtracting LayerNorm
+    // (ctor default rms_=false) while llama-family models train under
+    // RMSNorm — every checkpoint restore silently swapped the normalizer
+    // and the restored model scored ~2x its recorded loss.
     os.write(reinterpret_cast<const char*>(&hidden_size_), sizeof(hidden_size_));
+    os.write(reinterpret_cast<const char*>(&eps_), sizeof(eps_));
+    uint8_t rms_byte = rms_mode_ ? 1 : 0;
+    os.write(reinterpret_cast<const char*>(&rms_byte), sizeof(rms_byte));
     os.write(reinterpret_cast<const char*>(params_.gamma.data()), hidden_size_ * sizeof(float));
     os.write(reinterpret_cast<const char*>(params_.beta.data()), hidden_size_ * sizeof(float));
 }
 
 std::unique_ptr<LayerNorm> LayerNorm::load(std::istream& is) {
     size_t hidden_size;
+    float eps;
+    uint8_t rms_byte;
     is.read(reinterpret_cast<char*>(&hidden_size), sizeof(hidden_size));
-    
-    auto ln = std::make_unique<LayerNorm>(hidden_size);
-    
+    is.read(reinterpret_cast<char*>(&eps), sizeof(eps));
+    is.read(reinterpret_cast<char*>(&rms_byte), sizeof(rms_byte));
+
+    auto ln = std::make_unique<LayerNorm>(hidden_size, eps, rms_byte != 0);
+
     // Read parameters
     is.read(reinterpret_cast<char*>(ln->params_.gamma.data()), hidden_size * sizeof(float));
     is.read(reinterpret_cast<char*>(ln->params_.beta.data()), hidden_size * sizeof(float));
-    
+
     return ln;
 }

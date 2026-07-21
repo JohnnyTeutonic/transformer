@@ -1,0 +1,6 @@
+{
+    "architecture": {
+        "family": "vanilla"
+    },
+    "export": { "format": "safetensors", "path": "model" }
+}

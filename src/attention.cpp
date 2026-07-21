@@ -535,6 +535,12 @@ Matrix MultiHeadAttention::forward_batched(const Matrix& input, const AttentionM
     
 #ifdef USE_CUDA
     // Call CUDA batched attention
+    // ⚠️ KNOWN ISSUE (2026-07-19, see README): the CUDA training path
+    // produces weights that score ~2x worse under the CPU/engine forward
+    // than under this path (6.4 vs 12.5 CE on the same weights). The
+    // divergent sub-op is not yet identified — every kernel here reads
+    // correct in isolation. GPU-trained exports are NOT deployable until
+    // CUDA-vs-CPU forward parity is demonstrated on a fixed input.
     cuda::batched_attention_forward(
         Q.data(),
         K.data(),

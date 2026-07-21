@@ -468,6 +468,12 @@ void LanguageModelHead::sync_weights_from_device() {
 #endif
 }
 
+void LanguageModelHead::invalidate_device_weights() {
+#if defined(USE_CUDA) && defined(CUDA_AVAILABLE)
+    cuda::lmhead_invalidate_weights();
+#endif
+}
+
 void LanguageModelHead::bias_completion_format(Matrix& logits) {
     if (!tokenizer) {
         return;  // Skip biasing if tokenizer is not set

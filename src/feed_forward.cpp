@@ -410,6 +410,16 @@ void FeedForward::update_parameters(float learning_rate) {
     grads_.up_proj_bias_grad.initialize_constant(0.0f);
     grads_.down_proj_grad.initialize_constant(0.0f);
     grads_.down_proj_bias_grad.initialize_constant(0.0f);
+
+#ifdef USE_CUDA
+    // ROOT CAUSE OF THE 2026-07 "mushy GPU models" saga: forward() caches
+    // the weights on the GPU once (if (!params_gpu_)) and never re-uploads,
+    // so every forward after step 1 used the FROZEN INITIAL FFN while these
+    // host weights drifted under Adam updates whose effects never reached
+    // the loss. Invalidate the device copy after every host update so the
+    // next forward re-uploads the weights that were actually trained.
+    params_gpu_.reset();
+#endif
 }
 
 void FeedForward::initialize_weights() {

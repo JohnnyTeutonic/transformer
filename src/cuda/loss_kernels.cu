@@ -17,6 +17,7 @@ struct LossKernelMemory {
     float* d_losses = nullptr;
     float* d_loss = nullptr;
     float* d_grad_output = nullptr;
+    int* d_valid_count = nullptr;
     size_t allocated_positions = 0;
     size_t allocated_vocab = 0;
     
@@ -32,6 +33,9 @@ struct LossKernelMemory {
             CUDA_CHECK(cudaMalloc(&d_losses, needed_positions * sizeof(float)));
             CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
             CUDA_CHECK(cudaMalloc(&d_grad_output, needed_positions * needed_vocab * sizeof(float)));
+            if (!d_valid_count) {
+                CUDA_CHECK(cudaMalloc(&d_valid_count, sizeof(int)));
+            }
             
             allocated_positions = needed_positions;
             allocated_vocab = needed_vocab;
@@ -44,6 +48,7 @@ struct LossKernelMemory {
         if (d_losses) { cudaFree(d_losses); d_losses = nullptr; }
         if (d_loss) { cudaFree(d_loss); d_loss = nullptr; }
         if (d_grad_output) { cudaFree(d_grad_output); d_grad_output = nullptr; }
+        if (d_valid_count) { cudaFree(d_valid_count); d_valid_count = nullptr; }
         allocated_positions = 0;
         allocated_vocab = 0;
     }
@@ -52,6 +57,11 @@ struct LossKernelMemory {
 };
 
 static LossKernelMemory g_loss_memory;
+
+// Non-ignored positions in the last loss computation (host copy of
+// d_valid_count). Lets lmhead_backward_device normalize the weight gradient
+// by the same count the loss mean used.
+static int g_last_valid_count = 0;
 
 // ============================================================================
 // KERNEL: Fused softmax + cross-entropy + gradient computation
@@ -63,23 +73,36 @@ __global__ void softmax_cross_entropy_grad_kernel(
     float* losses,            // [num_positions] - per-position losses
     float* grad_output,       // [num_positions x vocab_size] - gradient output
     int num_positions,
-    int vocab_size
+    int vocab_size,
+    int ignore_index,         // targets equal to this contribute no loss/grad
+    int* valid_count          // incremented once per non-ignored position
 ) {
     int pos = blockIdx.x;
     if (pos >= num_positions) return;
-    
+
     // Shared memory for reduction
     extern __shared__ float shared[];
     float* shared_max = shared;
     float* shared_sum = shared + blockDim.x;
-    
+
     int tid = threadIdx.x;
     int target = targets[pos];
-    
+
     // Base pointers
     const float* pos_logits = logits + pos * vocab_size;
     float* pos_grad = grad_output + pos * vocab_size;
-    
+
+    // Ignored position: zero gradient row, zero loss, no count.
+    if (target == ignore_index) {
+        for (int v = tid; v < vocab_size; v += blockDim.x) {
+            pos_grad[v] = 0.0f;
+        }
+        if (tid == 0) {
+            losses[pos] = 0.0f;
+        }
+        return;
+    }
+
     // ========== STEP 1: Find max logit (for numerical stability) ==========
     float local_max = -1e30f;
     for (int v = tid; v < vocab_size; v += blockDim.x) {
@@ -127,6 +150,7 @@ __global__ void softmax_cross_entropy_grad_kernel(
     if (tid == 0) {
         float log_prob = pos_logits[target] - max_logit - logf(sum_exp + 1e-10f);
         losses[pos] = -log_prob;
+        atomicAdd(valid_count, 1);
     }
 }
 
@@ -136,28 +160,31 @@ __global__ void softmax_cross_entropy_grad_kernel(
 __global__ void reduce_losses_kernel(
     const float* losses,
     float* total_loss,
-    int num_positions
+    int num_positions,
+    const int* valid_count    // divisor: non-ignored positions (>=1 enforced)
 ) {
     extern __shared__ float shared[];
-    
+
     int tid = threadIdx.x;
     float local_sum = 0.0f;
-    
+
     for (int i = tid; i < num_positions; i += blockDim.x) {
         local_sum += losses[i];
     }
     shared[tid] = local_sum;
     __syncthreads();
-    
+
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             shared[tid] += shared[tid + stride];
         }
         __syncthreads();
     }
-    
+
     if (tid == 0) {
-        *total_loss = shared[0] / num_positions;
+        int denom = *valid_count;
+        if (denom < 1) denom = 1;
+        *total_loss = shared[0] / denom;
     }
 }
 
@@ -177,14 +204,17 @@ void fused_softmax_cross_entropy(
     int block_size = 256;
     int shared_mem = 2 * block_size * sizeof(float);
     
+    CUDA_CHECK(cudaMemsetAsync(g_loss_memory.d_valid_count, 0, sizeof(int), stream));
     softmax_cross_entropy_grad_kernel<<<num_positions, block_size, shared_mem, stream>>>(
         d_logits, d_targets, g_loss_memory.d_losses, g_loss_memory.d_grad_output,
-        num_positions, vocab_size
+        num_positions, vocab_size,
+        LOSS_IGNORE_INDEX, g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
-    
+
     reduce_losses_kernel<<<1, 256, 256 * sizeof(float), stream>>>(
-        g_loss_memory.d_losses, d_loss, num_positions
+        g_loss_memory.d_losses, d_loss, num_positions,
+        g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
 }
@@ -211,17 +241,22 @@ float compute_cross_entropy_loss_cuda(
     int block_size = 256;
     int shared_mem = 2 * block_size * sizeof(float);
     
+    CUDA_CHECK(cudaMemset(g_loss_memory.d_valid_count, 0, sizeof(int)));
     softmax_cross_entropy_grad_kernel<<<num_positions, block_size, shared_mem, 0>>>(
         g_loss_memory.d_logits, g_loss_memory.d_targets,
         g_loss_memory.d_losses, g_loss_memory.d_grad_output,
-        num_positions, vocab_size
+        num_positions, vocab_size,
+        LOSS_IGNORE_INDEX, g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
     
     reduce_losses_kernel<<<1, 256, 256 * sizeof(float), 0>>>(
-        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions
+        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions,
+        g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(&g_last_valid_count, g_loss_memory.d_valid_count,
+                          sizeof(int), cudaMemcpyDeviceToHost));
     
     // Copy loss back
     float h_loss;
@@ -253,17 +288,22 @@ float compute_cross_entropy_loss_and_grad_cuda(
     int block_size = 256;
     int shared_mem = 2 * block_size * sizeof(float);
     
+    CUDA_CHECK(cudaMemset(g_loss_memory.d_valid_count, 0, sizeof(int)));
     softmax_cross_entropy_grad_kernel<<<num_positions, block_size, shared_mem, 0>>>(
         g_loss_memory.d_logits, g_loss_memory.d_targets,
         g_loss_memory.d_losses, g_loss_memory.d_grad_output,
-        num_positions, vocab_size
+        num_positions, vocab_size,
+        LOSS_IGNORE_INDEX, g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
     
     reduce_losses_kernel<<<1, 256, 256 * sizeof(float), 0>>>(
-        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions
+        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions,
+        g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(&g_last_valid_count, g_loss_memory.d_valid_count,
+                          sizeof(int), cudaMemcpyDeviceToHost));
     
     // Copy results back
     float h_loss;
@@ -295,17 +335,22 @@ float compute_cross_entropy_loss_keep_grad_on_device(
     int block_size = 256;
     int shared_mem = 2 * block_size * sizeof(float);
     
+    CUDA_CHECK(cudaMemset(g_loss_memory.d_valid_count, 0, sizeof(int)));
     softmax_cross_entropy_grad_kernel<<<num_positions, block_size, shared_mem, 0>>>(
         g_loss_memory.d_logits, g_loss_memory.d_targets,
         g_loss_memory.d_losses, g_loss_memory.d_grad_output,
-        num_positions, vocab_size
+        num_positions, vocab_size,
+        LOSS_IGNORE_INDEX, g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
     
     reduce_losses_kernel<<<1, 256, 256 * sizeof(float), 0>>>(
-        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions
+        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions,
+        g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(&g_last_valid_count, g_loss_memory.d_valid_count,
+                          sizeof(int), cudaMemcpyDeviceToHost));
     
     // Only copy loss back (4 bytes), NOT gradient (655MB)!
     float h_loss;
@@ -313,6 +358,10 @@ float compute_cross_entropy_loss_keep_grad_on_device(
     
     // Gradient stays on device at g_loss_memory.d_grad_output
     return h_loss;
+}
+
+int get_last_valid_count() {
+    return g_last_valid_count;
 }
 
 // Get device pointer to gradient (valid until next loss computation)
@@ -544,9 +593,12 @@ void lmhead_backward_device(
     CUDA_CHECK(cudaMemcpy(h_grad_hidden_out, g_d_grad_hidden,
                           grad_hidden_elems * sizeof(float), cudaMemcpyDeviceToHost));
 
-    // grad_proj = (1/num_positions) * hidden^T @ grad_logits   (averaged over batch)
-    // Column-major: GP_cm[V x H] = grad_logits_cm @ hidden_cm^T, stored as row-major [H x V].
-    const float grad_scale = 1.0f / static_cast<float>(num_positions);
+    // grad_proj = (1/valid) * hidden^T @ grad_logits   (averaged over batch).
+    // Ignored positions carry a zero gradient row, so normalize by the
+    // non-ignored count from the preceding loss computation (falls back to
+    // num_positions if no loss has been computed this step).
+    const int valid = (g_last_valid_count > 0) ? g_last_valid_count : num_positions;
+    const float grad_scale = 1.0f / static_cast<float>(valid);
     cublasStatus_t s2 = cublasSgemm(handle,
         CUBLAS_OP_N, CUBLAS_OP_T,
         vocab_size, hidden_size, num_positions,
@@ -602,17 +654,22 @@ float compute_loss_from_device_logits(
     int block_size = 256;
     int shared_mem = 2 * block_size * sizeof(float);
 
+    CUDA_CHECK(cudaMemset(g_loss_memory.d_valid_count, 0, sizeof(int)));
     softmax_cross_entropy_grad_kernel<<<num_positions, block_size, shared_mem, 0>>>(
         g_loss_memory.d_logits, g_loss_memory.d_targets,
         g_loss_memory.d_losses, g_loss_memory.d_grad_output,
-        num_positions, vocab_size
+        num_positions, vocab_size,
+        LOSS_IGNORE_INDEX, g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
 
     reduce_losses_kernel<<<1, 256, 256 * sizeof(float), 0>>>(
-        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions
+        g_loss_memory.d_losses, g_loss_memory.d_loss, num_positions,
+        g_loss_memory.d_valid_count
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(&g_last_valid_count, g_loss_memory.d_valid_count,
+                          sizeof(int), cudaMemcpyDeviceToHost));
 
     float h_loss;
     CUDA_CHECK(cudaMemcpy(&h_loss, g_loss_memory.d_loss, sizeof(float), cudaMemcpyDeviceToHost));
