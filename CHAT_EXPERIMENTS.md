@@ -17,7 +17,24 @@ repetition-hunger of binding) and future scaling work.
 | micro-bind | 2L/128h, CPU | 1.5k TinyChat pairs, 60 epochs | ppl 1.4 | PERFECT 6/6 dialogue-act binding (greedy) |
 | chat8b @1.3ep | 4L/256h/seq256 | 150k TinyChat (doc-aligned) | loss 0.35 | partial binding 4/6; extended to ~4 epochs |
 | chat8b @3ep | 4L/256h/seq256 | 150k TinyChat x3 (doc-aligned) | loss 0.35; gen eval below | intent-wise binding; bound intents GENERALISE |
-| chat8a/8c | — | in flight / done | — | repetition test / mix test (8c confounded, see F5) |
+| chat8a @18k | 4L/256h/seq256 | Instruct aggregated, ~1.5 epochs | loss ~2.8-3.0 | fluent; ZERO conditioning (dragon test failed) |
+| chat8c | 4L/256h/seq256 | tinychatmix 8000 steps | loss 4.28 | mix dilutes binding — CONFOUNDED by F5 |
+
+## chat8a dragon test (2026-07-21, greedy, raw prompt) — repetition test CLOSED
+
+18,000 steps (~1.5 epochs over 2.28M aggregated instruct examples):
+"words: dragon , dark , brave story:" and summary-conditioning probes all
+produce fluent stories that ignore the fields; greedy collapses to one
+corpus-head opening ("once upon a time, there was a little girl named
+lily..."). vs chat7b at 0.2 epochs: same zero conditioning, better
+fluency. CONCLUSION (with Finding 1): epochs alone cannot rescue
+conditioning when the pattern inventory itself is combinatorial — the
+words: field draws from thousands of combinations, so 1.5 or even 10
+epochs of the corpus is <<1 exposure per pattern. Binding budgets must
+count exposures per semantic equivalence class (Jonathan's framing),
+and the instruct corpus has ~none. TinyChat's inventory is small enough
+to repeat; that is WHY 8b binds. (OOV caveat F5 applies to 8a's tail
+words but probe words are high-frequency; the conclusion stands.)
 
 ## chat8b generalisation eval (2026-07-21, greedy, raw prompt, engine rebuilt)
 
