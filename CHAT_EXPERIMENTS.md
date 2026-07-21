@@ -200,6 +200,12 @@ Bisection state (2026-07-22, in progress):
   the same disease class as the fictional FFN biases. NEXT: diff
   trainer-CPU attention matvec semantics against the CUDA attention
   kernel's, starting at v_proj/o_proj.
+- VOID RESULT, do not reuse: a ckpt-vs-VM GGUF tensor diff run overnight
+  showed "39/39 tensors differ" — meaningless, because train_wikitext
+  --max-steps 0 means UNLIMITED (the "export-only" run trained ~6 CPU-hours
+  through the broken CPU forward before exporting). The proper
+  ckpt->GGUF fidelity leg is a golden_batch_test --export-gguf flag that
+  calls the exporter directly with no training loop (TODO).
 
 En route the suite also (1) PASSED save->reload->forward bit-identity
 (after fixing the test to set_training(false) — dropout was live at
