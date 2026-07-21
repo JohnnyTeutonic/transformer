@@ -49,6 +49,8 @@ ap.add_argument("--seq-len", type=int, default=None,
                 help="context length in tokens (default 128; 256 for chat)")
 ap.add_argument("--doc-aligned", action="store_true",
                 help="bin-pack whole documents into windows (dialogue/instruct)")
+ap.add_argument("--assistant-loss", action="store_true",
+                help="mask loss on user-turn tokens and role markers")
 ap.add_argument("--dataset", choices=["plain", "instruct", "dailydialog",
                                       "empathetic", "dialogmix", "tinychat",
                                       "tinychatmix", "dolly"],
@@ -113,6 +115,7 @@ sh(f"cd {run_dir} && ../build/train_wikitext ../{data_dir} "
    + ("--mid " if a.mid else "")
    + (f"--seq-len {a.seq_len} " if a.seq_len else "")
    + ("--doc-aligned " if a.doc_aligned else "")
+   + ("--assistant-loss " if a.assistant_loss else "")
    + resume + " ".join(exports))
 
 print("COLAB_TRAIN_COMPLETE", flush=True)
