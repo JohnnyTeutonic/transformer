@@ -34,4 +34,18 @@ bool export_to_safetensors(
     const std::string& output_path,
     const SafetensorsExportConfig& config = SafetensorsExportConfig());
 
+// HuggingFace-compatible export: writes <out_dir>/model.safetensors with HF
+// LlamaForCausalLM tensor names, <out_dir>/config.json (LlamaConfig), and a
+// vocab sidecar. Crucially, applies the RoPE weight PERMUTE to q_proj/k_proj:
+// this codebase (like llama.cpp/GGUF) rotates ADJACENT dimension pairs
+// ("interleaved"), while HF Transformers rotates split halves ("rotate_half")
+// and stores Q/K permuted so the two agree. Without the permute an HF load
+// runs but produces garbage — the classic undocumented safetensors<->GGUF
+// RoPE gotcha. out_dir is created if absent.
+bool export_to_hf(
+    const Transformer& transformer,
+    const TiktokenTokenizer& tokenizer,
+    const std::string& out_dir,
+    const SafetensorsExportConfig& config = SafetensorsExportConfig());
+
 }  // namespace safetensors_export

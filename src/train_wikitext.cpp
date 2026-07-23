@@ -110,6 +110,7 @@ struct TrainingConfig {
                                        // answer loss through attention.
     std::string export_gguf = ""; // After training, export the model to this GGUF path
     std::string export_safetensors = ""; // After training, export the model to this safetensors path
+    std::string export_hf = ""; // After training, export a HuggingFace LlamaForCausalLM dir (RoPE-permuted)
     std::string config_json = ""; // Optional transformer_config.json overriding model defaults
     std::string family = "llama"; // Architecture family preset (llama | vanilla)
     bool cosine_decay = false;   // Cosine LR decay to 10% over max_steps (after
@@ -1017,6 +1018,8 @@ int main(int argc, char** argv) {
                 train_config.export_gguf = argv[++i];
             } else if (arg == "--export-safetensors" && i + 1 < argc) {
                 train_config.export_safetensors = argv[++i];
+            } else if (arg == "--export-hf" && i + 1 < argc) {
+                train_config.export_hf = argv[++i];
             } else if (arg == "--config" && i + 1 < argc) {
                 train_config.config_json = argv[++i];
             } else if (arg == "--family" && i + 1 < argc) {
@@ -1524,6 +1527,24 @@ int main(int argc, char** argv) {
                           << train_config.export_safetensors << std::endl;
             } else {
                 std::cerr << "Safetensors export FAILED" << std::endl;
+            }
+        }
+
+        // Export a HuggingFace LlamaForCausalLM directory (RoPE-permuted Q/K +
+        // config.json), loadable via AutoModelForCausalLM.from_pretrained.
+        if (!train_config.export_hf.empty()) {
+            std::cout << "\nExporting HuggingFace model dir: "
+                      << train_config.export_hf << std::endl;
+#ifdef USE_CUDA
+            transformer.get_lm_head()->sync_weights_from_device();
+#endif
+            safetensors_export::SafetensorsExportConfig hf_cfg;
+            hf_cfg.model_name = "transformer_cpp_lm";
+            if (safetensors_export::export_to_hf(
+                    transformer, *tokenizer, train_config.export_hf, hf_cfg)) {
+                std::cout << "HF export complete: " << train_config.export_hf << std::endl;
+            } else {
+                std::cerr << "HF export FAILED" << std::endl;
             }
         }
 
