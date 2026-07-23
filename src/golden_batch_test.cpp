@@ -32,6 +32,7 @@
 #include "../include/transformer.hpp"
 #include "../include/model_saver.hpp"
 #include "../include/tiktoken_tokenizer.hpp"
+#include "../include/architecture.hpp"
 
 namespace {
 
@@ -65,6 +66,16 @@ TransformerConfig make_config(const Args& a, size_t tok_vocab) {
     }
     c.max_seq_length = a.seq_len;
     c.head_dim = c.hidden_size / c.num_heads;
+    // CRITICAL: the format-3 checkpoint does NOT serialize the architecture
+    // primitives (use_rope, use_rms_norm, use_biases), so a fresh config
+    // reconstructed here must apply the SAME family preset training used, or
+    // the CPU forward silently uses the wrong architecture (additive
+    // sinusoidal PE instead of RoPE, LayerNorm instead of RMSNorm, live
+    // biases) and diverges ~5x from the exported model. The mid/tiny chat
+    // models are the "llama" family (RMSNorm + RoPE + SwiGLU + no biases).
+    arch::ArchitectureSpec spec = arch::ArchitectureSpec::from_family("llama");
+    spec.apply(c);
+    transformer_runtime::llama_no_bias = !c.use_biases;
     return c;
 }
 

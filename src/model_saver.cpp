@@ -239,6 +239,16 @@ bool ModelSaver::saveCheckpoint(const Transformer& transformer, const std::strin
             {"head_dim", config.head_dim},
             {"intermediate_size", config.intermediate_size},
             {"max_seq_length", config.max_seq_length},
+            // Architecture primitives (added 2026-07-23): without these the
+            // norm/positional/bias scheme is not recoverable from the
+            // checkpoint, so a config reconstructed elsewhere (e.g. a test
+            // harness or an external resume) silently used additive PE +
+            // LayerNorm + live biases and diverged ~5x from the RoPE/RMSNorm/
+            // bias-free model it actually was. Same bug class as the format-3
+            // LayerNorm eps/rms fix above.
+            {"use_rope", config.use_rope},
+            {"use_rms_norm", config.use_rms_norm},
+            {"use_biases", config.use_biases},
         };
 
         std::string meta_str = checkpoint_meta.dump();

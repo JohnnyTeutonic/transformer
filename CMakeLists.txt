@@ -258,6 +258,10 @@ add_executable(golden_batch_test src/golden_batch_test.cpp)
 target_link_libraries(golden_batch_test PRIVATE transformer_core)
 target_include_directories(golden_batch_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+add_executable(matmul_selftest src/matmul_selftest.cpp)
+target_link_libraries(matmul_selftest PRIVATE transformer_core)
+target_include_directories(matmul_selftest PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 message(STATUS "")
 message(STATUS "================================")
 if(CUDA_ENABLED)

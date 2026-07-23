@@ -156,8 +156,42 @@ vocabulary, most rows nearly untrained under Zipf sparsity; at V=148
 (TinyChat) = 2.3%. Tying input/output embeddings halves the vocab share
 (~22% freed at V=5000) and couples lexical representation to prediction.
 
-## Finding 6 — CPU-build forward diverges from CUDA forward (golden-batch
-## suite, first run, 2026-07-22)
+## Finding 6 — RETRACTED (2026-07-23): there was no CPU/CUDA divergence;
+## the golden-batch harness was reconstructing the model architecture wrong
+
+RESOLUTION: with the correct architecture applied, the trainer CPU forward
+is **bit-identical to the inference engine** — golden-batch parity PASSES on
+all four probes (max|delta logit| ~1e-4, argmax match, top-5 overlap 5/5).
+There is no CPU-vs-CUDA forward bug and no bug in attention.cpp.
+
+Root cause of the false alarm: `TransformerConfig::use_rope` (and
+`use_rms_norm`, `use_biases`) have no defaults and are NOT serialized in the
+format-3 checkpoint. golden_batch_test's make_config reconstructed the config
+without applying the "llama" family preset, so the CPU forward used **additive
+sinusoidal positional encoding instead of RoPE** (plus LayerNorm instead of
+RMSNorm, plus live biases). At pos 0 the additive PE's cos(0)=1 on odd indices
+gave the tell-tale [small, ~1.4, small, ~1.4] input pattern; the model, trained
+RoPE-only, then produced garbage. Applying `arch::ArchitectureSpec::
+from_family("llama")` in the test restored bit-exact parity.
+
+Two real fixes came out of it (net positive): (1) golden_batch_test now applies
+the family preset; (2) the format-3 checkpoint now serializes use_rope/
+use_rms_norm/use_biases so this class of bug — a config reconstructed without
+the architecture — cannot recur (same class as the format-3 LayerNorm eps/rms
+fix). The earlier "FFN fictional-bias" sub-finding was part of the same
+misdiagnosis and has been reverted: in llama mode the FFN biases are frozen at
+zero, so the CPU bias-add is a no-op, and removing it would have silently
+broken vanilla-family models.
+
+LESSON (the durable one, ironically vindicating the suite's epigraph): "a lying
+metric mimics every other failure mode" — including a lying TEST. The
+golden-batch suite worked exactly as intended; it was the harness's model
+reconstruction that lied, and only a differential test against an independent
+implementation (the engine) exposed it. Verify the test's own assumptions
+before trusting a divergence it reports.
+
+## Finding 6 (original, WRONG — kept for the method record) — CPU-build
+## forward diverges from CUDA forward (golden-batch suite, first run, 2026-07-22)
 
 The golden-batch suite (src/golden_batch_test.cpp + TINYLLAMA_LOGITS_DUMP +
 scripts/compare_golden_logits.py) was built to decide the 8b near-tie

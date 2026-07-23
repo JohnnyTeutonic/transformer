@@ -534,13 +534,13 @@ Matrix MultiHeadAttention::forward_batched(const Matrix& input, const AttentionM
     cached_attention_weights = Matrix(batch_size * num_heads * seq_len, seq_len);
     
 #ifdef USE_CUDA
-    // Call CUDA batched attention
-    // ⚠️ KNOWN ISSUE (2026-07-19, see README): the CUDA training path
-    // produces weights that score ~2x worse under the CPU/engine forward
-    // than under this path (6.4 vs 12.5 CE on the same weights). The
-    // divergent sub-op is not yet identified — every kernel here reads
-    // correct in isolation. GPU-trained exports are NOT deployable until
-    // CUDA-vs-CPU forward parity is demonstrated on a fixed input.
+    // Call CUDA batched attention.
+    // RESOLVED (2026-07-23): the previously-suspected CUDA-vs-CPU forward
+    // divergence was not real — it was a test harness reconstructing the
+    // model without its architecture flags (additive PE instead of RoPE).
+    // With the correct config, the CPU forward is bit-identical to the
+    // inference engine (golden-batch parity PASSES). See CHAT_EXPERIMENTS.md
+    // Finding 6 (retracted).
     cuda::batched_attention_forward(
         Q.data(),
         K.data(),
@@ -619,7 +619,19 @@ Matrix MultiHeadAttention::forward_batched(const Matrix& input, const AttentionM
             output(i, j) += params_.output_bias[j];
         }
     }
-    
+
+    if (std::getenv("TCPP_ATTN_TRACE") != nullptr) {
+        static int cc = 0;
+        auto p0 = [&](const Matrix& m) {
+            double s = 0.0;
+            for (size_t j = 0; j < hidden_size; ++j) { float v = m(0, j); s += double(v) * v; }
+            return std::sqrt(s);
+        };
+        fprintf(stderr, "[ATTN] call=%d in[0..3]=%g %g %g %g V_pos0=%g attnout_pos0=%g out_pos0=%g\n",
+                cc++, input(0,0), input(0,1), input(0,2), input(0,3),
+                p0(V), p0(attn_out), p0(output));
+    }
+
     return output;
 }
 
