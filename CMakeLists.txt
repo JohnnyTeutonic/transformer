@@ -262,6 +262,9 @@ add_executable(matmul_selftest src/matmul_selftest.cpp)
 target_link_libraries(matmul_selftest PRIVATE transformer_core)
 target_include_directories(matmul_selftest PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# Gate-2 brick: order-invariant (reproducible) summation. Standalone, no deps.
+add_executable(repro_sum_demo src/repro_sum_demo.cpp)
+
 message(STATUS "")
 message(STATUS "================================")
 if(CUDA_ENABLED)
