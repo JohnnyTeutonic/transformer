@@ -265,6 +265,9 @@ target_include_directories(matmul_selftest PRIVATE ${CMAKE_SOURCE_DIR}/include)
 # Gate-2 brick: order-invariant (reproducible) summation. Standalone, no deps.
 add_executable(repro_sum_demo src/repro_sum_demo.cpp)
 
+# Proof-of-learning challenge-response: honest-vs-lying-node trust demo. No deps.
+add_executable(pol_demo src/pol_demo.cpp)
+
 message(STATUS "")
 message(STATUS "================================")
 if(CUDA_ENABLED)
