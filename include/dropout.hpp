@@ -1,5 +1,6 @@
 #pragma once
 #include "matrix.hpp"
+#include "rng_seed.hpp"
 #include <random>
 
 /**
@@ -16,7 +17,7 @@ class Dropout {
   private:
     float dropout_prob;
     Matrix dropout_mask;
-    std::mt19937 gen{std::random_device{}()};
+    std::mt19937 gen{tcpp_seed_source()};
     bool training = true;
 
   public:
