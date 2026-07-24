@@ -268,6 +268,13 @@ add_executable(repro_sum_demo src/repro_sum_demo.cpp)
 # Proof-of-learning challenge-response: honest-vs-lying-node trust demo. No deps.
 add_executable(pol_demo src/pol_demo.cpp)
 
+# Gate-2 brick: thread-count-invariant reproducible reduction.
+add_executable(repro_reduce_demo src/repro_reduce_demo.cpp)
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(repro_reduce_demo PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
 message(STATUS "")
 message(STATUS "================================")
 if(CUDA_ENABLED)
