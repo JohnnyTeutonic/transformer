@@ -36,3 +36,7 @@ train_ts_*.log
 tinystories_prep.log
 scripts/debugging.log
 build_wsl/
+
+# stray runtime logs
+gradient_diagnostics.log
+training_metrics.log
