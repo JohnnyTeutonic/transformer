@@ -1,4 +1,5 @@
 #include "../include/layer_norm.hpp"
+#include <vector>
 #ifdef USE_CUDA
 #include "../include/cuda/matrix_ops.cuh"
 #endif
@@ -113,28 +114,37 @@ Matrix LayerNorm::compute_gradients(const Matrix& grad_output) {
             // dx_j = r * (gamma_j * g_j - x_j * r^2 / d * sum_k(g_k * gamma_k * x_k))
             // dgamma_j = sum_rows(g_j * x_j * r) / batch
             const int d = static_cast<int>(input_cache_.cols());
+            const int R = static_cast<int>(input_cache_.rows());
+            // Per-row inv_rms and coef (parallel over rows; no shared write).
+            std::vector<float> inv_rms(R), coef(R);
             #pragma omp parallel for
-            for (int i = 0; i < static_cast<int>(input_cache_.rows()); i++) {
+            for (int i = 0; i < R; i++) {
                 float sum_sq = 0.0f;
-                for (int j = 0; j < d; j++) {
-                    sum_sq += input_cache_(i, j) * input_cache_(i, j);
-                }
-                float inv_rms = 1.0f / std::sqrt(sum_sq / d + eps_);
-
+                for (int j = 0; j < d; j++) sum_sq += input_cache_(i, j) * input_cache_(i, j);
+                float ir = 1.0f / std::sqrt(sum_sq / d + eps_);
                 float dot = 0.0f;  // sum_k g_k * gamma_k * x_k
-                for (int j = 0; j < d; j++) {
-                    dot += grad_output(i, j) * params_.gamma(0, j) * input_cache_(i, j);
-                }
-                float coef = dot * inv_rms * inv_rms * inv_rms / d;
-
-                for (int j = 0; j < d; j++) {
-                    grad_input(i, j) =
-                        inv_rms * params_.gamma(0, j) * grad_output(i, j)
-                        - input_cache_(i, j) * coef;
-                    #pragma omp atomic
-                    grads_.gamma_grad(0, j) +=
-                        grad_output(i, j) * input_cache_(i, j) * inv_rms * grad_scale;
-                }
+                for (int j = 0; j < d; j++) dot += grad_output(i, j) * params_.gamma(0, j) * input_cache_(i, j);
+                inv_rms[i] = ir;
+                coef[i] = dot * ir * ir * ir / d;
+            }
+            // grad_input (parallel over rows; per-element, no shared write).
+            #pragma omp parallel for
+            for (int i = 0; i < R; i++)
+                for (int j = 0; j < d; j++)
+                    grad_input(i, j) = inv_rms[i] * params_.gamma(0, j) * grad_output(i, j)
+                                       - input_cache_(i, j) * coef[i];
+            // gamma_grad: parallelize over COLUMNS and sum over rows in FIXED order.
+            // Was `#pragma omp atomic grad(0,j) +=` inside a rows-parallel loop --
+            // atomic prevents corruption but NOT order, so concurrent adds landed in
+            // scheduling-dependent order and float non-associativity made the result
+            // vary run-to-run (the multi-thread training race, 2026-07-24). One thread
+            // per column, fixed row order -> race-free and thread-count-deterministic.
+            #pragma omp parallel for
+            for (int j = 0; j < d; j++) {
+                double g = 0.0;
+                for (int i = 0; i < R; i++)
+                    g += static_cast<double>(grad_output(i, j)) * input_cache_(i, j) * inv_rms[i] * grad_scale;
+                grads_.gamma_grad(0, j) += static_cast<float>(g);
             }
             return grad_input;
         }
@@ -164,22 +174,28 @@ Matrix LayerNorm::compute_gradients(const Matrix& grad_output) {
             var(i, 0) = sum_sq / input_cache_.cols();
         }
 
-        // Compute gradients (MSVC: collapse ignored, loop vars must be signed int)
-        #pragma omp parallel for collapse(2)
+        // grad_input (parallel over rows; per-element, no shared write).
+        #pragma omp parallel for
         for (int i = 0; i < static_cast<int>(input_cache_.rows()); i++) {
-            for (int j = 0; j < static_cast<int>(input_cache_.cols()); j++) {
+            float inv_std = 1.0f / std::sqrt(var(i, 0) + eps_);
+            for (int j = 0; j < static_cast<int>(input_cache_.cols()); j++)
+                grad_input(i, j) = params_.gamma(0, j) * grad_output(i, j) * inv_std;
+        }
+        // gamma/beta grad: parallelize over COLUMNS, sum over rows in FIXED order.
+        // Same fix as the RMSNorm branch: the old `#pragma omp atomic +=` prevented
+        // corruption but not order, so float non-associativity made the result vary
+        // run-to-run. One thread per column, fixed row order -> deterministic.
+        #pragma omp parallel for
+        for (int j = 0; j < static_cast<int>(input_cache_.cols()); j++) {
+            double gg = 0.0, bg = 0.0;
+            for (int i = 0; i < static_cast<int>(input_cache_.rows()); i++) {
                 float inv_std = 1.0f / std::sqrt(var(i, 0) + eps_);
                 float normalized = (input_cache_(i, j) - mean(i, 0)) * inv_std;
-                
-                // Gradient with respect to input
-                grad_input(i, j) = params_.gamma(0, j) * grad_output(i, j) * inv_std;
-                
-                // Accumulate gradients for gamma and beta (normalized by batch size)
-                #pragma omp atomic
-                grads_.gamma_grad(0, j) += grad_output(i, j) * normalized * grad_scale;
-                #pragma omp atomic
-                grads_.beta_grad(0, j) += grad_output(i, j) * grad_scale;
+                gg += static_cast<double>(grad_output(i, j)) * normalized * grad_scale;
+                bg += static_cast<double>(grad_output(i, j)) * grad_scale;
             }
+            grads_.gamma_grad(0, j) += static_cast<float>(gg);
+            grads_.beta_grad(0, j) += static_cast<float>(bg);
         }
 
         // Log gradient stats (only to file, not stdout)

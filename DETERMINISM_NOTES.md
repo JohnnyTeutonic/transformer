@@ -19,25 +19,28 @@ weight update, so different thread counts gave different states. Replaced 4
 sites with `repro_sumsq` (`include/repro_reduce.hpp`, serial compensated). This
 removed the *thread-order* component of the divergence.
 
-## KNOWN BUG — multi-thread CPU training has a DATA RACE (open)
-After the grad_norm fix, `OMP_NUM_THREADS=4` still produces **different results
-on repeated runs of the identical command** (measured: `35e174..`, `2ce6e1..`,
-`e9d820..` across three runs), while `OMP_NUM_THREADS=1` is rock-stable. Three
-distinct outcomes run-to-run at fixed thread count is a **race**, not
-float-reduction order (which would be stable per thread count). It affects the
-committed model state, so multi-threaded CPU training is non-reproducible and
-possibly subtly wrong.
+## Multi-thread CPU training DATA RACE — FOUND and FIXED (2026-07-24)
+After the grad_norm fix, `OMP_NUM_THREADS=4` still gave **different results on
+repeated runs of the identical command** (`35e174`, `2ce6e1`, `e9d820`), while
+1-thread was rock-stable — the signature of a race, not reduction order.
 
-Narrowed (ruled out): `matmul_optimized_parallel` (per-block, race-free),
-`Matrix::column_sum` (serial), the four grad_norm sites (now serial), FFN
-backward (matmul + serial bias sum). Prime remaining suspect: a shared
-accumulation in the attention backward weight/bias-gradient path, or a shared
-cache written by parallel threads. NOT YET PINPOINTED.
+Root cause: **LayerNorm/RMSNorm backward** (`layer_norm.cpp`) accumulated the
+gamma/beta gradients with `#pragma omp atomic grads_.gamma_grad(0,j) += ...`
+inside a rows-parallel loop. The atomic prevents corruption but NOT ordering:
+concurrent adds to the same column landed in thread-scheduling order, and float
+addition is non-associative, so the summed gradient varied run-to-run. Since
+norm gradients update gamma/beta on every layer, this made the whole committed
+state non-deterministic under multithreading.
 
-Impact: the deployed chat models were trained on CUDA, not this CPU path, so
-model quality is not implicated. But CPU multi-thread training is
-non-deterministic and this is a real correctness bug to fix (find the unguarded
-shared write; add `reduction`/atomic or per-thread partials + fixed combine).
+Fix: compute gamma/beta gradients by parallelizing over COLUMNS and summing
+over rows in a fixed order (one thread per column, no atomics), in double.
+grad_input stays rows-parallel (per-element, race-free). Both branches (RMSNorm
++ classic LayerNorm) fixed.
+
+Verified: three `OMP_NUM_THREADS=4` runs now all give `35e174..`, identical to
+the 1-thread result — **fully thread-count-invariant and deterministic
+run-to-run**, loss unchanged (9.57). The trainer is now reproducible at any
+thread count, not just single-threaded.
 
 ## Resolution for PoL, and the real remaining frontier
 The PoL protocol does not need thread-invariance: mandate **single-threaded
