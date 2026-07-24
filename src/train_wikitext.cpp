@@ -82,6 +82,8 @@ struct TrainingConfig {
     std::string data_path = "../data/wikitext-103-txt";
     std::string output_dir = "checkpoints";
     std::string resume_checkpoint = "";  // Path to checkpoint to resume from
+    std::string pol_save = "";  // proof-of-learning: force a resumable ckpt to this dir
+                                // after training (commitment = payload_fnv64 in its meta)
 #ifdef USE_CUDA
     size_t batch_size = 64;  // Using fused CUDA attention kernel
     bool use_fp16 = true;    // GPU: use FP16 mixed precision for 2x throughput
@@ -1020,6 +1022,10 @@ int main(int argc, char** argv) {
                 train_config.export_safetensors = argv[++i];
             } else if (arg == "--export-hf" && i + 1 < argc) {
                 train_config.export_hf = argv[++i];
+            } else if (arg == "--output-dir" && i + 1 < argc) {
+                train_config.output_dir = argv[++i];
+            } else if (arg == "--pol-save" && i + 1 < argc) {
+                train_config.pol_save = argv[++i];
             } else if (arg == "--config" && i + 1 < argc) {
                 train_config.config_json = argv[++i];
             } else if (arg == "--family" && i + 1 < argc) {
@@ -1484,6 +1490,20 @@ int main(int argc, char** argv) {
             if (model_config.export_format == "safetensors" || model_config.export_format == "both") {
                 train_config.export_safetensors = with_ext(model_config.export_path, ".safetensors");
             }
+        }
+
+        // Proof-of-learning: force a resumable checkpoint of the final state to
+        // a known dir. Its metadata carries payload_fnv64 = the state
+        // commitment (timestamp-independent, unlike the raw file bytes). A
+        // verifier resumes from the prior state, re-runs the committed step
+        // with the committed seed, and checks this hash reproduces.
+        if (!train_config.pol_save.empty()) {
+            ModelSaver pol_saver;
+            if (pol_saver.saveCheckpoint(transformer, train_config.pol_save, "pol", 0, 0.0f, 0))
+                std::cout << "[POL] chain state saved to " << train_config.pol_save
+                          << "/pol_checkpoint_0.ckpt" << std::endl;
+            else
+                std::cerr << "[POL] save FAILED" << std::endl;
         }
 
         // Export to GGUF for tinyllama.cpp inference
