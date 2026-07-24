@@ -1,4 +1,5 @@
 #include "../include/transformer.hpp"
+#include "../include/repro_reduce.hpp"
 #include "../include/scope_logger.hpp"
 #ifdef USE_CUDA
 #include "../include/cuda/cublas_check.cuh"
@@ -1473,15 +1474,11 @@ void update_parameter_with_clip(Matrix& param, const Matrix& grad, float learnin
     const float weight_decay = config.weight_decay;
     const float max_relative_change = 0.1f;  // Reduced back to 10% for stability
     
-    // Calculate gradient norm (MSVC: loop vars must be signed int)
-    float grad_norm = 0.0f;
-    #pragma omp parallel for reduction(+:grad_norm)
-    for (int i = 0; i < static_cast<int>(grad.rows()); ++i) {
-        for (int j = 0; j < static_cast<int>(grad.cols()); ++j) {
-            grad_norm += grad(i, j) * grad(i, j);
-        }
-    }
-    grad_norm = std::sqrt(grad_norm);
+    // Gradient norm via a deterministic (thread-count-invariant) reduction so
+    // the clip scaling below — and thus the weight update — reproduces
+    // regardless of thread count (gate-2; see repro_reduce.hpp). grad is
+    // contiguous row-major.
+    float grad_norm = std::sqrt(repro_sumsq(grad.data(), grad.rows() * grad.cols()));
     
     // Apply gradient clipping with smooth transition
     float scaling_factor = 1.0f;
@@ -1522,13 +1519,8 @@ void update_parameter_with_clip(Vector& param, const Vector& grad, float learnin
     const float clip_threshold = config.gradient_clip_threshold;
     const float weight_decay = config.weight_decay;
     
-    float grad_norm = 0.0f;
-    // MSVC: loop vars must be signed int
-    #pragma omp parallel for reduction(+:grad_norm)
-    for (int i = 0; i < static_cast<int>(grad.size()); ++i) {
-        grad_norm += grad[i] * grad[i];
-    }
-    grad_norm = std::sqrt(grad_norm);
+    // Deterministic grad_norm (gate-2, thread-count-invariant); see repro_reduce.hpp.
+    float grad_norm = std::sqrt(repro_sumsq(grad.data(), grad.size()));
     
     // Apply adaptive clipping with a softer threshold
     float scaling_factor = 1.0f;

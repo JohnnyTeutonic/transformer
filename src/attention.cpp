@@ -1,4 +1,5 @@
 #include "../include/attention.hpp"
+#include "../include/repro_reduce.hpp"
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -696,13 +697,9 @@ Matrix MultiHeadAttention::backward(const Matrix& grad_output, const Matrix& inp
             throw std::runtime_error("MultiHeadAttention::backward called without cached_attn_output - forward() must be called first!");
         }
         
-        // Compute gradient norm for clipping
-        float grad_norm = 0.0f;
-        #pragma omp parallel for reduction(+:grad_norm)
-        for (int i = 0; i < static_cast<int>(grad_output.size()); i++) {
-            grad_norm += grad_output.data()[i] * grad_output.data()[i];
-        }
-        grad_norm = std::sqrt(grad_norm);
+        // Deterministic gradient norm for clipping (gate-2, thread-count-invariant);
+        // see repro_reduce.hpp.
+        float grad_norm = std::sqrt(repro_sumsq(grad_output.data(), grad_output.size()));
         
         // Proper gradient clipping (no sqrt - direct scaling)
         float scale = (grad_norm > clip_threshold) ? (clip_threshold / (grad_norm + eps)) : 1.0f;
@@ -1132,15 +1129,8 @@ void MultiHeadAttention::initialize_weights() {
 }
 
 float compute_grad_norm(const Matrix& grad) {
-    float norm = 0.0f;
-    // MSVC: loop vars must be signed int
-    #pragma omp parallel for reduction(+:norm)
-    for (int i = 0; i < static_cast<int>(grad.rows()); ++i) {
-        for (int j = 0; j < static_cast<int>(grad.cols()); ++j) {
-            norm += grad(i, j) * grad(i, j);
-        }
-    }
-    return std::sqrt(norm);
+    // Deterministic (thread-count-invariant) grad norm (gate-2); see repro_reduce.hpp.
+    return std::sqrt(repro_sumsq(grad.data(), grad.rows() * grad.cols()));
 }
 
 size_t count_params(const Matrix& param) {
